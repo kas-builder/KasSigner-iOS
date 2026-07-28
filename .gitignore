@@ -1,0 +1,54 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# Xcode build output
+DerivedData/
+build/
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.xcarchive
+
+# Swift Package Manager local state
+.build/
+.swiftpm/
+Package.resolved
+
+# Playgrounds
+playground.xcworkspace
+
+# Temporary and backup files
+*~
+*.swp
+*.swo
+*.tmp
+*.bak
+*.backup
+*.orig
+*.rej
+*.before-*
+
+# Environment and local configuration
+.env
+.env.*
+!.env.example
+
+# Signing and certificate material
+*.cer
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# Logs
+*.log

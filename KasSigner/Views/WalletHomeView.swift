@@ -1,0 +1,388 @@
+import SwiftUI
+
+struct WalletHomeView: View {
+    @State private var showingSendFlow = false
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @State private var showingAddWallet = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if let profile = walletStore.selectedProfile {
+                    walletContent(profile)
+                } else {
+                    ContentUnavailableView {
+                        Label("No Account", systemImage: "wallet.pass")
+                    } description: {
+                        Text("Import the public wallet data exported by KasSigner. Private keys remain on the M5 device.")
+                    } actions: {
+                        Button("Add KasSigner Account") { showingAddWallet = true }
+                            .buttonStyle(.borderedProminent)
+                    }
+                }
+            }
+            .navigationTitle("KasSigner")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { showingAddWallet = true } label: {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .sheet(isPresented: $showingAddWallet) {
+                AddWalletView()
+            }
+        }
+    }
+
+    private func walletContent(_ profile: WalletProfile) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 5) {
+                        Text(profile.name)
+                            .font(.headline)
+
+                        Spacer()
+                    }
+
+                    Text(balanceText)
+                        .font(.system(size: 42, weight: .semibold, design: .rounded))
+                        .contentTransition(.numericText())
+                    Text(walletHomeReceiveAddress(for: profile))
+                        .font(.footnote.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                HStack(spacing: 10) {
+                    NavigationLink {
+                        ReceiveView(profile: profile)
+                    } label: {
+                        compactActionLabel("Receive", systemImage: "arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    NavigationLink(isActive: $showingSendFlow) {
+                        SendUTXOSelectionView(
+                            profile: profile,
+                            clearSelectionOnAppear: true,
+                            showingSendFlow: $showingSendFlow
+                        )
+                    } label: {
+                        compactActionLabel("Send", systemImage: "arrow.up")
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                if let snapshot = syncService.snapshot {
+                    VStack(alignment: .leading, spacing: 12) {
+                        LabeledContent("UTXOs", value: "\(snapshot.balance.utxoCount)")
+                        TimelineView(.periodic(from: .now, by: 9)) { context in
+                            LabeledContent("Last refreshed", value: relativeAge(from: snapshot.syncedAt, now: context.date))
+                        }
+                    }
+                    .padding()
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                } else if syncService.state == .syncing {
+                    HStack(spacing: 8) {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.orange)
+
+                        Text("Connecting...")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.orange)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+            .padding()
+        }    }
+
+    private func walletHomeReceiveAddress(for profile: WalletProfile) -> String {
+        guard !profile.receiveAddresses.isEmpty else {
+            return "No receive address"
+        }
+
+        let index = walletStore.lastViewedReceiveIndex(
+            for: profile.id,
+            addressCount: profile.receiveAddresses.count
+        )
+
+        return profile.receiveAddresses[index]
+    }
+
+    private var balanceText: String {
+        if let balance = syncService.snapshot?.balance.totalKas {
+            return balance.formatted(.number.precision(.fractionLength(0...8))) + " KAS"
+        }
+
+        return ""
+    }
+
+    private func refreshSelectedWallet(force: Bool) async {
+        guard let profile = walletStore.selectedProfile else { return }
+        if !force, syncService.snapshot != nil { return }
+        await syncService.refresh(
+            profile: profile,
+            engine: engine,
+            preferences: preferences,
+            force: true
+        )
+    }
+
+    private func compactActionLabel(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.headline)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+    }
+
+    private func relativeAge(from timestamp: TimeInterval, now: Date) -> String {
+        let elapsed = max(0, Int(now.timeIntervalSince1970 - timestamp))
+        if elapsed < 60 { return "\(elapsed) sec ago" }
+        let minutes = elapsed / 60
+        if minutes < 60 { return "\(minutes) min ago" }
+        let hours = minutes / 60
+        return "\(hours) hr ago"
+    }
+}
+
+
+struct SendUTXOSelectionView: View {
+    let profile: WalletProfile
+    let clearSelectionOnAppear: Bool
+    @Binding var showingSendFlow: Bool
+
+    @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        Group {
+            if utxos.isEmpty {
+                ContentUnavailableView(
+                    "No Spendable UTXOs",
+                    systemImage: "square.stack.3d.up.slash",
+                    description: Text("Refresh the wallet before creating a transaction.")
+                )
+            } else {
+                VStack(spacing: 0) {
+                    selectionHeader
+                        .padding(.horizontal, 14)
+                        .padding(.top, 8)
+                        .padding(.bottom, 10)
+                        .background(Color(.systemGroupedBackground))
+
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(utxos) { utxo in
+                                sendUTXOCard(utxo)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.bottom, 20)
+                    }
+                    .background(Color(.systemGroupedBackground))
+
+                    NavigationLink {
+                        SendDestinationView(
+                            profile: profile,
+                            selectedUTXOs: selectedUTXOs,
+                            showingSendFlow: $showingSendFlow
+                        )
+                    } label: {
+                        Text(selectedUTXOs.count == 1 ? "Choose UTXO" : "Choose UTXOs")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedUTXOs.isEmpty)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial)
+                }
+            }
+        }
+        .navigationTitle("Select UTXOs")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
+        .onAppear {
+            coinControlStore.activate(profileID: profile.id)
+            if clearSelectionOnAppear {
+                coinControlStore.clearSelection()
+            }
+        }
+    }
+
+    private var utxos: [WalletUTXO] {
+        (syncService.snapshot?.utxos ?? []).sorted {
+            if $0.blockDAAScore != $1.blockDAAScore {
+                return $0.blockDAAScore > $1.blockDAAScore
+            }
+            if $0.txID != $1.txID {
+                return $0.txID < $1.txID
+            }
+            return $0.index < $1.index
+        }
+    }
+
+    private var selectedUTXOs: [WalletUTXO] {
+        coinControlStore.selectedUTXOs(from: utxos)
+    }
+
+    private var selectedTotalSompi: UInt64 {
+        selectedUTXOs.reduce(0) { $0 + $1.amount }
+    }
+
+    private var selectionHeader: some View {
+        VStack(spacing: 11) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Selected")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("\(selectedUTXOs.count) UTXO\(selectedUTXOs.count == 1 ? "" : "s")")
+                        .font(.system(size: 16, weight: .semibold))
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("Input total")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(formatKas(sompi: selectedTotalSompi))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button(selectedUTXOs.count == utxos.count ? "Clear All" : "Choose All UTXOs") {
+                    if selectedUTXOs.count == utxos.count {
+                        coinControlStore.clearSelection()
+                    } else {
+                        coinControlStore.selectAll(utxos)
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.bordered)
+
+                if !selectedUTXOs.isEmpty && selectedUTXOs.count != utxos.count {
+                    Button("Clear") {
+                        coinControlStore.clearSelection()
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .buttonStyle(.bordered)
+                }
+
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 13)
+        .padding(.vertical, 11)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+    }
+
+    private func sendUTXOCard(_ utxo: WalletUTXO) -> some View {
+        let selected = coinControlStore.isSelected(utxo)
+        let label = coinControlStore.label(for: utxo)
+
+        return Button {
+            coinControlStore.toggle(utxo)
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 12) {
+                    Text(formatKas(sompi: utxo.amount))
+                        .font(.body.weight(.regular).monospacedDigit())
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
+                    Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(
+                            utxo.blockDAAScore > 0
+                                ? Color(red: 0.18, green: 0.68, blue: 0.62)
+                                : Color.orange
+                        )
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Transaction ID")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Text(utxo.txID)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                Divider()
+
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    Text("Label")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 72, alignment: .leading)
+
+                    if !label.isEmpty {
+                        Text(label)
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(
+                        selected ? accentColor.opacity(0.78) : Color.primary.opacity(0.05),
+                        lineWidth: selected ? 1.65 : 1
+                    )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func formatKas(sompi: UInt64) -> String {
+        let whole = sompi / 100_000_000
+        let fractional = sompi % 100_000_000
+
+        guard fractional != 0 else {
+            return "\(whole) KAS"
+        }
+
+        let fractionalText = String(format: "%08llu", fractional)
+            .replacingOccurrences(
+                of: "0+$",
+                with: "",
+                options: .regularExpression
+            )
+
+        return "\(whole).\(fractionalText) KAS"
+    }
+}

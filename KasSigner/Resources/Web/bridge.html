@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KasSigner Engine</title>
+</head>
+<body>
+<script type="module">
+  const post = (payload) => {
+    window.webkit?.messageHandlers?.kaspi?.postMessage(payload);
+  };
+
+  // Public resolver pool from the upstream KasSigner/KasSee implementation.
+  // These are infrastructure endpoints only; operator names are intentionally
+  // not exposed in the iOS interface.
+  const resolvers = [
+    "https://maxim.kaspa.stream",
+    "https://troy.kaspa.stream",
+    "https://sean.kaspa.stream",
+    "https://eric.kaspa.stream",
+    "https://jake.kaspa.green",
+    "https://mark.kaspa.green",
+    "https://adam.kaspa.green",
+    "https://liam.kaspa.green",
+    "https://noah.kaspa.blue",
+    "https://ryan.kaspa.blue",
+    "https://jack.kaspa.blue",
+    "https://luke.kaspa.blue",
+    "https://john.kaspa.red",
+    "https://mike.kaspa.red",
+    "https://paul.kaspa.red",
+    "https://alex.kaspa.red"
+  ];
+
+  function normalizeCustomNode(value) {
+    const trimmed = String(value ?? "").trim();
+    if (!trimmed) throw new Error("Enter a custom wss:// node URL.");
+    if (!/^wss?:\/\//i.test(trimmed)) {
+      throw new Error("Custom nodes must begin with wss:// or ws://.");
+    }
+    return trimmed;
+  }
+
+  async function queryResolver(baseURL) {
+    const response = await fetch(
+      `${baseURL}/v2/kaspa/mainnet/any/wrpc/borsh`,
+      { signal: AbortSignal.timeout(5000) }
+    );
+    if (!response.ok) throw new Error(`Public node service returned ${response.status}.`);
+    const body = await response.json();
+    if (!body?.url) throw new Error("Public node service returned no node URL.");
+    return { nodeURL: body.url, resolverName: "Automatic public node" };
+  }
+
+  let retainedNode = null;
+  let retainedNodeKey = null;
+
+  async function resolveNode(config = {}) {
+    const nodeKey = config.mode === "custom"
+      ? `custom:${normalizeCustomNode(config.customURL)}`
+      : "automatic";
+
+    if (retainedNode && retainedNodeKey === nodeKey) {
+      return retainedNode;
+    }
+
+    if (config.mode === "custom") {
+      retainedNode = {
+        nodeURL: normalizeCustomNode(config.customURL),
+        resolverName: "Custom node"
+      };
+      retainedNodeKey = nodeKey;
+      return retainedNode;
+    }
+
+    const shuffled = [...resolvers].sort(() => Math.random() - 0.5);
+    let lastError = null;
+    for (const url of shuffled) {
+      try {
+        retainedNode = await queryResolver(url);
+        retainedNodeKey = nodeKey;
+        return retainedNode;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError ?? new Error("No public Kaspa node could be resolved.");
+  }
+
+  window.addEventListener("error", (event) => {
+    post({ event: "error", message: `JavaScript error: ${event.message}` });
+  });
+
+  window.addEventListener("unhandledrejection", (event) => {
+    post({ event: "error", message: `KasSigner promise failed: ${String(event.reason)}` });
+  });
+
+  try {
+    post({ event: "status", message: "Loading KasSigner module…" });
+    const module = await import("./pkg/kassee_web.js");
+
+    post({ event: "status", message: "Loading KasSigner engine…" });
+    const wasmResponse = await fetch(
+      new URL("./pkg/kassee_web_bg.wasm", import.meta.url)
+    );
+    const wasmBytes = await wasmResponse.arrayBuffer();
+    await module.default({ module_or_path: wasmBytes });
+
+    let liveNodeURL = "";
+    let liveAddresses = [];
+    let liveSubscriptionConfirmed = false;
+    let reconnectInFlight = false;
+
+    function readSessionStatus() {
+      try {
+        return JSON.parse(module.rpc_session_status());
+      } catch {
+        return null;
+      }
+    }
+
+    function sessionIsReusableFor(nodeURL) {
+      const status = readSessionStatus();
+      return (
+        status?.active === true &&
+        status?.wsUrl === nodeURL &&
+        (status?.state === "open" || status?.state === "connecting")
+      );
+    }
+
+    async function ensureLiveSubscription() {
+      if (!liveNodeURL || liveAddresses.length === 0 || reconnectInFlight) {
+        return;
+      }
+
+      const reusable = sessionIsReusableFor(liveNodeURL);
+      if (reusable && liveSubscriptionConfirmed) {
+        return;
+      }
+
+      reconnectInFlight = true;
+      liveSubscriptionConfirmed = false;
+
+      try {
+        if (!reusable) {
+          module.start_rpc_session(liveNodeURL);
+        }
+
+        await module.rpc_session_subscribe_utxos_changed(
+          liveNodeURL,
+          JSON.stringify(liveAddresses)
+        );
+        liveSubscriptionConfirmed = true;
+      } catch (error) {
+        console.warn("RPC reconnect/resubscribe failed.");
+      } finally {
+        reconnectInFlight = false;
+      }
+    }
+
+    setInterval(() => {
+      try {
+        const count = module.rpc_session_notification_count();
+        if (count > 0) {
+          const notifications = JSON.parse(
+            module.rpc_session_take_notifications()
+          );
+
+          post({
+            event: "rpc_notifications",
+            notifications
+          });
+        }
+      } catch (error) {
+        console.warn("RPC notification polling failed.");
+      }
+    }, 250);
+
+    setInterval(() => {
+      void ensureLiveSubscription();
+    }, 1000);
+
+    window.kaspi = {
+      importKpub(payload) {
+        if (!payload || typeof payload.kpub !== "string") {
+          throw new Error("A KasSigner kpub is required.");
+        }
+        return module.import_kpub(payload.kpub.trim(), "mainnet");
+      },
+
+      extendAddresses(wallet, receiveCount, changeCount) {
+        return module.extend_addresses(
+          JSON.stringify(wallet),
+          Number(receiveCount),
+          Number(changeCount),
+          "mainnet"
+        );
+      },
+
+      validateAddress(address) {
+        return JSON.parse(
+          module.validate_kaspa_address(
+            String(address).trim()
+          )
+        );
+      },
+
+      async buildUnsignedPSKB(
+        wallet,
+        destination,
+        amountSompi,
+        feeSompi,
+        utxosJSON,
+        nodeConfig
+      ) {
+        const resolved = await resolveNode(nodeConfig);
+
+        return await module.create_send_pskb_with_utxos(
+          JSON.stringify(wallet),
+          String(destination),
+          BigInt(String(amountSompi)),
+          BigInt(String(feeSompi)),
+          String(utxosJSON),
+          String(resolved.nodeURL)
+        );
+      },
+
+      summarizePSKB(wireHex) {
+        const summaryJSON = module.pskt_summary(
+          String(wireHex),
+          "mainnet"
+        );
+
+        return String(summaryJSON);
+      },
+
+      relayPSKBToKSPT(wireHex) {
+        return module.pskt_relay_to_kspt_v2(
+          String(wireHex)
+        );
+      },
+
+      mergeSignedKSPTIntoPSKB(signedKSPTHex, originalPSKBHex) {
+        return module.pskt_merge_signed_kspt_v2(
+          String(signedKSPTHex),
+          String(originalPSKBHex)
+        );
+      },
+
+
+      broadcastSignedKSPT(signedKSPTHex, wsURL) {
+        return module.broadcast_signed(
+          String(signedKSPTHex),
+          String(wsURL)
+        );
+      },
+
+
+      generateQRFrames(wireHex) {
+        const raw = module.generate_qr_frames(String(wireHex));
+
+        if (typeof raw === "string") {
+          return raw;
+        }
+
+        return JSON.stringify(raw);
+      },
+
+      decodeQRFrame(frameHex) {
+        try {
+          const payload = module.decode_qr_frame(String(frameHex));
+
+          return JSON.stringify({
+            complete:
+              typeof payload === "string" &&
+              payload.trim().length > 0,
+            payload:
+              typeof payload === "string"
+                ? payload
+                : null
+          });
+        } catch (e) {
+          return JSON.stringify({
+            complete: false,
+            jsError: String(e)
+          });
+        }
+      },
+
+      decoderProgress() {
+        return JSON.parse(
+          module.decoder_progress()
+        );
+      },
+
+      resetQRDecoder() {
+        module.reset_qr_decoder();
+      },
+
+      async getFeeEstimate(nodeConfig) {
+        const resolved = await resolveNode(nodeConfig);
+
+        const nodeURL = String(resolved.nodeURL ?? "");
+        if (!nodeURL) {
+          throw new Error("Resolved Kaspa node URL is empty.");
+        }
+
+        return await module.get_fee_estimate(nodeURL);
+      },
+
+      async syncWallet(wallet, nodeConfig) {
+        const resolved = await resolveNode(nodeConfig);
+
+        const nodeURL = String(resolved.nodeURL ?? "");
+        if (!nodeURL) {
+          throw new Error("Resolved Kaspa node URL is empty.");
+        }
+
+        if (!sessionIsReusableFor(nodeURL)) {
+          module.start_rpc_session(nodeURL);
+        }
+
+        const walletJSON = JSON.stringify(wallet);
+        const [balanceJSON, utxosJSON] = await Promise.all([
+          module.fetch_balance(walletJSON, nodeURL),
+          module.fetch_utxos(walletJSON, nodeURL)
+        ]);
+
+        const addresses = [
+          ...(Array.isArray(wallet.receive_addresses) ? wallet.receive_addresses : []),
+          ...(Array.isArray(wallet.change_addresses) ? wallet.change_addresses : [])
+        ];
+
+        const uniqueAddresses = [
+          ...new Set(addresses.map(address => String(address)).filter(Boolean))
+        ];
+
+        liveNodeURL = nodeURL;
+        liveAddresses = uniqueAddresses;
+        liveSubscriptionConfirmed = false;
+
+        if (liveAddresses.length > 0) {
+          try {
+            await module.rpc_session_subscribe_utxos_changed(
+              liveNodeURL,
+              JSON.stringify(liveAddresses)
+            );
+            liveSubscriptionConfirmed = true;
+          } catch (error) {
+            console.warn(
+              "Initial UTXO live subscription failed; automatic retry remains active."
+            );
+          }
+        }
+
+        return JSON.stringify({
+          balance: JSON.parse(balanceJSON),
+          utxos: JSON.parse(utxosJSON),
+          node_url: resolved.nodeURL,
+          resolver_name: resolved.resolverName,
+          synced_at: Date.now() / 1000
+        });
+      }
+    };
+
+    post({ event: "ready" });
+  } catch (error) {
+    post({
+      event: "error",
+      message: `KasSigner failed: ${String(error?.stack ?? error?.message ?? error)}`
+    });
+  }
+</script>
+</body>
+</html>
