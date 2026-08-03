@@ -6,6 +6,7 @@ struct KasSignerApp: App {
     @StateObject private var engine = KasSignerEngine()
     @StateObject private var preferences = AppPreferences()
     @StateObject private var syncService = WalletSyncService()
+    @StateObject private var liveRPCService = KaspaLiveRPCService()
     @StateObject private var coinControlStore = UTXOCoinControlStore()
     @StateObject private var priceService = PriceService.shared
 
@@ -17,6 +18,7 @@ struct KasSignerApp: App {
                 .environmentObject(engine)
                 .environmentObject(preferences)
                 .environmentObject(syncService)
+                .environmentObject(liveRPCService)
                 .environmentObject(coinControlStore)
                 .environmentObject(priceService)
         }

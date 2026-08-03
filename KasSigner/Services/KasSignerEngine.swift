@@ -376,6 +376,33 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
     }
 
+    func buildUTXOSubscriptionRequest(
+        address: String,
+        requestID: UInt64
+    ) async throws -> Data {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return Array.from(
+                window.kaspi.buildUTXOSubscriptionRequest(address, requestID)
+            );
+            """,
+            arguments: [
+                "address": address,
+                "requestID": String(requestID)
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let values = result as? [NSNumber], !values.isEmpty else {
+            throw EngineError.invalidResponse
+        }
+
+        return Data(values.map { UInt8(truncating: $0) })
+    }
+
     func importKpub(_ kpub: String) async throws -> WalletImportResult {
         try await ensureReady()
 

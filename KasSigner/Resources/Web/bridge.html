@@ -564,6 +564,13 @@
         module.reset_qr_decoder();
       },
 
+      buildUTXOSubscriptionRequest(address, requestID) {
+        return module.build_utxo_subscribe_request(
+          String(address),
+          BigInt(String(requestID))
+        );
+      },
+
       async getFeeEstimate(nodeConfig) {
         const result = await runWithNodeFailover(
           nodeConfig,
@@ -588,10 +595,6 @@
               throw new Error("Resolved Kaspa node URL is empty.");
             }
 
-            if (!sessionIsReusableFor(nodeURL)) {
-              module.start_rpc_session(nodeURL);
-            }
-
             const utxosJSON = await module.fetch_utxos(walletJSON, nodeURL);
             return { nodeURL, utxosJSON };
           }
@@ -609,36 +612,6 @@
         const uniqueAddresses = [
           ...new Set(addresses.map(address => String(address)).filter(Boolean))
         ];
-
-        liveNodeURL = nodeURL;
-        liveNodeConfig = {
-          mode: nodeConfig?.mode === "custom" ? "custom" : "automatic",
-          customURL: nodeConfig?.customURL ?? ""
-        };
-        liveAddresses = uniqueAddresses;
-        liveSubscriptionConfirmed = false;
-        liveNodeNeedsFailover = false;
-        resetReconnectBackoff();
-
-        if (liveAddresses.length > 0) {
-          try {
-            await module.rpc_session_subscribe_utxos_changed(
-              liveNodeURL,
-              JSON.stringify(liveAddresses)
-            );
-            liveSubscriptionConfirmed = true;
-            resetReconnectBackoff();
-          } catch (error) {
-            if (isAutomaticNode(liveNodeConfig)) {
-              invalidateAutomaticNode(liveNodeURL);
-              liveNodeNeedsFailover = true;
-            }
-            advanceReconnectBackoff();
-            console.warn(
-              "Initial UTXO live subscription failed; automatic retry remains active."
-            );
-          }
-        }
 
         return JSON.stringify({
           balance,

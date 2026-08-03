@@ -8,6 +8,7 @@ struct SettingsView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @State private var isDeriving = false
     @State private var derivationError: String?
@@ -291,19 +292,24 @@ struct SettingsView: View {
         HStack {
             Text("Status")
             Spacer()
-            switch syncService.state {
+            switch liveRPCService.state {
             case .failed:
                 Text("No connection")
                     .foregroundStyle(.red)
-            case .syncing:
+            case .connecting:
                 Text("Connecting...")
+                    .foregroundStyle(.yellow)
+            case .reconnecting:
+                Text("Reconnecting...")
                     .foregroundStyle(.yellow)
             case .connected:
                 Text("Connected")
                     .foregroundStyle(.green)
             case .idle:
                 Text(syncService.isNetworkAvailable ? "Ready" : "No connection")
-                    .foregroundStyle(syncService.isNetworkAvailable ? Color.secondary : Color.red)
+                    .foregroundStyle(
+                        syncService.isNetworkAvailable ? Color.secondary : Color.red
+                    )
             }
         }
     }

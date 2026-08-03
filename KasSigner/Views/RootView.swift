@@ -45,6 +45,7 @@ struct RootView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: Tab = .wallet
@@ -89,8 +90,39 @@ struct RootView: View {
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
         }
-        .onChange(of: engine.rpcNotificationVersion) { _, _ in
+        .onChange(of: liveRPCService.notificationVersion) { _, _ in
             scheduleNotificationRefresh()
+        }
+        .onChange(of: syncService.snapshot) { _, snapshot in
+            guard let snapshot,
+                  let profile = walletStore.selectedProfile else { return }
+            Task {
+                await liveRPCService.configure(
+                    profile: profile,
+                    nodeURL: snapshot.nodeURL,
+                    engine: engine
+                )
+            }
+        }
+        .onChange(of: syncService.isNetworkAvailable) { wasAvailable, isAvailable in
+            Task {
+                await liveRPCService.setNetworkAvailable(
+                    isAvailable,
+                    engine: engine
+                )
+
+                guard !wasAvailable,
+                      isAvailable,
+                      scenePhase == .active,
+                      let profile = walletStore.selectedProfile else { return }
+                await syncService.refresh(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences,
+                    force: true
+                )
+            }
         }
         .onDisappear {
             notificationRefreshTask?.cancel()
@@ -113,6 +145,7 @@ struct RootView: View {
     private func refreshAfterLaunchOrActivation() async {
         let isActive = scenePhase == .active
         await engine.setRuntimeActive(isActive)
+        await liveRPCService.setRuntimeActive(isActive, engine: engine)
 
         guard isActive,
               let profile = walletStore.selectedProfile else { return }
@@ -132,6 +165,15 @@ struct RootView: View {
             force: false,
             minimumInterval: 9
         )
+
+        if let snapshot = syncService.snapshot,
+           let currentProfile = walletStore.selectedProfile {
+            await liveRPCService.configure(
+                profile: currentProfile,
+                nodeURL: snapshot.nodeURL,
+                engine: engine
+            )
+        }
     }
 
     private func scheduleNotificationRefresh() {
