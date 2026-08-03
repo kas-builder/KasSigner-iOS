@@ -1,7 +1,5 @@
 # KasSigner
 
-$kas donation address: kaspa:qqpzpn5e7enn2ylfdxvlwtm3829gn6j9z9dnnmcsw5arkgnurktty6ulgzkfk 
-
 KasSigner is a native, watch-only Kaspa wallet for iPhone. It builds transactions on the phone and exchanges animated QR codes with an air-gapped KasSigner device for review and signing.
 
 Private keys and seed phrases are not requested or stored by the iOS app.
@@ -11,10 +9,14 @@ Private keys and seed phrases are not requested or stored by the iOS app.
 KasSigner is under active development and should be considered beta software. Core watch-only wallet functionality, transaction creation, QR signing, and broadcast are implemented, but the project is still being refined and some bugs, edge cases, and incomplete features are expected. Stability, performance, and the user experience will continue to improve as development progresses.
 
 Feedback, bug reports, testing results, and contributions are welcome. If you encounter a reproducible issue, please open a GitHub Issue with clear reproduction steps, your device and iOS version, and any relevant screenshots or logs (excluding sensitive wallet information). Until the project reaches a stable release, test with small amounts and always verify transaction details on the air-gapped signing device before approving a transaction.
+
 ## Current features
 
 - Import a watch-only account from a Kaspa public wallet QR (`kpub`)
-- Synchronize balances and UTXOs from Kaspa wRPC nodes
+- Manage multiple watch-only accounts, with long-press account switching
+- Rename accounts, copy their exact imported `kpub`, or remove them locally
+- Synchronize balances and UTXOs from Kaspa wRPC nodes with lifecycle-aware updates
+- Automatically discover funded addresses and extend the watch-only address pool
 - Automatic public-node selection or a custom `ws://` / `wss://` node
 - Receive-address display and QR generation
 - UTXO inspection, labeling, and coin selection
@@ -25,6 +27,8 @@ Feedback, bug reports, testing results, and contributions are welcome. If you en
 - Multi-frame signed transaction scanning
 - Transaction broadcast and transaction ID display
 - Kaspa.stream and Kaspa Explorer links
+- System, Light, and Dark appearance modes
+- Optional USD or BTC balance conversion using CoinGecko or CoinPaprika price data
 
 ## Requirements
 
@@ -33,6 +37,8 @@ Feedback, bug reports, testing results, and contributions are welcome. If you en
 - An Apple ID added to Xcode only when installing on a physical iPhone
 
 No package manager, Rust toolchain, npm installation, or separate WebAssembly build is required. The runtime used by the app is included in the repository.
+
+Developers changing the Rust transaction runtime can follow the separate instructions in [`Runtime/README.md`](Runtime/README.md).
 
 ## Get the source
 
@@ -124,22 +130,27 @@ A custom endpoint must:
 
 ## Local data
 
-KasSigner stores watch-only account information and app preferences in the app's local `UserDefaults` container. This can include imported public wallet data, derived public addresses, wallet snapshots, UTXO labels, explorer choice, and custom-node settings.
+KasSigner stores watch-only account information and app preferences in the app's local `UserDefaults` container. This can include imported public wallet data, derived public addresses, wallet snapshots, UTXO labels, account names, explorer and appearance choices, custom-node settings, currency and price-source preferences, and cached public market-price data.
 
 That runtime data is created only after the installed app is used. It is not included in this repository.
+
+When synchronizing, the selected Kaspa node receives the public addresses being queried. CoinGecko or CoinPaprika may receive a general KAS price request, but the app does not include wallet addresses or the imported `kpub` in those price requests.
 
 To reset a local installation, delete the app from the Simulator or iPhone and install it again.
 
 ## Repository layout
 
 ```text
-KasSigner/
-├── App/                 App entry point
-├── Models/              Wallet, preferences, and synchronization models
-├── Services/            WebAssembly bridge and wallet synchronization
-├── Views/               SwiftUI screens and QR workflows
-├── Resources/Web/       Bundled JavaScript and WebAssembly runtime
-└── Assets.xcassets/     App icons and asset catalog
+KasSigner-iOS/
+├── KasSigner/
+│   ├── App/                 App entry point
+│   ├── Models/              Wallet, preferences, and synchronization models
+│   ├── Services/            WebAssembly bridge and wallet synchronization
+│   ├── Views/               SwiftUI screens and QR workflows
+│   ├── Resources/Web/       Bundled JavaScript and WebAssembly runtime
+│   └── Assets.xcassets/     App icons and asset catalog
+└── Runtime/
+    └── kassee/               Rust source for the transaction runtime
 ```
 
 ## Security notes
@@ -147,6 +158,7 @@ KasSigner/
 - The iOS app is watch-only and should never be given a seed phrase or private key.
 - Verify the destination, amount, and fee on the air-gapped signing device.
 - Confirm that the signing device and imported public wallet belong to the same account.
+- Treat a `kpub` and its derived public addresses as privacy-sensitive account information.
 - Treat custom node operators as network-data providers; use a node you trust when privacy matters.
 - Do not publish logs or screenshots containing wallet public keys, addresses, transaction payloads, or transaction IDs unless you intend to disclose them.
 
