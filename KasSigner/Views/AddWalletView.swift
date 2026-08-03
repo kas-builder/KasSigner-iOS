@@ -10,6 +10,9 @@ struct AddWalletView: View {
     @State private var isImporting = false
     @State private var isShowingScanner = false
     @State private var errorMessage: String?
+    @State private var duplicateProfile: WalletProfile?
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     var body: some View {
         NavigationStack {
@@ -51,11 +54,15 @@ struct AddWalletView: View {
                     }
                 }
             }
-            .navigationTitle("Add Account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .principal) {
+                    Text("Add Account")
+                        .font(.headline)
+                        .foregroundStyle(teal)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Import") { importWallet() }
@@ -72,7 +79,31 @@ struct AddWalletView: View {
                     isShowingScanner = false
                 }
             }
+            .alert(
+                "Account Already Added",
+                isPresented: Binding(
+                    get: { duplicateProfile != nil },
+                    set: { isPresented in
+                        if !isPresented {
+                            duplicateProfile = nil
+                        }
+                    }
+                ),
+                presenting: duplicateProfile
+            ) { profile in
+                Button("View Account") {
+                    walletStore.selectedProfileID = profile.id
+                    duplicateProfile = nil
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {
+                    duplicateProfile = nil
+                }
+            } message: { _ in
+                Text("This KasSigner account is already on this iPhone.")
+            }
         }
+        .tint(teal)
     }
 
     private var canImport: Bool {
@@ -92,6 +123,15 @@ struct AddWalletView: View {
         Task {
             do {
                 let imported = try await engine.importKpub(cleanedKpub)
+
+                if let existingProfile = walletStore.profiles.first(where: {
+                    $0.network == "mainnet" && $0.kpub == imported.kpub
+                }) {
+                    duplicateProfile = existingProfile
+                    isImporting = false
+                    return
+                }
+
                 walletStore.add(
                     WalletProfile(
                         name: cleanedName,

@@ -112,6 +112,18 @@ final class UTXOCoinControlStore: ObservableObject {
         utxos.filter { selectedOutpoints.contains($0.id) }
     }
 
+    func removeData(profileID: UUID) {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: selectedPrefix + profileID.uuidString)
+        defaults.removeObject(forKey: labelsPrefix + profileID.uuidString)
+
+        if activeProfileID == profileID {
+            activeProfileID = nil
+            selectedOutpoints = []
+            labels = [:]
+        }
+    }
+
     private func load() {
         guard let profileID = activeProfileID else {
             selectedOutpoints = []

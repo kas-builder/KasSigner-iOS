@@ -23,7 +23,10 @@ struct ReceiveView: View {
             VStack(spacing: 22) {
                 VStack(spacing: 6) {
                     Text(balanceText)
-                        .font(.system(size: 36, weight: .semibold, design: .rounded))
+                        .font(.system(size: 36, weight: .regular, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .allowsTightening(true)
                     Text("Available balance")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
@@ -164,9 +167,15 @@ struct ReceiveView: View {
             engine.startIfNeeded()
         }
         .onAppear {
-            selectedAddressIndex = walletStore.lastViewedReceiveIndex(
-                for: profile.id,
-                addressCount: activeProfile.receiveAddresses.count
+            selectedAddressIndex = min(
+                max(
+                    activeProfile.nextReceiveIndex,
+                    walletStore.lastViewedReceiveIndex(
+                        for: profile.id,
+                        addressCount: activeProfile.receiveAddresses.count
+                    )
+                ),
+                max(0, activeProfile.receiveAddresses.count - 1)
             )
         }
         .onDisappear {
@@ -255,22 +264,33 @@ struct ReceiveView: View {
         defer { isGeneratingAddress = false }
 
         do {
-            let current = activeProfile
-            let derived = try await engine.extendAddresses(
-                for: current,
-                receiveCount: 1,
-                changeCount: 0
-            )
+            var updated = activeProfile
+            // Advance from whichever cursor is furthest ahead. The persisted
+            // receive cursor can lag behind the address currently displayed
+            // (for example after browsing with the chevrons), so using it
+            // alone can move the UI backward and reuse an exposed address.
+            let targetIndex = max(
+                updated.nextReceiveIndex,
+                selectedAddressIndex
+            ) + 1
 
-            var updated = current
-            updated.receiveAddresses = derived.receiveAddresses
-            updated.changeAddresses = derived.changeAddresses
+            if targetIndex >= updated.receiveAddresses.count {
+                let derived = try await engine.extendAddresses(
+                    for: updated,
+                    receiveCount: targetIndex - updated.receiveAddresses.count + 1,
+                    changeCount: 0
+                )
+                updated.receiveAddresses = derived.receiveAddresses
+                updated.changeAddresses = derived.changeAddresses
+            }
+
+            updated.nextReceiveIndex = targetIndex
             walletStore.update(updated)
 
             withAnimation(.easeInOut(duration: 0.22)) {
-                selectedAddressIndex = max(0, derived.receiveAddresses.count - 1)
+                selectedAddressIndex = targetIndex
             }
-            persistSelectedAddressIndex(addressCount: derived.receiveAddresses.count)
+            persistSelectedAddressIndex(addressCount: updated.receiveAddresses.count)
         } catch {
             generationError = error.localizedDescription
         }

@@ -94,6 +94,7 @@ final class WalletSyncService: ObservableObject {
 
     func refresh(
         profile: WalletProfile,
+        walletStore: WalletStore,
         engine: KasSignerEngine,
         preferences: AppPreferences,
         force: Bool = true,
@@ -124,11 +125,22 @@ final class WalletSyncService: ObservableObject {
         state = .syncing
 
         do {
-            let result = try await engine.syncWallet(
-                profile,
-                nodeConfiguration: preferences.nodeConfiguration
+            let (result, discoveredProfile) = try await syncWithAddressDiscovery(
+                profile: walletStore.profiles.first(where: { $0.id == profile.id })
+                    ?? profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences
             )
             guard activeProfileID == profile.id else { return }
+            if discoveredProfile != profile {
+                walletStore.update(discoveredProfile)
+                walletStore.setLastViewedReceiveIndex(
+                    discoveredProfile.nextReceiveIndex,
+                    for: discoveredProfile.id,
+                    addressCount: discoveredProfile.receiveAddresses.count
+                )
+            }
             snapshot = result
             do {
                 feeEstimate = try await engine.getFeeEstimate(
@@ -147,6 +159,106 @@ final class WalletSyncService: ObservableObject {
             guard activeProfileID == profile.id else { return }
             state = .failed(friendlyMessage(for: error, preferences: preferences))
         }
+    }
+
+    private func syncWithAddressDiscovery(
+        profile: WalletProfile,
+        walletStore: WalletStore,
+        engine: KasSignerEngine,
+        preferences: AppPreferences
+    ) async throws -> (WalletSyncPayload, WalletProfile) {
+        let gapLimit = 8
+        let derivationBatch = 8
+        let maximumAddressesPerChain = 512
+        var current = profile
+
+        for _ in 0..<64 {
+            try Task.checkCancellation()
+
+            let result = try await engine.syncWallet(
+                current,
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+
+            if let lastFundedReceive = result.balance.fundedReceiveIndices.max() {
+                current.nextReceiveIndex = max(
+                    current.nextReceiveIndex,
+                    lastFundedReceive + 1
+                )
+            }
+            if let lastFundedChange = result.balance.fundedChangeIndices.max() {
+                current.nextChangeIndex = max(
+                    current.nextChangeIndex,
+                    lastFundedChange + 1
+                )
+            }
+
+            let receiveBoundary = max(
+                0,
+                current.receiveAddresses.count - gapLimit
+            )
+            let changeBoundary = max(
+                0,
+                current.changeAddresses.count - gapLimit
+            )
+            let receiveNeedsExtension =
+                current.receiveAddresses.count < maximumAddressesPerChain
+                && (
+                    current.nextReceiveIndex >= receiveBoundary
+                    || result.balance.fundedReceiveIndices.contains {
+                        $0 >= receiveBoundary
+                    }
+                )
+            let changeNeedsExtension =
+                current.changeAddresses.count < maximumAddressesPerChain
+                && (
+                    current.nextChangeIndex >= changeBoundary
+                    || result.balance.fundedChangeIndices.contains {
+                        $0 >= changeBoundary
+                    }
+                )
+
+            if !receiveNeedsExtension && !changeNeedsExtension {
+                return (result, current)
+            }
+
+            let receiveCount = receiveNeedsExtension
+                ? min(
+                    derivationBatch,
+                    maximumAddressesPerChain - current.receiveAddresses.count
+                )
+                : 0
+            let changeCount = changeNeedsExtension
+                ? min(
+                    derivationBatch,
+                    maximumAddressesPerChain - current.changeAddresses.count
+                )
+                : 0
+
+            guard receiveCount > 0 || changeCount > 0 else {
+                return (result, current)
+            }
+
+            let derived = try await engine.extendAddresses(
+                for: current,
+                receiveCount: receiveCount,
+                changeCount: changeCount
+            )
+            current.receiveAddresses = derived.receiveAddresses
+            current.changeAddresses = derived.changeAddresses
+            walletStore.update(current)
+            walletStore.setLastViewedReceiveIndex(
+                current.nextReceiveIndex,
+                for: current.id,
+                addressCount: current.receiveAddresses.count
+            )
+
+            await Task.yield()
+        }
+
+        throw KasSignerEngine.EngineError.javascript(
+            "Address discovery exceeded its safety limit."
+        )
     }
 
     func reset() {

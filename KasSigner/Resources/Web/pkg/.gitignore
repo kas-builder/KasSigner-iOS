@@ -1,1 +1,11 @@
+# Ignore generated package output by default, then explicitly keep every
+# runtime asset that ships inside the iOS app.
 *
+!.gitignore
+!package.json
+!kassee_web.js
+!kassee_web.d.ts
+!kassee_web_bg.wasm
+!kassee_web_bg.wasm.d.ts
+!kassee_tx.js
+!kassee_tx_bg.wasm

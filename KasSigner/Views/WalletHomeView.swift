@@ -6,8 +6,10 @@ struct WalletHomeView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var priceService: PriceService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @State private var showingAddWallet = false
+    @State private var showingSecondaryCurrency = false
 
     var body: some View {
         NavigationStack {
@@ -36,6 +38,11 @@ struct WalletHomeView: View {
             .sheet(isPresented: $showingAddWallet) {
                 AddWalletView()
             }
+            .task {
+                async let walletRefresh: Void = refreshSelectedWallet(force: false)
+                async let priceRefresh: Void = priceService.refresh(preferences: preferences)
+                _ = await (walletRefresh, priceRefresh)
+            }
         }
     }
 
@@ -50,9 +57,43 @@ struct WalletHomeView: View {
                         Spacer()
                     }
 
-                    Text(balanceText)
-                        .font(.system(size: 42, weight: .semibold, design: .rounded))
-                        .contentTransition(.numericText())
+                    Button {
+                        showingSecondaryCurrency.toggle()
+                        if showingSecondaryCurrency {
+                            Task {
+                                await priceService.refresh(preferences: preferences)
+                            }
+                        }
+                    } label: {
+                        HStack(alignment: .center, spacing: 9) {
+                            Text(balanceDisplayText)
+                                .font(.system(size: 42, weight: .semibold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.48)
+                                .allowsTightening(true)
+                                .layoutPriority(1)
+
+                            if !balanceUnitText.isEmpty {
+                                VStack(spacing: -3) {
+                                    Image(systemName: "arrow.left")
+                                    Image(systemName: "arrow.right")
+                                }
+                                .font(.system(size: 14, weight: .bold))
+                                .frame(width: 22, height: 28)
+                                .symbolRenderingMode(.monochrome)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: true, vertical: false)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .lineLimit(1)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .contentTransition(.numericText())
+                    .sensoryFeedback(.selection, trigger: showingSecondaryCurrency)
+                    .accessibilityLabel(balanceAccessibilityLabel)
+                    .accessibilityHint("Double tap to switch between KAS and \(preferences.secondaryCurrency.displayName).")
                     Text(walletHomeReceiveAddress(for: profile))
                         .font(.footnote.monospaced())
                         .foregroundStyle(.secondary)
@@ -68,12 +109,8 @@ struct WalletHomeView: View {
                     }
                     .buttonStyle(.borderedProminent)
 
-                    NavigationLink(isActive: $showingSendFlow) {
-                        SendUTXOSelectionView(
-                            profile: profile,
-                            clearSelectionOnAppear: true,
-                            showingSendFlow: $showingSendFlow
-                        )
+                    Button {
+                        showingSendFlow = true
                     } label: {
                         compactActionLabel("Send", systemImage: "arrow.up")
                     }
@@ -105,7 +142,23 @@ struct WalletHomeView: View {
                 }
             }
             .padding()
-        }    }
+        }
+        .refreshable {
+            async let walletRefresh: Void = refreshSelectedWallet(force: true)
+            async let priceRefresh: Void = priceService.refresh(
+                preferences: preferences,
+                force: true
+            )
+            _ = await (walletRefresh, priceRefresh)
+        }
+        .navigationDestination(isPresented: $showingSendFlow) {
+            SendUTXOSelectionView(
+                profile: profile,
+                clearSelectionOnAppear: true,
+                showingSendFlow: $showingSendFlow
+            )
+        }
+    }
 
     private func walletHomeReceiveAddress(for profile: WalletProfile) -> String {
         guard !profile.receiveAddresses.isEmpty else {
@@ -120,12 +173,39 @@ struct WalletHomeView: View {
         return profile.receiveAddresses[index]
     }
 
-    private var balanceText: String {
-        if let balance = syncService.snapshot?.balance.totalKas {
-            return balance.formatted(.number.precision(.fractionLength(0...8))) + " KAS"
+    private var balanceAmountText: String {
+        guard let balance = syncService.snapshot?.balance.totalKas else { return "" }
+        guard showingSecondaryCurrency else {
+            return balance.formatted(.number.precision(.fractionLength(0...8)))
+        }
+        guard let converted = priceService.convertedBalance(
+            kas: balance,
+            currency: preferences.secondaryCurrency
+        ) else {
+            return "—"
         }
 
-        return ""
+        switch preferences.secondaryCurrency {
+        case .btc:
+            return converted.formatted(.number.precision(.fractionLength(0...8)))
+        case .usd:
+            return converted.formatted(.number.precision(.fractionLength(2)))
+        }
+    }
+
+    private var balanceUnitText: String {
+        guard syncService.snapshot?.balance.totalKas != nil else { return "" }
+        return showingSecondaryCurrency ? preferences.secondaryCurrency.rawValue.uppercased() : "KAS"
+    }
+
+    private var balanceDisplayText: String {
+        guard !balanceAmountText.isEmpty else { return "" }
+        return "\(balanceAmountText) \(balanceUnitText)"
+    }
+
+    private var balanceAccessibilityLabel: String {
+        guard !balanceAmountText.isEmpty else { return "Balance unavailable" }
+        return "\(balanceAmountText) \(balanceUnitText)"
     }
 
     private func refreshSelectedWallet(force: Bool) async {
@@ -133,6 +213,7 @@ struct WalletHomeView: View {
         if !force, syncService.snapshot != nil { return }
         await syncService.refresh(
             profile: profile,
+            walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: true
@@ -201,7 +282,7 @@ struct SendUTXOSelectionView: View {
                             showingSendFlow: $showingSendFlow
                         )
                     } label: {
-                        Text(selectedUTXOs.count == 1 ? "Choose UTXO" : "Choose UTXOs")
+                        Text(selectedUTXOs.count == 1 ? "Send UTXO" : "Send UTXOs")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -241,8 +322,12 @@ struct SendUTXOSelectionView: View {
         coinControlStore.selectedUTXOs(from: utxos)
     }
 
-    private var selectedTotalSompi: UInt64 {
-        selectedUTXOs.reduce(0) { $0 + $1.amount }
+    private var selectedTotalSompi: UInt64? {
+        selectedUTXOs.reduce(into: UInt64?.some(0)) { total, utxo in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(utxo.amount)
+            total = addition.overflow ? nil : addition.partialValue
+        }
     }
 
     private var selectionHeader: some View {
@@ -262,13 +347,17 @@ struct SendUTXOSelectionView: View {
                     Text("Input total")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text(formatKas(sompi: selectedTotalSompi))
+                    Text(
+                        selectedTotalSompi.map {
+                            formatKas(sompi: $0)
+                        } ?? "Invalid total"
+                    )
                         .font(.subheadline.weight(.semibold).monospacedDigit())
                 }
             }
 
             HStack(spacing: 10) {
-                Button(selectedUTXOs.count == utxos.count ? "Clear All" : "Choose All UTXOs") {
+                Button(selectedUTXOs.count == utxos.count ? "Clear All" : "Select All") {
                     if selectedUTXOs.count == utxos.count {
                         coinControlStore.clearSelection()
                     } else {
@@ -310,7 +399,7 @@ struct SendUTXOSelectionView: View {
                     Spacer()
 
                     Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                        .font(.subheadline.weight(.semibold))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(
                             utxo.blockDAAScore > 0
                                 ? Color(red: 0.18, green: 0.68, blue: 0.62)
@@ -335,11 +424,11 @@ struct SendUTXOSelectionView: View {
 
                 Divider()
 
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("Label")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .frame(width: 72, alignment: .leading)
+                        .frame(width: 46, alignment: .leading)
 
                     if !label.isEmpty {
                         Text(label)
@@ -360,7 +449,7 @@ struct SendUTXOSelectionView: View {
                 RoundedRectangle(cornerRadius: 15, style: .continuous)
                     .stroke(
                         selected ? accentColor.opacity(0.78) : Color.primary.opacity(0.05),
-                        lineWidth: selected ? 1.65 : 1
+                        lineWidth: selected ? 2 : 1
                     )
             }
             .contentShape(Rectangle())

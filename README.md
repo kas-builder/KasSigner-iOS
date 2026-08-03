@@ -150,6 +150,11 @@ KasSigner/
 - Treat custom node operators as network-data providers; use a node you trust when privacy matters.
 - Do not publish logs or screenshots containing wallet public keys, addresses, transaction payloads, or transaction IDs unless you intend to disclose them.
 
+## Upstream references
+
+- [`kaspanet/rusty-kaspa`](https://github.com/kaspanet/rusty-kaspa) is the protocol and transaction-behavior source of truth.
+- [`azbuky/kaspium_wallet`](https://github.com/azbuky/kaspium_wallet) is the reference architecture for wallet synchronization: direct node subscriptions, lifecycle-aware connections, debounced UTXO updates, affected-address refreshes, and locally cached wallet state. The refresh analysis used commit `1f82c7d2fcfcce7c08998c84e4e25c3cb623e7b2`.
+
 ## License
 
 KasSigner is licensed under the GNU General Public License version 3. See [LICENSE](LICENSE).

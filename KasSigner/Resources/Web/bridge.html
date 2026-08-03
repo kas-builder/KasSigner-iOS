@@ -56,12 +56,25 @@
   let retainedNode = null;
   let retainedNodeKey = null;
 
-  async function resolveNode(config = {}) {
+  function invalidateAutomaticNode(nodeURL = "") {
+    if (
+      retainedNodeKey === "automatic" &&
+      (!nodeURL || retainedNode?.nodeURL === nodeURL)
+    ) {
+      retainedNode = null;
+      retainedNodeKey = null;
+    }
+  }
+
+  async function resolveNode(
+    config = {},
+    { forceFresh = false, excludeNodeURL = "" } = {}
+  ) {
     const nodeKey = config.mode === "custom"
       ? `custom:${normalizeCustomNode(config.customURL)}`
       : "automatic";
 
-    if (retainedNode && retainedNodeKey === nodeKey) {
+    if (!forceFresh && retainedNode && retainedNodeKey === nodeKey) {
       return retainedNode;
     }
 
@@ -78,7 +91,14 @@
     let lastError = null;
     for (const url of shuffled) {
       try {
-        retainedNode = await queryResolver(url);
+        const candidate = await queryResolver(url);
+        if (
+          excludeNodeURL &&
+          String(candidate.nodeURL) === String(excludeNodeURL)
+        ) {
+          continue;
+        }
+        retainedNode = candidate;
         retainedNodeKey = nodeKey;
         return retainedNode;
       } catch (error) {
@@ -98,19 +118,49 @@
 
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
-    const module = await import("./pkg/kassee_web.js");
+    const runtimeVersion = "db218007d8f955c5";
+    const transactionRuntimeVersion = "9942e6e152b814d4";
+    const module = await import(
+      `./pkg/kassee_web.js?runtime=${runtimeVersion}`
+    );
+    const transactionModule = await import(
+      `./pkg/kassee_tx.js?runtime=${transactionRuntimeVersion}`
+    );
 
     post({ event: "status", message: "Loading KasSigner engine…" });
     const wasmResponse = await fetch(
-      new URL("./pkg/kassee_web_bg.wasm", import.meta.url)
+      new URL(
+        `./pkg/kassee_web_bg.wasm?runtime=${runtimeVersion}`,
+        import.meta.url
+      ),
+      { cache: "no-store" }
     );
     const wasmBytes = await wasmResponse.arrayBuffer();
     await module.default({ module_or_path: wasmBytes });
 
+    const transactionWasmResponse = await fetch(
+      new URL(
+        `./pkg/kassee_tx_bg.wasm?runtime=${transactionRuntimeVersion}`,
+        import.meta.url
+      ),
+      { cache: "no-store" }
+    );
+    const transactionWasmBytes = await transactionWasmResponse.arrayBuffer();
+    await transactionModule.default({
+      module_or_path: transactionWasmBytes
+    });
+
     let liveNodeURL = "";
+    let liveNodeConfig = { mode: "automatic", customURL: "" };
     let liveAddresses = [];
     let liveSubscriptionConfirmed = false;
     let reconnectInFlight = false;
+    let liveNodeNeedsFailover = false;
+    let reconnectFailureCount = 0;
+    let reconnectNotBefore = 0;
+    var runtimeActive = true;
+    var notificationPollTimer = null;
+    var reconnectTimer = null;
 
     function readSessionStatus() {
       try {
@@ -129,20 +179,181 @@
       );
     }
 
-    async function ensureLiveSubscription() {
-      if (!liveNodeURL || liveAddresses.length === 0 || reconnectInFlight) {
-        return;
+    function scriptPublicKeyForAddress(address) {
+      const decoded = JSON.parse(module.decode_address(String(address)));
+      const payload = String(decoded.payload ?? "");
+
+      if (!/^[0-9a-fA-F]{64}$/.test(payload)) {
+        throw new Error("Address decoder returned an invalid payload.");
       }
 
-      const reusable = sessionIsReusableFor(liveNodeURL);
-      if (reusable && liveSubscriptionConfirmed) {
+      const payloadBytes = payload.match(/.{2}/g).map(byte => parseInt(byte, 16));
+
+      switch (Number(decoded.version)) {
+        case 0:
+          return [0x20, ...payloadBytes, 0xac];
+        case 8:
+          return [0xaa, 0x20, ...payloadBytes, 0x87];
+        default:
+          throw new Error("Unsupported Kaspa address version.");
+      }
+    }
+
+    function scriptKey(scriptPublicKey) {
+      if (!Array.isArray(scriptPublicKey)) {
+        throw new Error("UTXO contains an invalid script public key.");
+      }
+
+      return scriptPublicKey
+        .map(byte => Number(byte).toString(16).padStart(2, "0"))
+        .join("");
+    }
+
+    function balanceFromUTXOs(wallet, utxos) {
+      if (!Array.isArray(utxos)) {
+        throw new Error("Kaspa node returned an invalid UTXO list.");
+      }
+
+      let totalSompi = 0n;
+      const fundedScripts = new Set();
+
+      for (const utxo of utxos) {
+        const amount = BigInt(String(utxo?.amount ?? ""));
+        if (amount < 0n) {
+          throw new Error("Kaspa node returned a negative UTXO amount.");
+        }
+        totalSompi += amount;
+        fundedScripts.add(scriptKey(utxo.script_public_key));
+      }
+
+      if (totalSompi > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error("Wallet balance exceeds the safe JSON integer range.");
+      }
+
+      const fundedIndices = addresses => addresses
+        .map((address, index) => ({
+          index,
+          script: scriptKey(scriptPublicKeyForAddress(address))
+        }))
+        .filter(entry => fundedScripts.has(entry.script))
+        .map(entry => entry.index);
+
+      const receiveAddresses = Array.isArray(wallet.receive_addresses)
+        ? wallet.receive_addresses
+        : [];
+      const changeAddresses = Array.isArray(wallet.change_addresses)
+        ? wallet.change_addresses
+        : [];
+      const totalSompiNumber = Number(totalSompi);
+
+      return {
+        total_sompi: totalSompiNumber,
+        total_kas: totalSompiNumber / 100_000_000,
+        utxo_count: utxos.length,
+        funded_addresses: fundedScripts.size,
+        funded_receive_indices: fundedIndices(receiveAddresses),
+        funded_change_indices: fundedIndices(changeAddresses)
+      };
+    }
+
+    function isAutomaticNode(config = {}) {
+      return config.mode !== "custom";
+    }
+
+    function resetReconnectBackoff() {
+      reconnectFailureCount = 0;
+      reconnectNotBefore = 0;
+    }
+
+    function advanceReconnectBackoff() {
+      reconnectFailureCount += 1;
+      const delay = Math.min(
+        1000 * (2 ** Math.min(reconnectFailureCount - 1, 5)),
+        30000
+      );
+      reconnectNotBefore = Date.now() + delay;
+    }
+
+    function isNodeConnectionError(error) {
+      const message = String(error?.message ?? error ?? "").toLowerCase();
+      return [
+        "connection",
+        "connect",
+        "websocket",
+        "network",
+        "rpc",
+        "timeout",
+        "timed out",
+        "closed",
+        "disconnected",
+        "transport"
+      ].some(fragment => message.includes(fragment));
+    }
+
+    async function runWithNodeFailover(nodeConfig, operation) {
+      const config = nodeConfig ?? {};
+      const initial = await resolveNode(config);
+
+      try {
+        const value = await operation(initial);
+        return { resolved: initial, value };
+      } catch (initialError) {
+        if (
+          !isAutomaticNode(config) ||
+          !isNodeConnectionError(initialError)
+        ) {
+          throw initialError;
+        }
+
+        invalidateAutomaticNode(initial.nodeURL);
+        const replacement = await resolveNode(config, {
+          forceFresh: true,
+          excludeNodeURL: initial.nodeURL
+        });
+
+        try {
+          const value = await operation(replacement);
+          return { resolved: replacement, value };
+        } catch (replacementError) {
+          invalidateAutomaticNode(replacement.nodeURL);
+          throw replacementError;
+        }
+      }
+    }
+
+    async function ensureLiveSubscription() {
+      if (
+        !runtimeActive ||
+        !liveNodeURL ||
+        liveAddresses.length === 0 ||
+        reconnectInFlight ||
+        Date.now() < reconnectNotBefore
+      ) {
         return;
       }
 
       reconnectInFlight = true;
-      liveSubscriptionConfirmed = false;
 
       try {
+        if (liveNodeNeedsFailover && isAutomaticNode(liveNodeConfig)) {
+          const failedNodeURL = liveNodeURL;
+          invalidateAutomaticNode(failedNodeURL);
+          const replacement = await resolveNode(liveNodeConfig, {
+            forceFresh: true,
+            excludeNodeURL: failedNodeURL
+          });
+          liveNodeURL = String(replacement.nodeURL);
+          liveNodeNeedsFailover = false;
+          module.stop_rpc_session();
+        }
+
+        const reusable = sessionIsReusableFor(liveNodeURL);
+        if (reusable && liveSubscriptionConfirmed) {
+          resetReconnectBackoff();
+          return;
+        }
+
+        liveSubscriptionConfirmed = false;
         if (!reusable) {
           module.start_rpc_session(liveNodeURL);
         }
@@ -151,37 +362,85 @@
           liveNodeURL,
           JSON.stringify(liveAddresses)
         );
-        liveSubscriptionConfirmed = true;
+        if (runtimeActive) {
+          liveSubscriptionConfirmed = true;
+          liveNodeNeedsFailover = false;
+          resetReconnectBackoff();
+        } else {
+          module.stop_rpc_session();
+        }
       } catch (error) {
+        if (isAutomaticNode(liveNodeConfig)) {
+          invalidateAutomaticNode(liveNodeURL);
+          liveNodeNeedsFailover = true;
+        }
+        advanceReconnectBackoff();
         console.warn("RPC reconnect/resubscribe failed.");
       } finally {
         reconnectInFlight = false;
       }
     }
 
-    setInterval(() => {
-      try {
-        const count = module.rpc_session_notification_count();
-        if (count > 0) {
-          const notifications = JSON.parse(
-            module.rpc_session_take_notifications()
-          );
+    function startRuntimeTimers() {
+      if (notificationPollTimer === null) {
+        notificationPollTimer = setInterval(() => {
+          try {
+            const count = module.rpc_session_notification_count();
+            if (count > 0) {
+              const notifications = JSON.parse(
+                module.rpc_session_take_notifications()
+              );
 
-          post({
-            event: "rpc_notifications",
-            notifications
-          });
-        }
-      } catch (error) {
-        console.warn("RPC notification polling failed.");
+              post({
+                event: "rpc_notifications",
+                notifications
+              });
+            }
+          } catch (error) {
+            console.warn("RPC notification polling failed.");
+          }
+        }, 250);
       }
-    }, 250);
 
-    setInterval(() => {
-      void ensureLiveSubscription();
-    }, 1000);
+      if (reconnectTimer === null) {
+        reconnectTimer = setInterval(() => {
+          void ensureLiveSubscription();
+        }, 1000);
+      }
+    }
+
+    function stopRuntimeTimers() {
+      if (notificationPollTimer !== null) {
+        clearInterval(notificationPollTimer);
+        notificationPollTimer = null;
+      }
+
+      if (reconnectTimer !== null) {
+        clearInterval(reconnectTimer);
+        reconnectTimer = null;
+      }
+    }
+
+    async function setRuntimeActive(active) {
+      runtimeActive = Boolean(active);
+
+      if (!runtimeActive) {
+        stopRuntimeTimers();
+        liveSubscriptionConfirmed = false;
+        module.stop_rpc_session();
+        return;
+      }
+
+      startRuntimeTimers();
+      await ensureLiveSubscription();
+    }
+
+    startRuntimeTimers();
 
     window.kaspi = {
+      async setRuntimeActive(active) {
+        await setRuntimeActive(active);
+      },
       importKpub(payload) {
         if (!payload || typeof payload.kpub !== "string") {
           throw new Error("A KasSigner kpub is required.");
@@ -211,19 +470,26 @@
         destination,
         amountSompi,
         feeSompi,
+        feeRateSompiPerGram,
+        usesExactFee,
+        sendMax,
         utxosJSON,
         nodeConfig
       ) {
-        const resolved = await resolveNode(nodeConfig);
-
-        return await module.create_send_pskb_with_utxos(
-          JSON.stringify(wallet),
-          String(destination),
-          BigInt(String(amountSompi)),
-          BigInt(String(feeSompi)),
-          String(utxosJSON),
-          String(resolved.nodeURL)
+        const result = await runWithNodeFailover(
+          nodeConfig,
+          async resolved => await transactionModule.create_send_pskb_with_utxos(
+            JSON.stringify(wallet),
+            String(destination),
+            BigInt(String(amountSompi)),
+            Boolean(usesExactFee) ? BigInt(String(feeSompi)) : 0n,
+            Number(feeRateSompiPerGram),
+            Boolean(sendMax),
+            String(utxosJSON),
+            String(resolved.nodeURL)
+          )
         );
+        return result.value;
       },
 
       summarizePSKB(wireHex) {
@@ -299,33 +565,41 @@
       },
 
       async getFeeEstimate(nodeConfig) {
-        const resolved = await resolveNode(nodeConfig);
-
-        const nodeURL = String(resolved.nodeURL ?? "");
-        if (!nodeURL) {
-          throw new Error("Resolved Kaspa node URL is empty.");
-        }
-
-        return await module.get_fee_estimate(nodeURL);
+        const result = await runWithNodeFailover(
+          nodeConfig,
+          async resolved => {
+            const nodeURL = String(resolved.nodeURL ?? "");
+            if (!nodeURL) {
+              throw new Error("Resolved Kaspa node URL is empty.");
+            }
+            return await module.get_fee_estimate(nodeURL);
+          }
+        );
+        return result.value;
       },
 
       async syncWallet(wallet, nodeConfig) {
-        const resolved = await resolveNode(nodeConfig);
-
-        const nodeURL = String(resolved.nodeURL ?? "");
-        if (!nodeURL) {
-          throw new Error("Resolved Kaspa node URL is empty.");
-        }
-
-        if (!sessionIsReusableFor(nodeURL)) {
-          module.start_rpc_session(nodeURL);
-        }
-
         const walletJSON = JSON.stringify(wallet);
-        const [balanceJSON, utxosJSON] = await Promise.all([
-          module.fetch_balance(walletJSON, nodeURL),
-          module.fetch_utxos(walletJSON, nodeURL)
-        ]);
+        const syncResult = await runWithNodeFailover(
+          nodeConfig,
+          async resolved => {
+            const nodeURL = String(resolved.nodeURL ?? "");
+            if (!nodeURL) {
+              throw new Error("Resolved Kaspa node URL is empty.");
+            }
+
+            if (!sessionIsReusableFor(nodeURL)) {
+              module.start_rpc_session(nodeURL);
+            }
+
+            const utxosJSON = await module.fetch_utxos(walletJSON, nodeURL);
+            return { nodeURL, utxosJSON };
+          }
+        );
+        const resolved = syncResult.resolved;
+        const { nodeURL, utxosJSON } = syncResult.value;
+        const utxos = JSON.parse(utxosJSON);
+        const balance = balanceFromUTXOs(wallet, utxos);
 
         const addresses = [
           ...(Array.isArray(wallet.receive_addresses) ? wallet.receive_addresses : []),
@@ -337,8 +611,14 @@
         ];
 
         liveNodeURL = nodeURL;
+        liveNodeConfig = {
+          mode: nodeConfig?.mode === "custom" ? "custom" : "automatic",
+          customURL: nodeConfig?.customURL ?? ""
+        };
         liveAddresses = uniqueAddresses;
         liveSubscriptionConfirmed = false;
+        liveNodeNeedsFailover = false;
+        resetReconnectBackoff();
 
         if (liveAddresses.length > 0) {
           try {
@@ -347,7 +627,13 @@
               JSON.stringify(liveAddresses)
             );
             liveSubscriptionConfirmed = true;
+            resetReconnectBackoff();
           } catch (error) {
+            if (isAutomaticNode(liveNodeConfig)) {
+              invalidateAutomaticNode(liveNodeURL);
+              liveNodeNeedsFailover = true;
+            }
+            advanceReconnectBackoff();
             console.warn(
               "Initial UTXO live subscription failed; automatic retry remains active."
             );
@@ -355,8 +641,8 @@
         }
 
         return JSON.stringify({
-          balance: JSON.parse(balanceJSON),
-          utxos: JSON.parse(utxosJSON),
+          balance,
+          utxos,
           node_url: resolved.nodeURL,
           resolver_name: resolved.resolverName,
           synced_at: Date.now() / 1000

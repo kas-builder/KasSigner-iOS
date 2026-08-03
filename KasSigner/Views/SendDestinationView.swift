@@ -25,6 +25,7 @@ struct SendDestinationView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var walletStore: WalletStore
     @State private var addressValidation: AddressValidationResult?
     @State private var isValidatingAddress = false
     @State private var addressValidationTask: Task<Void, Never>?
@@ -32,30 +33,7 @@ struct SendDestinationView: View {
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     private var enteredAmountSompi: UInt64? {
-        let raw = amountText
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-            .replacingOccurrences(of: ",", with: ".")
-
-        guard !raw.isEmpty,
-              !raw.contains("-"),
-              !raw.lowercased().contains("e")
-        else { return nil }
-
-        let parts = raw.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count <= 2 else { return nil }
-
-        let whole = String(parts[0])
-        let fractional = parts.count == 2 ? String(parts[1]) : ""
-
-        guard fractional.count <= 8 else { return nil }
-        guard whole.allSatisfy(\.isNumber) else { return nil }
-        guard fractional.allSatisfy(\.isNumber) else { return nil }
-
-        let wholeSompi = (UInt64(whole) ?? 0) * 100_000_000
-        let fracPadded = fractional.padding(toLength: 8, withPad: "0", startingAt: 0)
-        let fracSompi = UInt64(fracPadded) ?? 0
-
-        return wholeSompi + fracSompi
+        parseKasTextToSompi(amountText)
     }
 
     private var destinationLooksValid: Bool {
@@ -77,16 +55,29 @@ struct SendDestinationView: View {
             ?? "Invalid Kaspa address."
     }
 
-    private var selectedTotalSompi: UInt64 {
-        selectedUTXOs.reduce(0) { $0 + $1.amount }
+    private var selectedTotalSompi: UInt64? {
+        selectedUTXOs.reduce(into: UInt64?.some(0)) { total, utxo in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(utxo.amount)
+            total = addition.overflow ? nil : addition.partialValue
+        }
     }
 
     private var amountLooksValid: Bool {
-        guard let amount = enteredAmountSompi else { return false }
-        return amount > 0 && amount <= selectedTotalSompi
+        guard let amount = enteredAmountSompi,
+              let selectedTotalSompi,
+              let requestedFeeSompi
+        else {
+            return false
+        }
+
+        let required = amount.addingReportingOverflow(requestedFeeSompi)
+        return amount > 0
+            && !required.overflow
+            && required.partialValue <= selectedTotalSompi
     }
 
-    private var selectedFeeRateSompiPerGram: UInt64? {
+    private var selectedFeeRateSompiPerGram: Double? {
         guard let fee = syncService.feeEstimate else {
             return nil
         }
@@ -107,27 +98,84 @@ struct SendDestinationView: View {
     }
 
     private var liveFeeDescription: String {
-        guard let fee = syncService.feeEstimate else {
+        if selectedFee == .custom {
+            return "Enter an exact fee in KAS."
+        }
+
+        guard let fee = syncService.feeEstimate,
+              let requestedFeeSompi
+        else {
             return "Connecting to node for live fee estimate..."
         }
 
+        let feeAmount = formatKas(sompi: requestedFeeSompi)
+
         switch selectedFee {
         case .low:
-            return "Low • \(fee.lowSompiPerGram) sompi/gram"
+            return "Low • \(feeAmount) • \(formatFeeRate(fee.lowSompiPerGram)) sompi/gram"
 
         case .normal:
-            return "Normal • \(fee.normalSompiPerGram) sompi/gram"
+            return "Normal • \(feeAmount) • \(formatFeeRate(fee.normalSompiPerGram)) sompi/gram"
 
         case .priority:
-            return "Priority • \(fee.prioritySompiPerGram) sompi/gram"
+            return "Priority • \(feeAmount) • \(formatFeeRate(fee.prioritySompiPerGram)) sompi/gram"
 
         case .custom:
-            return "Enter an exact fee in KAS."
+            return ""
         }
     }
 
     private var customFeeSompi: UInt64? {
         parseKasTextToSompi(customFeeText)
+    }
+
+    private var requestedFeeSompi: UInt64? {
+        switch selectedFee {
+        case .custom:
+            guard let customFeeSompi, customFeeSompi > 0 else {
+                return nil
+            }
+            return customFeeSompi
+
+        case .low, .normal, .priority:
+            guard let fee = syncService.feeEstimate,
+                  fee.normalSompiPerGram > 0,
+                  let selectedRate = selectedFeeRateSompiPerGram
+            else {
+                return nil
+            }
+
+            // The node's suggested fee is its normal-rate quote. Recover the
+            // quoted transaction mass with ceiling division, then apply the
+            // user's selected node-provided rate to that same mass.
+            let quotedMass = ceil(
+                Double(fee.suggestedFee) / fee.normalSompiPerGram
+            )
+            let selectedFee = quotedMass * selectedRate
+            guard selectedFee.isFinite,
+                  selectedFee > 0,
+                  selectedFee <= Double(UInt64.max)
+            else {
+                return nil
+            }
+            return UInt64(selectedFee)
+        }
+    }
+
+    private var maximumSendSompi: UInt64? {
+        guard let selectedTotalSompi,
+              let requestedFeeSompi
+        else {
+            return nil
+        }
+
+        let maximum = selectedTotalSompi.subtractingReportingOverflow(
+            requestedFeeSompi
+        )
+        guard !maximum.overflow, maximum.partialValue > 0 else {
+            return nil
+        }
+        return maximum.partialValue
     }
 
     private var feeLooksValid: Bool {
@@ -183,6 +231,15 @@ struct SendDestinationView: View {
         .onDisappear {
             addressValidationTask?.cancel()
         }
+        .onChange(of: selectedFee) { _, _ in
+            updateSendMaxAmount()
+        }
+        .onChange(of: customFeeText) { _, _ in
+            updateSendMaxAmount()
+        }
+        .onChange(of: syncService.feeEstimate) { _, _ in
+            updateSendMaxAmount()
+        }
         .sheet(isPresented: $showingScanner) {
             QRScannerView { scannedValue in
                 let scanned = normalizedAddress(from: scannedValue)
@@ -211,41 +268,64 @@ struct SendDestinationView: View {
     private func buildFirstVerifiedPSKB() async {
         guard !isBuildingPSKB else { return }
 
-        guard let amountSompi = enteredAmountSompi else {
-            showBuildError("Enter a valid amount.")
+        guard let requestedFeeSompi else {
+            showBuildError(
+                selectedFee == .custom
+                    ? "Enter a valid custom fee."
+                    : "A live fee estimate is not available yet."
+            )
             return
         }
 
-        let requestedFeeSompi: UInt64
+        let amountSompi: UInt64
 
-        switch selectedFee {
-        case .custom:
-            guard let customFeeSompi, customFeeSompi > 0 else {
-                showBuildError("Enter a valid custom fee.")
+        if sendMax {
+            guard let selectedTotalSompi else {
+                showBuildError("The selected UTXO total is invalid.")
                 return
             }
-            requestedFeeSompi = customFeeSompi
 
-        case .low, .normal, .priority:
-            guard let feeEstimate = syncService.feeEstimate else {
-                showBuildError("A live fee estimate is not available yet.")
+            let maximum = selectedTotalSompi.subtractingReportingOverflow(
+                requestedFeeSompi
+            )
+            guard !maximum.overflow, maximum.partialValue > 0 else {
+                showBuildError("The selected UTXOs cannot cover this fee.")
                 return
             }
-            requestedFeeSompi = feeEstimate.suggestedFee
+
+            // Recompute at submission time so a stale text-field value can
+            // never send the full input total without deducting the fee.
+            amountSompi = maximum.partialValue
+            amountText = formatPlainKas(sompi: amountSompi)
+        } else {
+            guard let enteredAmountSompi else {
+                showBuildError("Enter a valid amount.")
+                return
+            }
+            amountSompi = enteredAmountSompi
         }
 
         isBuildingPSKB = true
         defer { isBuildingPSKB = false }
 
         do {
+            guard let activeProfile = walletStore.profiles.first(
+                where: { $0.id == profile.id }
+            ) else {
+                throw SendVerificationError.walletStateChanged
+            }
+
             // Provisional runtime checkpoint only. Final fee selection will use
             // the exact verified transaction mass.
             let draft = try SendDraft(
-                profile: profile,
+                profile: activeProfile,
                 selectedUTXOs: selectedUTXOs,
                 destination: destinationAddress,
                 amountSompi: amountSompi,
-                feeSompi: requestedFeeSompi
+                feeSompi: requestedFeeSompi,
+                feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
+                usesExactFee: selectedFee == .custom,
+                sendMax: sendMax
             )
 
             let pskb = try await engine.buildUnsignedPSKB(
@@ -291,19 +371,25 @@ struct SendDestinationView: View {
                 .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                 .lowercased()
 
-            let destinationMatches = outputs.contains { output in
+            let destinationOutputs = outputs.filter { output in
                 output.address?
                     .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                     .lowercased() == normalizedDestination
-                    && output.amountSompi == amountSompi
             }
 
-            guard destinationMatches else {
+            guard destinationOutputs.count == 1,
+                  let builtDestinationAmount = destinationOutputs.first?.amountSompi,
+                  builtDestinationAmount > 0,
+                  sendMax || builtDestinationAmount == amountSompi
+            else {
                 throw SendVerificationError.destinationMismatch
             }
+            let verifiedAmountSompi = sendMax
+                ? builtDestinationAmount
+                : amountSompi
 
             let ownedChangeAddresses = Set(
-                profile.changeAddresses.map {
+                activeProfile.changeAddresses.map {
                     $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
                         .lowercased()
                 }
@@ -320,7 +406,7 @@ struct SendDestinationView: View {
 
                 let isDestination =
                     address == normalizedDestination
-                    && outputAmount == amountSompi
+                    && outputAmount == verifiedAmountSompi
 
                 let isWalletChange = ownedChangeAddresses.contains(address)
 
@@ -343,7 +429,9 @@ struct SendDestinationView: View {
                 throw SendVerificationError.customFeeMismatch
             }
 
-            let afterAmount = totalInput.subtractingReportingOverflow(amountSompi)
+            let afterAmount = totalInput.subtractingReportingOverflow(
+                verifiedAmountSompi
+            )
             guard !afterAmount.overflow else {
                 throw SendVerificationError.invalidFeeArithmetic
             }
@@ -354,13 +442,46 @@ struct SendDestinationView: View {
             guard !afterFee.overflow else {
                 throw SendVerificationError.invalidFeeArithmetic
             }
+            let verifiedChangeSompi = afterFee.partialValue
+
+            if verifiedChangeSompi > 0 {
+                guard activeProfile.changeAddresses.indices.contains(
+                    activeProfile.nextChangeIndex
+                ) else {
+                    throw SendVerificationError.changeAddressUnavailable
+                }
+
+                let expectedChangeAddress = activeProfile.changeAddresses[
+                    activeProfile.nextChangeIndex
+                ]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                let matchingChangeOutputs = outputs.filter {
+                    $0.address?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                        .lowercased() == expectedChangeAddress
+                        && $0.amountSompi == verifiedChangeSompi
+                }
+
+                guard matchingChangeOutputs.count == 1 else {
+                    throw SendVerificationError.changeAddressMismatch
+                }
+
+                guard walletStore.reserveChangeAddress(
+                    profileID: activeProfile.id,
+                    index: activeProfile.nextChangeIndex
+                ) else {
+                    throw SendVerificationError.walletStateChanged
+                }
+            }
 
             unsignedPSKB = pskb
             verifiedReview = VerifiedTransactionReview(
+                profileID: activeProfile.id,
                 destination: normalizedDestination,
-                amountSompi: amountSompi,
+                amountSompi: verifiedAmountSompi,
                 feeSompi: reportedFee,
-                changeSompi: afterFee.partialValue,
+                changeSompi: verifiedChangeSompi,
                 selectedInputCount: builtInputs.count,
                 selectedOutpoints: draft.selectedInputs.map { $0.outpointKey },
                 unsignedPSKB: pskb,
@@ -505,7 +626,7 @@ struct SendDestinationView: View {
 
                 Spacer()
 
-                Text(formatKas(sompi: selectedTotalSompi))
+                Text(selectedTotalText)
                     .font(.caption.weight(.semibold).monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -534,9 +655,16 @@ struct SendDestinationView: View {
                 .tint(accentColor)
                 .onChange(of: sendMax) { _, enabled in
                     if enabled {
-                        amountText = formatPlainKas(sompi: selectedTotalSompi)
+                        if requestedFeeSompi == nil {
+                            amountText = ""
+                            Task {
+                                await refreshFeeEstimateForSendMax()
+                            }
+                        }
+                        updateSendMaxAmount()
                     }
                 }
+                .disabled(selectedTotalSompi == nil)
 
             HStack {
                 Text("Selected input")
@@ -545,13 +673,13 @@ struct SendDestinationView: View {
 
                 Spacer()
 
-                Text(formatKas(sompi: selectedTotalSompi))
+                Text(selectedTotalText)
                     .font(.caption.weight(.semibold).monospacedDigit())
             }
 
             if !amountText.isEmpty && !amountLooksValid {
                 Text(
-                    "Amount must be greater than zero and no more than the selected input total."
+                    "Amount plus fee must fit within the selected input total."
                 )
                 .font(.caption)
                 .foregroundStyle(.red)
@@ -566,6 +694,29 @@ struct SendDestinationView: View {
                 style: .continuous
             )
         )
+    }
+
+    private func updateSendMaxAmount() {
+        guard sendMax, let maximumSendSompi else { return }
+        amountText = formatPlainKas(sompi: maximumSendSompi)
+    }
+
+    @MainActor
+    private func refreshFeeEstimateForSendMax() async {
+        guard let activeProfile = walletStore.profiles.first(
+            where: { $0.id == profile.id }
+        ) else {
+            return
+        }
+
+        await syncService.refresh(
+            profile: activeProfile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true
+        )
+        updateSendMaxAmount()
     }
 
     private var feeCard: some View {
@@ -731,8 +882,23 @@ struct SendDestinationView: View {
         return total.partialValue
     }
 
+    private var selectedTotalText: String {
+        guard let selectedTotalSompi else {
+            return "Invalid total"
+        }
+        return formatKas(sompi: selectedTotalSompi)
+    }
+
     private func formatKas(sompi: UInt64) -> String {
         formatPlainKas(sompi: sompi) + " KAS"
+    }
+
+    private func formatFeeRate(_ rate: Double) -> String {
+        rate.formatted(
+            .number
+                .precision(.fractionLength(0...3))
+                .grouping(.never)
+        )
     }
 
     private func formatPlainKas(sompi: UInt64) -> String {
@@ -756,6 +922,7 @@ struct SendDestinationView: View {
 
 private struct VerifiedTransactionReview: Identifiable, Hashable {
     let id = UUID()
+    let profileID: UUID
     let destination: String
     let amountSompi: UInt64
     let feeSompi: UInt64
@@ -1142,10 +1309,7 @@ private struct VerifiedSigningPreparationView: View {
                 BroadcastSuccessView(
                     transactionID: transactionID,
                     onDone: {
-                        Task {
-                            await refreshWalletAfterBroadcast()
-                            onComplete()
-                        }
+                        onComplete()
                     }
                 )
             }
@@ -1426,6 +1590,7 @@ private struct VerifiedSigningPreparationView: View {
 
         await syncService.refresh(
             profile: profile,
+            walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: true
@@ -1469,24 +1634,12 @@ private struct VerifiedSigningPreparationView: View {
             )
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
-            guard !transactionID.isEmpty else {
-                scanErrorMessage =
-                    "Broadcast completed without a transaction ID."
-                return
-            }
-
             broadcastTransactionID = transactionID
-
-            if let profile = walletStore.selectedProfile {
-                await syncService.refresh(
-                    profile: profile,
-                    engine: engine,
-                    preferences: preferences,
-                    force: true
-                )
-            }
-
             showingBroadcastSuccess = true
+
+            Task {
+                await refreshWalletAfterBroadcast()
+            }
         } catch {
             scanErrorMessage =
                 "Broadcast failed: \(error.localizedDescription)"
@@ -1643,7 +1796,7 @@ private struct VerifiedSigningPreparationView: View {
 }
 
 private struct BroadcastSuccessView: View {
-    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var preferences: AppPreferences
     let transactionID: String
     let onDone: () -> Void
 
@@ -1680,13 +1833,27 @@ private struct BroadcastSuccessView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                    Text(transactionID)
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
+                    Link(
+                        destination: preferences.explorer.transactionURL(
+                            transactionID
+                        )
+                    ) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(transactionID)
+                                .font(.caption.monospaced())
+                                .multilineTextAlignment(.leading)
+
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption.weight(.semibold))
+                        }
                         .frame(
                             maxWidth: .infinity,
                             alignment: .leading
                         )
+                    }
+                    .accessibilityHint(
+                        "Opens in \(preferences.explorer.title)"
+                    )
                 }
                 .padding(16)
                 .background(
@@ -1811,6 +1978,9 @@ private enum SendVerificationError: LocalizedError {
     case unknownOutput
     case invalidFeeArithmetic
     case customFeeMismatch
+    case changeAddressUnavailable
+    case changeAddressMismatch
+    case walletStateChanged
 
     var errorDescription: String? {
         switch self {
@@ -1832,6 +2002,12 @@ private enum SendVerificationError: LocalizedError {
             return "The built transaction fee arithmetic is invalid."
         case .customFeeMismatch:
             return "The fee encoded in the transaction does not match the custom fee you entered."
+        case .changeAddressUnavailable:
+            return "No unused change address is available. Refresh the wallet and try again."
+        case .changeAddressMismatch:
+            return "The transaction did not use the expected unused change address."
+        case .walletStateChanged:
+            return "The wallet address state changed. Return to the wallet and try again."
         }
     }
 }

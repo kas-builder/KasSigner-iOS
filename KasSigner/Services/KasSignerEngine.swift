@@ -9,9 +9,9 @@ struct AddressValidationResult: Codable {
 }
 
 struct FeeEstimate: Decodable, Equatable {
-    let lowSompiPerGram: UInt64
-    let normalSompiPerGram: UInt64
-    let prioritySompiPerGram: UInt64
+    let lowSompiPerGram: Double
+    let normalSompiPerGram: Double
+    let prioritySompiPerGram: Double
     let suggestedFee: UInt64
     let lowSeconds: Double
     let normalSeconds: Double
@@ -86,6 +86,9 @@ struct SendDraft {
     let destination: String
     let amountSompi: UInt64
     let feeSompi: UInt64
+    let feeRateSompiPerGram: Double
+    let usesExactFee: Bool
+    let sendMax: Bool
     let selectedTotalSompi: UInt64
 
     init(
@@ -93,7 +96,10 @@ struct SendDraft {
         selectedUTXOs: [WalletUTXO],
         destination: String,
         amountSompi: UInt64,
-        feeSompi: UInt64
+        feeSompi: UInt64,
+        feeRateSompiPerGram: Double,
+        usesExactFee: Bool,
+        sendMax: Bool
     ) throws {
         let destination = destination.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -149,6 +155,9 @@ struct SendDraft {
         self.destination = destination
         self.amountSompi = amountSompi
         self.feeSompi = feeSompi
+        self.feeRateSompiPerGram = feeRateSompiPerGram
+        self.usesExactFee = usesExactFee
+        self.sendMax = sendMax
         self.selectedTotalSompi = selectedTotalSompi
     }
 }
@@ -281,8 +290,7 @@ struct QRDecoderProgress: Decodable, Equatable {
 @MainActor
 final class KasSignerEngine: NSObject, ObservableObject {
 
-    @Published var rpcNotifications: [String] = []
-    @Published var rpcNotificationVersion = 0
+    @Published private(set) var rpcNotificationVersion = 0
 
     enum EngineError: LocalizedError {
         case resourceMissing
@@ -309,6 +317,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
     private let schemeHandler = KasSignerSchemeHandler()
     private var hasStarted = false
+    private var desiredRuntimeActive = true
 
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
@@ -325,9 +334,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = self
+#if DEBUG
         if #available(iOS 16.4, *) {
             view.isInspectable = true
         }
+#endif
         view.isHidden = true
         return view
     }()
@@ -345,6 +356,24 @@ final class KasSignerEngine: NSObject, ObservableObject {
     func attachedWebView() -> WKWebView {
         startIfNeeded()
         return webView
+    }
+
+    func setRuntimeActive(_ active: Bool) async {
+        desiredRuntimeActive = active
+
+        guard isReady else { return }
+
+        do {
+            _ = try await webView.callAsyncJavaScript(
+                "await window.kaspi.setRuntimeActive(active);",
+                arguments: ["active": active],
+                in: nil,
+                contentWorld: .page
+            )
+        } catch {
+            // Activation reconciliation will retry after the engine or
+            // WebKit content process becomes ready again.
+        }
     }
 
     func importKpub(_ kpub: String) async throws -> WalletImportResult {
@@ -469,7 +498,9 @@ final class KasSignerEngine: NSObject, ObservableObject {
         let wallet: [String: Any] = [
             "kpub": draft.profile.kpub,
             "receive_addresses": draft.profile.receiveAddresses,
-            "change_addresses": draft.profile.changeAddresses
+            "change_addresses": draft.profile.changeAddresses,
+            "next_receive_index": draft.profile.nextReceiveIndex,
+            "next_change_index": draft.profile.nextChangeIndex
         ]
 
         let utxosData: Data
@@ -489,20 +520,34 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
         let result = try await webView.callAsyncJavaScript(
             """
-            return await window.kaspi.buildUnsignedPSKB(
-                wallet,
-                destination,
-                amountSompi,
-                feeSompi,
-                utxosJSON,
-                nodeConfig
-            );
+            try {
+                const value = await window.kaspi.buildUnsignedPSKB(
+                    wallet,
+                    destination,
+                    amountSompi,
+                    feeSompi,
+                    feeRateSompiPerGram,
+                    usesExactFee,
+                    sendMax,
+                    utxosJSON,
+                    nodeConfig
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: String(error?.message ?? error)
+                };
+            }
             """,
             arguments: [
                 "wallet": wallet,
                 "destination": draft.destination,
                 "amountSompi": String(draft.amountSompi),
                 "feeSompi": String(draft.feeSompi),
+                "feeRateSompiPerGram": draft.feeRateSompiPerGram,
+                "usesExactFee": draft.usesExactFee,
+                "sendMax": draft.sendMax,
                 "utxosJSON": utxosJSON,
                 "nodeConfig": nodeConfiguration
             ],
@@ -510,7 +555,19 @@ final class KasSignerEngine: NSObject, ObservableObject {
             contentWorld: .page
         )
 
-        guard let pskb = result as? String else {
+        guard let response = result as? [String: Any],
+              let succeeded = response["ok"] as? Bool
+        else {
+            throw EngineError.invalidResponse
+        }
+
+        guard succeeded else {
+            let message = response["error"] as? String
+                ?? "The transaction runtime rejected the selected inputs."
+            throw EngineError.javascript(message)
+        }
+
+        guard let pskb = response["value"] as? String else {
             throw EngineError.invalidResponse
         }
 
@@ -621,7 +678,24 @@ final class KasSignerEngine: NSObject, ObservableObject {
             )
         }
 
-        return txid
+        let normalizedTransactionID = txid
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard normalizedTransactionID.count == 64,
+              normalizedTransactionID.allSatisfy(\.isHexDigit)
+        else {
+            throw NSError(
+                domain: "KasSigner",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Broadcast returned an invalid transaction id."
+                ]
+            )
+        }
+
+        return normalizedTransactionID
     }
 
 
@@ -828,7 +902,9 @@ final class KasSignerEngine: NSObject, ObservableObject {
         let wallet: [String: Any] = [
             "kpub": profile.kpub,
             "receive_addresses": profile.receiveAddresses,
-            "change_addresses": profile.changeAddresses
+            "change_addresses": profile.changeAddresses,
+            "next_receive_index": profile.nextReceiveIndex,
+            "next_change_index": profile.nextChangeIndex
         ]
 
         let result = try await webView.callAsyncJavaScript(
@@ -862,7 +938,9 @@ final class KasSignerEngine: NSObject, ObservableObject {
         let wallet: [String: Any] = [
             "kpub": profile.kpub,
             "receive_addresses": profile.receiveAddresses,
-            "change_addresses": profile.changeAddresses
+            "change_addresses": profile.changeAddresses,
+            "next_receive_index": profile.nextReceiveIndex,
+            "next_change_index": profile.nextChangeIndex
         ]
 
         let result = try await webView.callAsyncJavaScript(
@@ -948,14 +1026,21 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
 
         guard let url = URL(
-            string: "\(KasSignerSchemeHandler.scheme)://engine/bridge.html"
+            string:
+                "\(KasSignerSchemeHandler.scheme)://engine/bridge.html"
+                + "?runtime=9942e6e152b814d4"
         ) else {
             statusText = "KasSigner startup URL invalid"
             return
         }
 
         guard webView.url == nil, !webView.isLoading else { return }
-        webView.load(URLRequest(url: url))
+        webView.load(
+            URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData
+            )
+        )
     }
 }
 
@@ -1002,6 +1087,10 @@ extension KasSignerEngine: WKScriptMessageHandler {
         case "ready":
             isReady = true
             statusText = "KasSigner"
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.setRuntimeActive(self.desiredRuntimeActive)
+            }
 
         case "status":
             if let text = body["message"] as? String {
@@ -1014,8 +1103,6 @@ extension KasSignerEngine: WKScriptMessageHandler {
                 ?? "KasSigner failed to start"
 
         case "rpc_notifications":
-            rpcNotifications =
-                body["notifications"] as? [String] ?? []
             rpcNotificationVersion += 1
 
         default:

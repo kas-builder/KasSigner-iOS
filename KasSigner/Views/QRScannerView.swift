@@ -286,14 +286,41 @@ private final class BinaryQRVideoDecoder:
     }
 }
 
+private final class QRScannerCaptureSession: @unchecked Sendable {
+    let session = AVCaptureSession()
+
+    private let queue = DispatchQueue(
+        label: "org.kassigner.KasSigner.qr-capture-session",
+        qos: .userInitiated
+    )
+
+    func start() {
+        queue.async { [self] in
+            guard !session.isRunning else { return }
+            session.startRunning()
+        }
+    }
+
+    func stop() {
+        queue.async { [self] in
+            guard session.isRunning else { return }
+            session.stopRunning()
+        }
+    }
+}
+
 @MainActor
 private final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onScan: ((String) -> Void)?
     var onPermissionDenied: (() -> Void)?
 
-    private let session = AVCaptureSession()
+    private let captureSession = QRScannerCaptureSession()
     private let binaryQRDecoder = BinaryQRVideoDecoder()
     private var previewLayer: AVCaptureVideoPreviewLayer?
+
+    private var session: AVCaptureSession {
+        captureSession.session
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -322,7 +349,7 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        session.stopRunning()
+        captureSession.stop()
     }
 
     private func requestCameraAndConfigure() {
@@ -382,9 +409,7 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
         view.layer.insertSublayer(layer, at: 0)
         previewLayer = layer
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak session] in
-            session?.startRunning()
-        }
+        captureSession.start()
     }
 
     nonisolated func metadataOutput(

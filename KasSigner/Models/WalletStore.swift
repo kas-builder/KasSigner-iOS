@@ -30,6 +30,18 @@ final class WalletStore: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func reserveChangeAddress(profileID: UUID, index: Int) -> Bool {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+              index == profiles[profileIndex].nextChangeIndex
+        else {
+            return false
+        }
+
+        profiles[profileIndex].nextChangeIndex = index + 1
+        save()
+        return true
+    }
 
     func lastViewedReceiveIndex(for profileID: UUID, addressCount: Int) -> Int {
         guard addressCount > 0 else { return 0 }
@@ -49,6 +61,16 @@ final class WalletStore: ObservableObject {
     }
 
     func remove(at offsets: IndexSet) {
+        let removedProfileIDs = offsets.compactMap { index in
+            profiles.indices.contains(index) ? profiles[index].id : nil
+        }
+
+        for profileID in removedProfileIDs {
+            UserDefaults.standard.removeObject(
+                forKey: receiveIndexKeyPrefix + profileID.uuidString
+            )
+        }
+
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
             self.selectedProfileID = profiles.first?.id

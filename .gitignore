@@ -25,6 +25,9 @@ build/
 .swiftpm/
 Package.resolved
 
+# Rust/Cargo build output
+target/
+
 # Playgrounds
 playground.xcworkspace
 

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct KasSignerLoadingView: View {
     var size: CGFloat = 22
@@ -47,6 +48,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: Tab = .wallet
+    @State private var showingAddWallet = false
+    @State private var notificationRefreshTask: Task<Void, Never>?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -69,9 +72,36 @@ struct RootView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+        .background {
+            WalletTabContextMenu(
+                profiles: walletStore.profiles,
+                selectedProfileID: walletStore.selectedProfileID,
+                onSelect: selectWallet,
+                onAddWallet: {
+                    selectedTab = .wallet
+                    showingAddWallet = true
+                }
+            )
+        }
+        .sheet(isPresented: $showingAddWallet) {
+            AddWalletView()
+        }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
         }
+        .onChange(of: engine.rpcNotificationVersion) { _, _ in
+            scheduleNotificationRefresh()
+        }
+        .onDisappear {
+            notificationRefreshTask?.cancel()
+            notificationRefreshTask = nil
+        }
+    }
+
+    private func selectWallet(_ profile: WalletProfile) {
+        walletStore.selectedProfileID = profile.id
+        syncService.preload(profile: profile)
+        selectedTab = .wallet
     }
 
     private var launchRefreshTaskID: String {
@@ -81,7 +111,10 @@ struct RootView: View {
     }
 
     private func refreshAfterLaunchOrActivation() async {
-        guard scenePhase == .active,
+        let isActive = scenePhase == .active
+        await engine.setRuntimeActive(isActive)
+
+        guard isActive,
               let profile = walletStore.selectedProfile else { return }
 
         engine.startIfNeeded()
@@ -93,11 +126,193 @@ struct RootView: View {
 
         await syncService.refresh(
             profile: profile,
+            walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: false,
             minimumInterval: 9
         )
+    }
+
+    private func scheduleNotificationRefresh() {
+        guard scenePhase == .active,
+              let profileID = walletStore.selectedProfileID
+        else {
+            return
+        }
+
+        notificationRefreshTask?.cancel()
+        notificationRefreshTask = Task { @MainActor in
+            // Match Kaspium's UTXO notification debounce window so a burst
+            // of added/removed outputs produces one wallet reconciliation.
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+
+            // If another refresh is already committing a snapshot, wait for
+            // it and then reconcile once more so no later notification is lost.
+            while syncService.state == .syncing {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+            }
+
+            guard scenePhase == .active,
+                  walletStore.selectedProfileID == profileID,
+                  let profile = walletStore.selectedProfile
+            else {
+                return
+            }
+
+            await syncService.refresh(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true
+            )
+        }
+    }
+}
+
+private struct WalletTabContextMenu: UIViewControllerRepresentable {
+    let profiles: [WalletProfile]
+    let selectedProfileID: UUID?
+    let onSelect: (WalletProfile) -> Void
+    let onAddWallet: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            profiles: profiles,
+            selectedProfileID: selectedProfileID,
+            onSelect: onSelect,
+            onAddWallet: onAddWallet
+        )
+    }
+
+    func makeUIViewController(context: Context) -> InstallerViewController {
+        let controller = InstallerViewController()
+        controller.onTabBarAvailable = { tabBar in
+            context.coordinator.installIfNeeded(on: tabBar)
+        }
+        return controller
+    }
+
+    func updateUIViewController(
+        _ uiViewController: InstallerViewController,
+        context: Context
+    ) {
+        context.coordinator.profiles = profiles
+        context.coordinator.selectedProfileID = selectedProfileID
+        context.coordinator.onSelect = onSelect
+        context.coordinator.onAddWallet = onAddWallet
+        uiViewController.findTabBar()
+    }
+
+    final class InstallerViewController: UIViewController {
+        var onTabBarAvailable: ((UITabBar) -> Void)?
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            findTabBar()
+        }
+
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            findTabBar()
+        }
+
+        func findTabBar() {
+            guard let rootView = view.window?.rootViewController?.view,
+                  let tabBar = findTabBar(in: rootView) else { return }
+            onTabBarAvailable?(tabBar)
+        }
+
+        private func findTabBar(in view: UIView) -> UITabBar? {
+            if let tabBar = view as? UITabBar {
+                return tabBar
+            }
+
+            for subview in view.subviews {
+                if let tabBar = findTabBar(in: subview) {
+                    return tabBar
+                }
+            }
+
+            return nil
+        }
+    }
+
+    final class Coordinator: NSObject, UIContextMenuInteractionDelegate {
+        var profiles: [WalletProfile]
+        var selectedProfileID: UUID?
+        var onSelect: (WalletProfile) -> Void
+        var onAddWallet: () -> Void
+
+        private weak var installedWalletControl: UIControl?
+        private var interaction: UIContextMenuInteraction?
+
+        init(
+            profiles: [WalletProfile],
+            selectedProfileID: UUID?,
+            onSelect: @escaping (WalletProfile) -> Void,
+            onAddWallet: @escaping () -> Void
+        ) {
+            self.profiles = profiles
+            self.selectedProfileID = selectedProfileID
+            self.onSelect = onSelect
+            self.onAddWallet = onAddWallet
+        }
+
+        func installIfNeeded(on tabBar: UITabBar) {
+            let itemControls = tabBar.subviews
+                .compactMap { $0 as? UIControl }
+                .filter { !$0.isHidden && $0.alpha > 0 }
+                .sorted { $0.frame.minX < $1.frame.minX }
+
+            guard let walletControl = itemControls.first,
+                  installedWalletControl !== walletControl else { return }
+
+            if let installedWalletControl, let interaction {
+                installedWalletControl.removeInteraction(interaction)
+            }
+
+            let interaction = UIContextMenuInteraction(delegate: self)
+            walletControl.addInteraction(interaction)
+            installedWalletControl = walletControl
+            self.interaction = interaction
+        }
+
+        func contextMenuInteraction(
+            _ interaction: UIContextMenuInteraction,
+            configurationForMenuAtLocation location: CGPoint
+        ) -> UIContextMenuConfiguration? {
+            return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) {
+                [weak self] _ in
+                self?.walletMenu()
+            }
+        }
+
+        private func walletMenu() -> UIMenu {
+            let walletActions = profiles.map { profile in
+                UIAction(
+                    title: profile.name,
+                    image: UIImage(systemName: "wallet.pass"),
+                    state: profile.id == selectedProfileID ? .on : .off
+                ) { [weak self] _ in
+                    self?.onSelect(profile)
+                }
+            }
+
+            let addAction = UIAction(
+                title: "New Account",
+                image: UIImage(systemName: "plus")
+            ) { [weak self] _ in
+                self?.onAddWallet()
+            }
+
+            let accounts = UIMenu(options: .displayInline, children: walletActions)
+            let addAccount = UIMenu(options: .displayInline, children: [addAction])
+            return UIMenu(children: [accounts, addAccount])
+        }
     }
 }
 
@@ -109,7 +324,6 @@ struct UTXOsView: View {
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @Environment(\.openURL) private var openURL
 
-    @StateObject private var confirmationStore = UTXOConfirmationStore()
     @State private var editingLabelUTXOID: String?
     @State private var draftLabel = ""
     @State private var isLabelEditorPresented = false
@@ -174,11 +388,7 @@ struct UTXOsView: View {
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
-                confirmationStore.reset()
                 coinControlStore.activate(profileID: newValue)
-            }
-            .onChange(of: engine.rpcNotificationVersion) { _, _ in
-                handleRPCNotifications()
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -189,25 +399,15 @@ struct UTXOsView: View {
             }
         }
     }
-
-
-    private func handleRPCNotifications() {
-        guard !engine.rpcNotifications.isEmpty else { return }
-
-        Task {
-            await refreshUTXOs()
-        }
-    }
-
     private func refreshUTXOs() async {
         guard let profile = walletStore.selectedProfile else { return }
         await syncService.refresh(
             profile: profile,
+            walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: true
         )
-        confirmationStore.reset()
     }
 
     private var utxos: [WalletUTXO] {
@@ -226,7 +426,6 @@ struct UTXOsView: View {
 
     private func utxoCard(_ utxo: WalletUTXO, isNew: Bool) -> some View {
         let label = coinControlStore.label(for: utxo)
-        let confirmation = confirmationStore.state(for: utxo)
 
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 9) {
@@ -241,8 +440,8 @@ struct UTXOsView: View {
                         Spacer()
 
                         VStack(alignment: .trailing, spacing: 3) {
-                            statusRow(for: utxo, confirmation: confirmation)
-                                .font(.subheadline.weight(.semibold))
+                            statusRow(for: utxo)
+                                .font(.body.weight(.semibold))
 
                         }
                     }
@@ -258,11 +457,6 @@ struct UTXOsView: View {
 
                     Spacer()
 
-                    if case .confirmed(let date) = confirmation {
-                        Text(Self.confirmationFormatter.string(from: date))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
                 Button {
@@ -287,11 +481,11 @@ struct UTXOsView: View {
 
             Divider()
 
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("Label")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                    .frame(width: 72, alignment: .leading)
+                    .frame(width: 46, alignment: .leading)
 
                 Button {
                     beginEditingLabel(for: utxo)
@@ -331,44 +525,21 @@ struct UTXOsView: View {
                     lineWidth: 1
                 )
         }
-        .task(id: utxo.txID, priority: .background) {
-            try? await Task.sleep(for: .milliseconds(300))
-            guard !Task.isCancelled else { return }
-            await confirmationStore.load(transactionID: utxo.txID)
-        }
     }
 
     @ViewBuilder
-    private func statusRow(
-        for utxo: WalletUTXO,
-        confirmation: UTXOConfirmationStore.State
-    ) -> some View {
+    private func statusRow(for utxo: WalletUTXO) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Spacer(minLength: 14)
 
-            switch confirmation {
-            case .confirmed:
+            if utxo.blockDAAScore > 0 {
                 Text("Confirmed")
                     .foregroundStyle(
                         Color(red: 0.18, green: 0.68, blue: 0.62)
                     )
-            case .notConfirmed:
+            } else {
                 Text("Not confirmed")
-                    .foregroundStyle(.red)
-            case .loading:
-                Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                    .foregroundStyle(
-                        utxo.blockDAAScore > 0
-                            ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                            : Color.orange
-                    )
-            case .unavailable:
-                Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                    .foregroundStyle(
-    utxo.blockDAAScore > 0
-        ? Color(red: 0.18, green: 0.68, blue: 0.62)
-        : Color.orange
-)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -471,89 +642,4 @@ struct UTXOsView: View {
         Color(red: 0.20, green: 0.62, blue: 0.57)
     }
 
-    private static let confirmationFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "dd-MM-yyyy HH:mm"
-        formatter.timeZone = .current
-        return formatter
-    }()
-}
-
-@MainActor
-private final class UTXOConfirmationStore: ObservableObject {
-    enum State: Equatable {
-        case loading
-        case confirmed(Date)
-        case notConfirmed
-        case unavailable
-    }
-
-    @Published private var states: [String: State] = [:]
-
-    func state(for utxo: WalletUTXO) -> State {
-        states[utxo.txID] ?? .unavailable
-    }
-
-    func reset() {
-        states = states.filter { _, state in
-            if case .confirmed = state {
-                return true
-            }
-            return false
-        }
-    }
-
-    func load(transactionID: String) async {
-        guard states[transactionID] == nil else { return }
-
-        guard let encodedID = transactionID.addingPercentEncoding(
-            withAllowedCharacters: .urlPathAllowed
-        ), let url = URL(string: "https://api.kaspa.org/transactions/\(encodedID)") else {
-            states[transactionID] = .unavailable
-            return
-        }
-
-        do {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 12
-            request.cachePolicy = .reloadRevalidatingCacheData
-
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode) else {
-                states[transactionID] = .unavailable
-                return
-            }
-
-            let model = try JSONDecoder().decode(TransactionResponse.self, from: data)
-            guard model.isAccepted == true else {
-                states[transactionID] = .notConfirmed
-                return
-            }
-
-            guard let rawTimestamp = model.acceptingBlockTime ?? model.blockTime else {
-                states[transactionID] = .unavailable
-                return
-            }
-
-            let seconds = rawTimestamp > 10_000_000_000
-                ? Double(rawTimestamp) / 1_000.0
-                : Double(rawTimestamp)
-            states[transactionID] = .confirmed(Date(timeIntervalSince1970: seconds))
-        } catch {
-            states[transactionID] = .unavailable
-        }
-    }
-
-    private struct TransactionResponse: Decodable {
-        let isAccepted: Bool?
-        let acceptingBlockTime: Int64?
-        let blockTime: Int64?
-
-        enum CodingKeys: String, CodingKey {
-            case isAccepted = "is_accepted"
-            case acceptingBlockTime = "accepting_block_time"
-            case blockTime = "block_time"
-        }
-    }
 }
