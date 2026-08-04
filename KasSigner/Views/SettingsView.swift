@@ -98,10 +98,16 @@ struct SettingsView: View {
                         }
                     }
 
+                    Picker("Decimals", selection: $preferences.kasBalanceDecimalPlaces) {
+                        ForEach(KasBalanceDecimalPlaces.allCases) { decimalPlaces in
+                            Text(decimalPlaces.title).tag(decimalPlaces)
+                        }
+                    }
+
                     NavigationLink {
                         OtherSettingsView()
                     } label: {
-                        Text("Currency & Price")
+                        Text("Currency")
                     }
 
                     Picker("Explorer", selection: $preferences.explorer) {
@@ -114,7 +120,7 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    LabeledContent("Kaspa network", value: "Mainnet")
+                    LabeledContent("Kaspa Network", value: "Mainnet")
 
                     Menu {
                         ForEach(NodeConnectionMode.allCases) { mode in
@@ -150,7 +156,7 @@ struct SettingsView: View {
                     statusRow
 
                     if let snapshot = syncService.snapshot {
-                        LabeledContent("Active node", value: nodeHost(snapshot.nodeURL))
+                        LabeledContent("Active Node", value: nodeHost(snapshot.nodeURL))
                     }
                 } header: {
                     Text("Network & Node")
@@ -284,7 +290,7 @@ struct SettingsView: View {
     @ViewBuilder
     private var statusRow: some View {
         HStack {
-            Text("Status")
+            Text("Node Status")
             Spacer()
             switch liveRPCService.state {
             case .failed:
@@ -411,23 +417,23 @@ private struct OtherSettingsView: View {
             }
 
             Section {
-                Picker("Price Source", selection: $preferences.priceProvider) {
+                Picker("API", selection: $preferences.priceProvider) {
                     ForEach(PriceProviderChoice.allCases) { provider in
                         Text(provider.title).tag(provider)
                     }
                 }
 
-                LabeledContent("Active source") {
+                LabeledContent("Active API") {
                     Text(priceService.activeProvider?.title ?? "Not available")
                         .foregroundStyle(.secondary)
                 }
 
-                LabeledContent("Status") {
+                LabeledContent("API Status") {
                     priceStatus
                 }
 
                 if let lastUpdated = priceService.lastUpdated {
-                    LabeledContent("Last updated") {
+                    LabeledContent("Last Updated") {
                         Text(lastUpdated, style: .relative)
                             .foregroundStyle(.secondary)
                     }
@@ -450,16 +456,16 @@ private struct OtherSettingsView: View {
                 }
                 .disabled(priceService.state == .refreshing)
             } header: {
-                Text("Price Data")
+                Text("Price API")
             } footer: {
                 if preferences.priceProvider == .automatic {
-                    Text("Automatically uses the healthiest available source, with CoinGecko and CoinPaprika as fallbacks.")
+                    Text("Automatically uses the healthiest API, with CoinGecko and CoinPaprika as fallbacks.")
                 } else {
-                    Text("Use \(preferences.priceProvider.title) as the preferred source. Automatic fallback will remain available if it cannot be reached.")
+                    Text("Use \(preferences.priceProvider.title) as the preferred API. Automatic fallback will remain available if it cannot be reached.")
                 }
             }
         }
-        .navigationTitle("Currency & Price")
+        .navigationTitle("Currency")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await priceService.refresh(preferences: preferences)
@@ -475,7 +481,7 @@ private struct OtherSettingsView: View {
     private var priceStatus: some View {
         switch priceService.state {
         case .idle:
-            Text("Ready")
+            Text("Disconnected")
                 .foregroundStyle(.secondary)
         case .refreshing:
             HStack(spacing: 6) {
@@ -485,10 +491,10 @@ private struct OtherSettingsView: View {
             }
             .foregroundStyle(.secondary)
         case .available:
-            Text("Current")
+            Text("Connected")
                 .foregroundStyle(.green)
-        case .failed(let message):
-            Text(message)
+        case .failed:
+            Text("Error")
                 .foregroundStyle(.orange)
                 .multilineTextAlignment(.trailing)
         }

@@ -7,6 +7,7 @@ struct ReceiveView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
 
     let profile: WalletProfile
@@ -235,7 +236,10 @@ struct ReceiveView: View {
 
     private var balanceText: String {
         guard let balance = syncService.snapshot?.balance.totalKas else { return "— KAS" }
-        return balance.formatted(.number.precision(.fractionLength(0...8))) + " KAS"
+        return KasBalanceFormatter.string(
+            from: balance,
+            decimalPlaces: preferences.kasBalanceDecimalPlaces
+        ) + " KAS"
     }
 
     private var qrImage: UIImage? {

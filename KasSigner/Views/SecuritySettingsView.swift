@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SecuritySettingsView: View {
     @EnvironmentObject private var appLockService: AppLockService
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var appLockToggle = false
     @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
     private var decoyLaunchScreenEnabled = false
@@ -25,9 +26,35 @@ struct SecuritySettingsView: View {
                     }
 
                 if appLockService.isEnabled {
-                    Picker("Require Authentication", selection: $appLockService.lockDelay) {
+                    Menu {
                         ForEach(AppLockService.LockDelay.allCases) { delay in
-                            Text(delay.title).tag(delay)
+                            Button {
+                                appLockService.lockDelay = delay
+                            } label: {
+                                if appLockService.lockDelay == delay {
+                                    Label(delay.title, systemImage: "checkmark")
+                                } else {
+                                    Text(delay.title)
+                                }
+                            }
+                        }
+                    } label: {
+                        if dynamicTypeSize.isAccessibilitySize {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Require Authentication")
+                                    .foregroundStyle(.primary)
+                                HStack {
+                                    Spacer()
+                                    collapsedLockDelayLabel
+                                }
+                            }
+                        } else {
+                            HStack {
+                                Text("Require Authentication")
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                                collapsedLockDelayLabel
+                            }
                         }
                     }
                 }
@@ -61,5 +88,21 @@ struct SecuritySettingsView: View {
             get: { appLockService.authenticationError != nil },
             set: { if !$0 { appLockService.authenticationError = nil } }
         )
+    }
+
+    private var collapsedLockDelayTitle: String {
+        switch appLockService.lockDelay {
+        case .immediately: "Immediately"
+        case .oneMinute: "1 Minute"
+        case .fiveMinutes: "5 Minutes"
+        }
+    }
+
+    private var collapsedLockDelayLabel: some View {
+        HStack(spacing: 6) {
+            Text(collapsedLockDelayTitle)
+            Image(systemName: "chevron.up.chevron.down")
+                .font(.caption.weight(.semibold))
+        }
     }
 }

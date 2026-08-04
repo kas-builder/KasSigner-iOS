@@ -16,6 +16,28 @@ enum AppearanceTheme: String, CaseIterable, Identifiable {
     }
 }
 
+enum KasBalanceDecimalPlaces: Int, CaseIterable, Identifiable {
+    case zero = 0
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+
+    var id: Int { rawValue }
+    var title: String { String(rawValue) }
+}
+
+enum KasBalanceFormatter {
+    static func string(
+        from amount: Double,
+        decimalPlaces: KasBalanceDecimalPlaces
+    ) -> String {
+        amount.formatted(
+            .number.precision(.fractionLength(decimalPlaces.rawValue))
+        )
+    }
+}
+
 enum ExplorerChoice: String, CaseIterable, Identifiable {
     case kaspaStream
     case kaspaExplorer
@@ -58,7 +80,7 @@ enum NodeConnectionMode: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
-        case .automatic: "Automatic Public Nodes"
+        case .automatic: "Automatic Nodes"
         case .custom: "Custom Node"
         }
     }
@@ -101,6 +123,7 @@ enum PriceProviderChoice: String, CaseIterable, Identifiable {
 @MainActor
 final class AppPreferences: ObservableObject {
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
+    @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
     @Published var nodeMode: NodeConnectionMode { didSet { save() } }
     @Published var customNodeURL: String { didSet { save() } }
@@ -109,6 +132,7 @@ final class AppPreferences: ObservableObject {
 
     private enum Key {
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
+        static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
         static let nodeMode = "kassigner.nodeMode.v1"
         static let customNode = "kassigner.customNode.v1"
@@ -121,6 +145,9 @@ final class AppPreferences: ObservableObject {
         appearanceTheme = AppearanceTheme(
             rawValue: defaults.string(forKey: Key.appearanceTheme) ?? ""
         ) ?? .system
+        kasBalanceDecimalPlaces = KasBalanceDecimalPlaces(
+            rawValue: defaults.object(forKey: Key.kasBalanceDecimalPlaces) as? Int ?? 4
+        ) ?? .four
         explorer = ExplorerChoice(rawValue: defaults.string(forKey: Key.explorer) ?? "") ?? .kaspaStream
         nodeMode = NodeConnectionMode(rawValue: defaults.string(forKey: Key.nodeMode) ?? "") ?? .automatic
         customNodeURL = defaults.string(forKey: Key.customNode) ?? ""
@@ -142,6 +169,7 @@ final class AppPreferences: ObservableObject {
     private func save() {
         let defaults = UserDefaults.standard
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
+        defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)
         defaults.set(nodeMode.rawValue, forKey: Key.nodeMode)
         defaults.set(customNodeURL, forKey: Key.customNode)

@@ -3,6 +3,7 @@ import UIKit
 
 struct WalletHomeView: View {
     @State private var showingSendFlow = false
+    @Environment(\.legibilityWeight) private var legibilityWeight
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -29,7 +30,8 @@ struct WalletHomeView: View {
                     }
                 }
             }
-            .navigationTitle("KasSigner")
+            .navigationTitle(walletStore.selectedProfile == nil ? "KasSigner" : "")
+            .navigationBarTitleDisplayMode(walletStore.selectedProfile == nil ? .large : .inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showingAddWallet = true } label: {
@@ -51,6 +53,16 @@ struct WalletHomeView: View {
     private func walletContent(_ profile: WalletProfile) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 0) {
+                    Text("Kas")
+                        .foregroundStyle(.primary)
+                    Text("Signer")
+                        .foregroundStyle(.primary)
+                }
+                .font(.largeTitle.weight(.bold))
+                    .offset(y: -12)
+                    .padding(.bottom, -10)
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(spacing: 5) {
                         Text(profile.name)
@@ -69,7 +81,13 @@ struct WalletHomeView: View {
                     } label: {
                         HStack(alignment: .center, spacing: 9) {
                             Text(balanceDisplayText)
-                                .font(.system(size: 42, weight: .semibold, design: .rounded))
+                                .font(
+                                    .system(
+                                        size: 42,
+                                        weight: legibilityWeight == .bold ? .medium : .semibold,
+                                        design: .rounded
+                                    )
+                                )
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.48)
                                 .allowsTightening(true)
@@ -194,7 +212,10 @@ struct WalletHomeView: View {
     private var balanceAmountText: String {
         guard let balance = syncService.snapshot?.balance.totalKas else { return "" }
         guard showingSecondaryCurrency else {
-            return balance.formatted(.number.precision(.fractionLength(0...8)))
+            return KasBalanceFormatter.string(
+                from: balance,
+                decimalPlaces: preferences.kasBalanceDecimalPlaces
+            )
         }
         guard let converted = priceService.convertedBalance(
             kas: balance,
@@ -254,7 +275,6 @@ struct WalletHomeView: View {
         return "\(hours) hr ago"
     }
 }
-
 
 struct SendUTXOSelectionView: View {
     let profile: WalletProfile
