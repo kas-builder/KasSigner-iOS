@@ -83,9 +83,12 @@ final class WalletSyncService: ObservableObject {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                let wasAvailable = self.isNetworkAvailable
                 self.isNetworkAvailable = path.status == .satisfied
                 if path.status != .satisfied {
                     self.state = .failed("No internet connection.")
+                } else if !wasAvailable {
+                    self.state = .idle
                 }
             }
         }

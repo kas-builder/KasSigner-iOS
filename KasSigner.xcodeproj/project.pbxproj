@@ -17,6 +17,7 @@
 		A10000000000000000000002 /* KasSigner/Models/AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* KasSigner/Models/AppPreferences.swift */; };
 		A10000000000000000000003 /* KasSigner/Services/WalletSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* KasSigner/Services/WalletSyncService.swift */; };
 		A10000000000000000000004 /* KasSigner/Services/PriceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000004 /* KasSigner/Services/PriceService.swift */; };
+		A10000000000000000000005 /* KasSigner/Services/KaspaLiveRPCService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000005 /* KasSigner/Services/KaspaLiveRPCService.swift */; };
 		A13B7C9D1E2F304152637485 /* KasSigner/Views/QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B24C8D0E2F31425364758697 /* KasSigner/Views/QRScannerView.swift */; };
 		A1B2C3D4E5F60718293A4B5C /* KasSigner/Views/ReceiveView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5061728394A5B6C /* KasSigner/Views/ReceiveView.swift */; };
 		A50000000000000000000001 /* KasSigner/Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B50000000000000000000001 /* KasSigner/Assets.xcassets */; };
@@ -42,6 +43,7 @@
 		B10000000000000000000002 /* KasSigner/Models/AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/AppPreferences.swift; sourceTree = "<group>"; };
 		B10000000000000000000003 /* KasSigner/Services/WalletSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/WalletSyncService.swift; sourceTree = "<group>"; };
 		B10000000000000000000004 /* KasSigner/Services/PriceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/PriceService.swift; sourceTree = "<group>"; };
+		B10000000000000000000005 /* KasSigner/Services/KaspaLiveRPCService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/KaspaLiveRPCService.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5061728394A5B6C /* KasSigner/Views/ReceiveView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/ReceiveView.swift; sourceTree = "<group>"; };
 		B24C8D0E2F31425364758697 /* KasSigner/Views/QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/QRScannerView.swift; sourceTree = "<group>"; };
 		B50000000000000000000001 /* KasSigner/Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = KasSigner/Assets.xcassets; sourceTree = "<group>"; };
@@ -92,6 +94,7 @@
 				B10000000000000000000002 /* KasSigner/Models/AppPreferences.swift */,
 				B10000000000000000000003 /* KasSigner/Services/WalletSyncService.swift */,
 				B10000000000000000000004 /* KasSigner/Services/PriceService.swift */,
+				B10000000000000000000005 /* KasSigner/Services/KaspaLiveRPCService.swift */,
 				6397099E4CF65E1EA30FB542 /* KasSigner/Resources/Web */,
 				B50000000000000000000001 /* KasSigner/Assets.xcassets */,
 				B60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy */,
@@ -187,6 +190,7 @@
 				A10000000000000000000002 /* KasSigner/Models/AppPreferences.swift in Sources */,
 				A10000000000000000000003 /* KasSigner/Services/WalletSyncService.swift in Sources */,
 				A10000000000000000000004 /* KasSigner/Services/PriceService.swift in Sources */,
+				A10000000000000000000005 /* KasSigner/Services/KaspaLiveRPCService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -215,7 +219,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
@@ -245,7 +249,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
