@@ -7,10 +7,10 @@ struct ReceiveView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
 
     let profile: WalletProfile
 
-    @State private var showCopiedBanner = false
     @State private var isGeneratingAddress = false
     @State private var generationError: String?
     @State private var selectedAddressIndex = 0
@@ -54,7 +54,10 @@ struct ReceiveView: View {
                         .opacity(selectedAddressIndex == 0 ? 0.25 : 1)
 
                         if let image = qrImage {
-                            Image(uiImage: image)
+                            Button {
+                                copyReceiveAddress()
+                            } label: {
+                                Image(uiImage: image)
                                 .interpolation(.none)
                                 .resizable()
                                 .scaledToFit()
@@ -89,6 +92,9 @@ struct ReceiveView: View {
                                 .id(receiveAddress)
                                 .transition(.opacity)
                                 .accessibilityLabel("Receive address QR code")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityHint("Copies the full receive address")
                         }
 
                         Button {
@@ -115,8 +121,7 @@ struct ReceiveView: View {
                 }
 
                 Button {
-                    UIPasteboard.general.string = receiveAddress
-                    showCopyBanner()
+                    copyReceiveAddress()
                 } label: {
                     Text(twoLineReceiveAddress)
                         .font(.system(size: 12.35, weight: .regular, design: .monospaced))
@@ -193,19 +198,6 @@ struct ReceiveView: View {
             }
         } message: {
             Text(generationError ?? "")
-        }
-        .overlay(alignment: .top) {
-            if showCopiedBanner {
-                Label("Address copied", systemImage: "checkmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
-                    .shadow(radius: 8, y: 3)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .accessibilityAddTraits(.isStaticText)
-            }
         }
     }
 
@@ -296,19 +288,10 @@ struct ReceiveView: View {
         }
     }
 
-    private func showCopyBanner() {
-        withAnimation(.snappy) {
-            showCopiedBanner = true
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(1.6))
-            await MainActor.run {
-                withAnimation(.snappy) {
-                    showCopiedBanner = false
-                }
-            }
-        }
+    private func copyReceiveAddress() {
+        guard !receiveAddress.isEmpty else { return }
+        UIPasteboard.general.string = receiveAddress
+        copyFeedbackCenter.show("Address copied")
     }
 
     private func refreshAge(now: Date) -> String {
