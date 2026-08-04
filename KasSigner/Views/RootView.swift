@@ -1,6 +1,17 @@
 import SwiftUI
 import UIKit
 
+struct SubtlePressButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.82 : 1)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 struct KasSignerLoadingView: View {
     var size: CGFloat = 22
     var lineWidth: CGFloat = 3
@@ -544,7 +555,7 @@ struct UTXOsView: View {
                             .padding(.top, 2)
                     }
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
             }
 
             Divider()
@@ -576,7 +587,7 @@ struct UTXOsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityLabel(label.isEmpty ? "Add label" : "Edit label")
             }
         }

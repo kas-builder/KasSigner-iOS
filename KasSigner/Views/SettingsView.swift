@@ -27,25 +27,27 @@ struct SettingsView: View {
                 if !walletStore.profiles.isEmpty {
                     Section("Accounts") {
                         ForEach(walletStore.profiles) { profile in
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    Text(profile.name)
-                                    Text("Watch-only account")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if profile.id == walletStore.selectedProfile?.id {
-                                    Image(systemName: "checkmark")
-                                        .foregroundStyle(.tint)
-                                }
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture {
+                            Button {
                                 walletStore.selectedProfileID = profile.id
                                 syncService.preload(profile: profile)
                                 onWalletSelected?()
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(profile.name)
+                                        Text("Watch-only account")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if profile.id == walletStore.selectedProfile?.id {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(.tint)
+                                    }
+                                }
+                                .contentShape(Rectangle())
                             }
+                            .buttonStyle(SubtlePressButtonStyle())
                             .contextMenu {
                                 Button {
                                     beginRenaming(profile)
@@ -210,7 +212,7 @@ struct SettingsView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SubtlePressButtonStyle())
 
                     NavigationLink {
                         DonateView()
@@ -515,7 +517,7 @@ private struct DonateView: View {
                 } label: {
                     SharedQRCodeView(payload: donationAddress)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityLabel("Donation address QR code")
                 .accessibilityHint("Copies the full donation address")
 
@@ -534,7 +536,7 @@ private struct DonateView: View {
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityLabel(donationAddress)
                 .accessibilityHint("Copies the full donation address")
             }

@@ -109,7 +109,7 @@ struct WalletHomeView: View {
                         .lineLimit(1)
                         .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SubtlePressButtonStyle())
                     .contentTransition(.numericText())
                     .sensoryFeedback(.selection, trigger: showingSecondaryCurrency)
                     .accessibilityLabel(balanceAccessibilityLabel)
@@ -125,7 +125,7 @@ struct WalletHomeView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(SubtlePressButtonStyle())
                     .disabled(profile.receiveAddresses.isEmpty)
                     .accessibilityHint("Copies the full receive address")
                 }
@@ -492,7 +492,7 @@ struct SendUTXOSelectionView: View {
             }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SubtlePressButtonStyle())
     }
 
     private func formatKas(sompi: UInt64) -> String {

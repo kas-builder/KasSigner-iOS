@@ -48,11 +48,12 @@ struct ReceiveView: View {
                         } label: {
                             Image(systemName: "chevron.left")
                                 .font(.title2.weight(.semibold))
-                                .frame(width: 30, height: 44)
+                                .frame(width: 44, height: 44)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(SubtlePressButtonStyle())
                         .disabled(selectedAddressIndex == 0)
                         .opacity(selectedAddressIndex == 0 ? 0.25 : 1)
+                        .accessibilityLabel("Previous address")
 
                         if let image = qrImage {
                             Button {
@@ -94,7 +95,7 @@ struct ReceiveView: View {
                                 .transition(.opacity)
                                 .accessibilityLabel("Receive address QR code")
                             }
-                            .buttonStyle(.plain)
+                            .buttonStyle(SubtlePressButtonStyle())
                             .accessibilityHint("Copies the full receive address")
                         }
 
@@ -109,15 +110,16 @@ struct ReceiveView: View {
                         } label: {
                             Image(systemName: "chevron.right")
                                 .font(.title2.weight(.semibold))
-                                .frame(width: 30, height: 44)
+                                .frame(width: 44, height: 44)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(SubtlePressButtonStyle())
                         .disabled(selectedAddressIndex >= activeProfile.receiveAddresses.count - 1)
                         .opacity(
                             selectedAddressIndex >= activeProfile.receiveAddresses.count - 1
                                 ? 0.25
                                 : 1
                         )
+                        .accessibilityLabel("Next address")
                     }
                 }
 
@@ -133,7 +135,7 @@ struct ReceiveView: View {
                         .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityHint("Copies the full receive address")
 
                 Button {
@@ -153,7 +155,7 @@ struct ReceiveView: View {
                             in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                         )
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .disabled(isGeneratingAddress)
 
                 VStack(spacing: 10) {

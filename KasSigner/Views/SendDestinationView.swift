@@ -1153,7 +1153,7 @@ private struct VerifiedTransactionSummaryCards: View {
                     Image(systemName: "doc.on.doc")
                         .font(.subheadline.weight(.semibold))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityLabel("Copy destination")
             }
 
