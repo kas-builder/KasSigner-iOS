@@ -197,6 +197,7 @@ final class KaspaLiveRPCService: ObservableObject {
                   !Task.isCancelled,
                   self.runtimeActive,
                   self.networkAvailable else { return }
+            self.reconnectTask = nil
             await self.connect(engine: engine, isReconnect: true)
         }
     }

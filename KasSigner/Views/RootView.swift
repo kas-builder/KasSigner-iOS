@@ -46,6 +46,7 @@ struct RootView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: Tab = .wallet
@@ -86,6 +87,31 @@ struct RootView: View {
         }
         .sheet(isPresented: $showingAddWallet) {
             AddWalletView()
+        }
+        .overlay {
+            GeometryReader { proxy in
+                if let message = copyFeedbackCenter.message {
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 7) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text(message)
+                                .foregroundStyle(.primary)
+                        }
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(.regularMaterial, in: Capsule())
+                            .shadow(radius: 8, y: 3)
+                            .padding(.bottom, proxy.safeAreaInsets.bottom + 58)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .accessibilityAddTraits(.isStaticText)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .allowsHitTesting(false)
         }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()

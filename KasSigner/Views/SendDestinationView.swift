@@ -1101,6 +1101,8 @@ private struct VerifiedTransactionReviewView: View {
 private struct VerifiedTransactionSummaryCards: View {
     let review: VerifiedTransactionReview
 
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
+
     private var accentColor: Color {
         Color(
             red: 0.20,
@@ -1146,6 +1148,7 @@ private struct VerifiedTransactionSummaryCards: View {
 
                 Button {
                     UIPasteboard.general.string = review.destination
+                    copyFeedbackCenter.show("Destination copied")
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.subheadline.weight(.semibold))

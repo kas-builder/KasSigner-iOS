@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct WalletHomeView: View {
     @State private var showingSendFlow = false
@@ -8,6 +9,7 @@ struct WalletHomeView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var priceService: PriceService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @State private var showingAddWallet = false
     @State private var showingSecondaryCurrency = false
 
@@ -94,11 +96,20 @@ struct WalletHomeView: View {
                     .sensoryFeedback(.selection, trigger: showingSecondaryCurrency)
                     .accessibilityLabel(balanceAccessibilityLabel)
                     .accessibilityHint("Double tap to switch between KAS and \(preferences.secondaryCurrency.displayName).")
-                    Text(walletHomeReceiveAddress(for: profile))
-                        .font(.footnote.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
+                    Button {
+                        copyWalletHomeReceiveAddress(for: profile)
+                    } label: {
+                        Text(walletHomeReceiveAddress(for: profile))
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(profile.receiveAddresses.isEmpty)
+                    .accessibilityHint("Copies the full receive address")
                 }
 
                 HStack(spacing: 10) {
@@ -171,6 +182,13 @@ struct WalletHomeView: View {
         )
 
         return profile.receiveAddresses[index]
+    }
+
+    private func copyWalletHomeReceiveAddress(for profile: WalletProfile) {
+        guard !profile.receiveAddresses.isEmpty else { return }
+        let address = walletHomeReceiveAddress(for: profile)
+        UIPasteboard.general.string = address
+        copyFeedbackCenter.show("Address copied")
     }
 
     private var balanceAmountText: String {

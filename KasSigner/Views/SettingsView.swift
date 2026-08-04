@@ -10,12 +10,12 @@ struct SettingsView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @State private var isDeriving = false
     @State private var derivationError: String?
     @State private var profileBeingRenamed: WalletProfile?
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
-    @State private var showKpubCopiedBanner = false
 
     init(onWalletSelected: (() -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
@@ -24,84 +24,6 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Appearance") {
-                    Picker("Appearance", selection: $preferences.appearanceTheme) {
-                        ForEach(AppearanceTheme.allCases) { theme in
-                            Text(theme.title).tag(theme)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-                    .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-                    .listRowBackground(Color.clear)
-                }
-
-                Section("Network") {
-                    LabeledContent("Kaspa network", value: "Mainnet")
-                    LabeledContent("Wallet engine", value: engine.statusText)
-                }
-
-                Section {
-                    Picker("Explorer", selection: $preferences.explorer) {
-                        ForEach(ExplorerChoice.allCases) { explorer in
-                            Text(explorer.title).tag(explorer)
-                        }
-                    }
-                } header: {
-                    Text("Block Explorer")
-                }
-
-                Section {
-                    Menu {
-                        ForEach(NodeConnectionMode.allCases) { mode in
-                            Button {
-                                preferences.nodeMode = mode
-                            } label: {
-                                if preferences.nodeMode == mode {
-                                    Label(mode.title, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.title)
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack {
-                            Text(preferences.nodeMode.title)
-                                .foregroundStyle(.tint)
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tint)
-                        }
-                        .contentShape(Rectangle())
-                    }
-
-                    if preferences.nodeMode == .custom {
-                        TextField("wss://your-node.example", text: $preferences.customNodeURL)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.footnote.monospaced())
-                    }
-
-                    statusRow
-
-                    if let snapshot = syncService.snapshot {
-                        LabeledContent("Active node", value: nodeHost(snapshot.nodeURL))
-                        Text(snapshot.nodeURL)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
-                    }
-                } header: {
-                    Text("Node Settings")
-                } footer: {
-                    if preferences.nodeMode == .automatic {
-                    } else {
-                        Text("Connect directly to your own Kaspa node. Wallet access requires a public ws:// or wss:// wRPC endpoint with UTXO indexing enabled.")
-                    }
-                }
-
                 if !walletStore.profiles.isEmpty {
                     Section("Accounts") {
                         ForEach(walletStore.profiles) { profile in
@@ -161,6 +83,84 @@ struct SettingsView: View {
                     }
                 }
 
+                Section {
+                    NavigationLink {
+                        SecuritySettingsView()
+                    } label: {
+                        Text("Security")
+                    }
+                }
+
+                Section {
+                    Picker("Theme", selection: $preferences.appearanceTheme) {
+                        ForEach(AppearanceTheme.allCases) { theme in
+                            Text(theme.title).tag(theme)
+                        }
+                    }
+
+                    NavigationLink {
+                        OtherSettingsView()
+                    } label: {
+                        Text("Currency & Price")
+                    }
+
+                    Picker("Explorer", selection: $preferences.explorer) {
+                        ForEach(ExplorerChoice.allCases) { explorer in
+                            Text(explorer.title).tag(explorer)
+                        }
+                    }
+                } header: {
+                    Text("Preferences")
+                }
+
+                Section {
+                    LabeledContent("Kaspa network", value: "Mainnet")
+
+                    Menu {
+                        ForEach(NodeConnectionMode.allCases) { mode in
+                            Button {
+                                preferences.nodeMode = mode
+                            } label: {
+                                if preferences.nodeMode == mode {
+                                    Label(mode.title, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.title)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack {
+                            Text(preferences.nodeMode.title)
+                                .foregroundStyle(.tint)
+                            Spacer()
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tint)
+                        }
+                        .contentShape(Rectangle())
+                    }
+
+                    if preferences.nodeMode == .custom {
+                        TextField("wss://your-node.example", text: $preferences.customNodeURL)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.footnote.monospaced())
+                    }
+
+                    statusRow
+
+                    if let snapshot = syncService.snapshot {
+                        LabeledContent("Active node", value: nodeHost(snapshot.nodeURL))
+                    }
+                } header: {
+                    Text("Network & Node")
+                } footer: {
+                    if preferences.nodeMode == .automatic {
+                    } else {
+                        Text("Connect directly to your own Kaspa node. Wallet access requires a public ws:// or wss:// wRPC endpoint with UTXO indexing enabled.")
+                    }
+                }
+
                 if let profile = walletStore.selectedProfile {
                     Section {
                         LabeledContent("Receive addresses", value: "\(profile.receiveAddresses.count)")
@@ -182,14 +182,6 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("General") {
-                    NavigationLink {
-                        OtherSettingsView()
-                    } label: {
-                        Text("Currency & Price")
-                    }
-                }
-
                 Section("About") {
                     LabeledContent("App", value: "KasSigner")
                     LabeledContent(
@@ -198,6 +190,21 @@ struct SettingsView: View {
                             forInfoDictionaryKey: "CFBundleShortVersionString"
                         ) as? String ?? "—"
                     )
+
+                    Link(destination: URL(string: "https://github.com/kas-builder/KasSigner-iOS")!) {
+                        HStack {
+                            Text("GitHub")
+                            Spacer()
+                            Image("GitHubMark")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 20, height: 20)
+                        }
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
 
                     NavigationLink {
                         DonateView()
@@ -248,19 +255,6 @@ struct SettingsView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(derivationError ?? "Unknown error")
-            }
-            .overlay(alignment: .top) {
-                if showKpubCopiedBanner {
-                    Label("kpub copied", systemImage: "checkmark.circle.fill")
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(.regularMaterial, in: Capsule())
-                        .shadow(radius: 8, y: 3)
-                        .padding(.top, 8)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .accessibilityAddTraits(.isStaticText)
-                }
             }
         }
     }
@@ -361,19 +355,7 @@ struct SettingsView: View {
 
     private func copyKpub(_ profile: WalletProfile) {
         UIPasteboard.general.string = profile.kpub
-
-        withAnimation(.snappy) {
-            showKpubCopiedBanner = true
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(1.6))
-            await MainActor.run {
-                withAnimation(.snappy) {
-                    showKpubCopiedBanner = false
-                }
-            }
-        }
+        copyFeedbackCenter.show("kpub copied")
     }
 
     private func deleteProfile(_ profile: WalletProfile) {
@@ -517,19 +499,24 @@ private struct DonateView: View {
     private let donationAddress =
         "kaspa:qqpzpn5e7enn2ylfdxvlwtm3829gn6j9z9dnnmcsw5arkgnurktty6ulgzkfk"
 
-    @State private var showCopiedBanner = false
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
 
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                SharedQRCodeView(payload: donationAddress)
-                    .accessibilityLabel("Donation address QR code")
+                Button {
+                    copyDonationAddress()
+                } label: {
+                    SharedQRCodeView(payload: donationAddress)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Donation address QR code")
+                .accessibilityHint("Copies the full donation address")
 
                 Button {
-                    UIPasteboard.general.string = donationAddress
-                    showCopyBanner()
+                    copyDonationAddress()
                 } label: {
-                    VStack(spacing: 8) {
+                    VStack {
                         Text(twoLineDonationAddress)
                             .font(.system(size: 14.5, weight: .regular, design: .monospaced))
                             .foregroundStyle(.primary)
@@ -537,10 +524,6 @@ private struct DonateView: View {
                             .lineLimit(2)
                             .minimumScaleFactor(0.8)
                             .fixedSize(horizontal: false, vertical: true)
-
-                        Label("Tap address to copy", systemImage: "doc.on.doc")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity)
                     .contentShape(Rectangle())
@@ -554,19 +537,6 @@ private struct DonateView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Donate")
         .navigationBarTitleDisplayMode(.inline)
-        .overlay(alignment: .top) {
-            if showCopiedBanner {
-                Label("Address copied", systemImage: "checkmark.circle.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(.regularMaterial, in: Capsule())
-                    .shadow(radius: 8, y: 3)
-                    .padding(.top, 8)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .accessibilityAddTraits(.isStaticText)
-            }
-        }
     }
 
     private var twoLineDonationAddress: String {
@@ -579,18 +549,8 @@ private struct DonateView: View {
             + String(donationAddress[midpoint...])
     }
 
-    private func showCopyBanner() {
-        withAnimation(.snappy) {
-            showCopiedBanner = true
-        }
-
-        Task {
-            try? await Task.sleep(for: .seconds(1.6))
-            await MainActor.run {
-                withAnimation(.snappy) {
-                    showCopiedBanner = false
-                }
-            }
-        }
+    private func copyDonationAddress() {
+        UIPasteboard.general.string = donationAddress
+        copyFeedbackCenter.show("Address copied")
     }
 }
