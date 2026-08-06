@@ -283,6 +283,7 @@ struct SendUTXOSelectionView: View {
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @State private var showingUTXOSelectionLimit = false
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -342,6 +343,11 @@ struct SendUTXOSelectionView: View {
                 coinControlStore.clearSelection()
             }
         }
+        .alert("Eight-UTXO limit", isPresented: $showingUTXOSelectionLimit) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("KasSigner supports at most 8 selected UTXOs in one transaction. Additional UTXOs were not selected.")
+        }
     }
 
     private var utxos: [WalletUTXO] {
@@ -358,6 +364,10 @@ struct SendUTXOSelectionView: View {
 
     private var selectedUTXOs: [WalletUTXO] {
         coinControlStore.selectedUTXOs(from: utxos)
+    }
+
+    private var maximumSelectableCount: Int {
+        min(utxos.count, UTXOCoinControlStore.maximumSelectedUTXOs)
     }
 
     private var selectedTotalSompi: UInt64? {
@@ -395,17 +405,23 @@ struct SendUTXOSelectionView: View {
             }
 
             HStack(spacing: 10) {
-                Button(selectedUTXOs.count == utxos.count ? "Clear All" : "Select All") {
-                    if selectedUTXOs.count == utxos.count {
+                Button(selectedUTXOs.count == maximumSelectableCount
+                    ? "Clear All"
+                    : (utxos.count > UTXOCoinControlStore.maximumSelectedUTXOs
+                        ? "Select First 8"
+                        : "Select All")) {
+                    if selectedUTXOs.count == maximumSelectableCount {
                         coinControlStore.clearSelection()
                     } else {
-                        coinControlStore.selectAll(utxos)
+                        if coinControlStore.selectAll(utxos) > 0 {
+                            showingUTXOSelectionLimit = true
+                        }
                     }
                 }
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.bordered)
 
-                if !selectedUTXOs.isEmpty && selectedUTXOs.count != utxos.count {
+                if !selectedUTXOs.isEmpty && selectedUTXOs.count != maximumSelectableCount {
                     Button("Clear") {
                         coinControlStore.clearSelection()
                     }
@@ -426,7 +442,9 @@ struct SendUTXOSelectionView: View {
         let label = coinControlStore.label(for: utxo)
 
         return Button {
-            coinControlStore.toggle(utxo)
+            if !coinControlStore.toggle(utxo) {
+                showingUTXOSelectionLimit = true
+            }
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {

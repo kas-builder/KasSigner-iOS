@@ -58,6 +58,8 @@ struct WalletSyncPayload: Codable, Equatable {
 
 @MainActor
 final class UTXOCoinControlStore: ObservableObject {
+    nonisolated static let maximumSelectedUTXOs = 8
+
     @Published private(set) var selectedOutpoints: Set<String> = []
     @Published private(set) var labels: [String: String] = [:]
 
@@ -75,18 +77,26 @@ final class UTXOCoinControlStore: ObservableObject {
         selectedOutpoints.contains(utxo.id)
     }
 
-    func toggle(_ utxo: WalletUTXO) {
+    @discardableResult
+    func toggle(_ utxo: WalletUTXO) -> Bool {
         if selectedOutpoints.contains(utxo.id) {
             selectedOutpoints.remove(utxo.id)
         } else {
+            guard selectedOutpoints.count < Self.maximumSelectedUTXOs else {
+                return false
+            }
             selectedOutpoints.insert(utxo.id)
         }
         saveSelection()
+        return true
     }
 
-    func selectAll(_ utxos: [WalletUTXO]) {
-        selectedOutpoints = Set(utxos.map(\.id))
+    @discardableResult
+    func selectAll(_ utxos: [WalletUTXO]) -> Int {
+        let selected = utxos.prefix(Self.maximumSelectedUTXOs)
+        selectedOutpoints = Set(selected.map(\.id))
         saveSelection()
+        return utxos.count - selected.count
     }
 
     func clearSelection() {

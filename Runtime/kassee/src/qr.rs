@@ -13,12 +13,11 @@ use serde::Serialize;
 use std::cell::RefCell;
 use std::fmt::Write;
 
-const MAX_FRAME_DATA: usize = 106;
+pub(crate) const MAX_FRAME_DATA: usize = 106;
 
-/// Maximum number of frames for a multi-frame QR payload. Sized to
-/// cover a 3-input 2-of-3 PSKT on the tightest hardware envelope
-/// (WS-OV5640 → M5 LCD, ~37 B/frame at V3 ≈ 50 frames), with margin.
-const MAX_FRAMES: usize = 64;
+/// Maximum number of frames for a multi-frame QR payload. Standard PSKB
+/// transactions are converted to compact KSPT before reaching this encoder.
+pub(crate) const MAX_FRAMES: usize = 64;
 
 // ─── Frame generation ───
 
