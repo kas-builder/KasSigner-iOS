@@ -1042,6 +1042,10 @@ fn serialize_kspt_multisig(
 // path is mainnet-verified. Duplication is cheap; silent KSPT
 // breakage loses funds.
 
+/// Maximum number of standard inputs supported by the paired KasSigner
+/// firmware and its bounded transaction representation.
+pub const MAX_STANDARD_INPUTS: usize = 8;
+
 /// Create unsigned single-sig PSKB: fetch UTXOs, select coins,
 /// build PSKB JSON, return wire hex.
 pub async fn create_send_pskb(
@@ -1141,7 +1145,7 @@ pub async fn create_consolidate_pskb(
     }
 
     all_utxos.sort_by(|a, b| b.amount.cmp(&a.amount));
-    let selected: Vec<_> = all_utxos.into_iter().take(5).collect();
+    let selected: Vec<_> = all_utxos.into_iter().take(MAX_STANDARD_INPUTS).collect();
 
     let total: u64 = selected.iter().map(|u| u.amount).sum();
     if total <= fee {
@@ -1409,6 +1413,14 @@ fn serialize_pskb_single_sig(
     inputs: &[crate::rpc::UtxoEntry],
     outputs: &[(u64, Vec<u8>)],
 ) -> Result<String, String> {
+    if inputs.len() > MAX_STANDARD_INPUTS {
+        return Err(format!(
+            "Maximum {} UTXOs per transaction; selected {}",
+            MAX_STANDARD_INPUTS,
+            inputs.len()
+        ));
+    }
+
     let tx_version: u16 = 0;
     let num_in = inputs.len() as u16;
     let num_out = outputs.len() as u16;
@@ -2534,5 +2546,27 @@ mod standard_send_tests {
         let error = standard_send_plan(&selected, 1_000_000, 34, 34, 100.0, 0, false).unwrap_err();
 
         assert!(error.contains("standard limit"));
+    }
+
+    #[test]
+    fn standard_compact_relay_boundaries_fit_the_coordinated_qr_limit() {
+        let outputs = vec![(100_000_000, vec![0x20; 34])];
+        for count in [6usize, 7, 8] {
+            let selected: Vec<_> = (0..count)
+                .map(|index| utxo(100_000_000, index as u32))
+                .collect();
+            let wire_hex = serialize_pskb_single_sig(&selected, &outputs).unwrap();
+            let relay_hex = crate::pskt::relay_pskb_as_kspt_v2_hex(&wire_hex).unwrap();
+            let relay_bytes = hex::decode(&relay_hex).unwrap();
+            let frame_count = relay_bytes.len().div_ceil(crate::qr::MAX_FRAME_DATA);
+            assert!(
+                frame_count <= crate::qr::MAX_FRAMES,
+                "{count}-input compact relay requires {frame_count} frames"
+            );
+        }
+
+        let nine: Vec<_> = (0..9).map(|index| utxo(100_000_000, index)).collect();
+        let error = serialize_pskb_single_sig(&nine, &outputs).unwrap_err();
+        assert!(error.contains("Maximum 8 UTXOs"));
     }
 }

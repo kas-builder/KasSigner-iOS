@@ -117,6 +117,11 @@ struct SendDraft {
             throw SendDraftError.noSelectedInputs
         }
 
+        guard selectedUTXOs.count <= UTXOCoinControlStore.maximumSelectedUTXOs
+        else {
+            throw SendDraftError.tooManySelectedInputs
+        }
+
         let selectedInputs = try selectedUTXOs.map { utxo in
             try SendDraftInput(utxo: utxo)
         }
@@ -166,6 +171,7 @@ enum SendDraftError: LocalizedError {
     case emptyDestination
     case zeroAmount
     case noSelectedInputs
+    case tooManySelectedInputs
     case invalidTransactionID
     case invalidScriptPublicKey
     case zeroValueInput
@@ -182,6 +188,8 @@ enum SendDraftError: LocalizedError {
             return "The send amount must be greater than zero."
         case .noSelectedInputs:
             return "No UTXOs were selected."
+        case .tooManySelectedInputs:
+            return "A transaction can use at most 8 selected UTXOs."
         case .invalidTransactionID:
             return "A selected UTXO has an invalid transaction ID."
         case .invalidScriptPublicKey:
