@@ -125,6 +125,7 @@ final class AppPreferences: ObservableObject {
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
     @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
+    @Published var addressStatusEnabled: Bool { didSet { save() } }
     @Published var nodeMode: NodeConnectionMode { didSet { save() } }
     @Published var customNodeURL: String { didSet { save() } }
     @Published var secondaryCurrency: SecondaryCurrency { didSet { save() } }
@@ -134,6 +135,7 @@ final class AppPreferences: ObservableObject {
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
         static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
+        static let addressStatusEnabled = "kassigner.addressStatusEnabled.v1"
         static let nodeMode = "kassigner.nodeMode.v1"
         static let customNode = "kassigner.customNode.v1"
         static let secondaryCurrency = "kassigner.secondaryCurrency.v1"
@@ -149,6 +151,7 @@ final class AppPreferences: ObservableObject {
             rawValue: defaults.object(forKey: Key.kasBalanceDecimalPlaces) as? Int ?? 4
         ) ?? .four
         explorer = ExplorerChoice(rawValue: defaults.string(forKey: Key.explorer) ?? "") ?? .kaspaStream
+        addressStatusEnabled = defaults.object(forKey: Key.addressStatusEnabled) as? Bool ?? true
         nodeMode = NodeConnectionMode(rawValue: defaults.string(forKey: Key.nodeMode) ?? "") ?? .automatic
         customNodeURL = defaults.string(forKey: Key.customNode) ?? ""
         secondaryCurrency = SecondaryCurrency(
@@ -171,6 +174,7 @@ final class AppPreferences: ObservableObject {
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
         defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)
+        defaults.set(addressStatusEnabled, forKey: Key.addressStatusEnabled)
         defaults.set(nodeMode.rawValue, forKey: Key.nodeMode)
         defaults.set(customNodeURL, forKey: Key.customNode)
         defaults.set(secondaryCurrency.rawValue, forKey: Key.secondaryCurrency)

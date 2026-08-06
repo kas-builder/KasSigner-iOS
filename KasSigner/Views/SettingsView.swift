@@ -117,8 +117,12 @@ struct SettingsView: View {
                             Text(explorer.title).tag(explorer)
                         }
                     }
+
+                    Toggle("Address Status", isOn: $preferences.addressStatusEnabled)
                 } header: {
                     Text("Preferences")
+                } footer: {
+                    Text("Checks displayed receive addresses using the public Kaspa API.")
                 }
 
                 Section {

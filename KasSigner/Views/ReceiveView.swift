@@ -2,6 +2,75 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 import UIKit
 
+private enum AddressUsageStatus: Equatable {
+    case checking
+    case fresh
+    case used
+    case unavailable
+}
+
+private struct AddressTransactionCountResponse: Decodable {
+    let total: Int
+}
+
+private enum AddressUsageError: Error {
+    case invalidAddress
+    case invalidResponse
+    case invalidTransactionCount
+}
+
+private actor AddressUsageChecker {
+    static let shared = AddressUsageChecker()
+
+    private struct CacheEntry {
+        let status: AddressUsageStatus
+        let checkedAt: Date
+    }
+
+    private let freshCacheLifetime: TimeInterval = 30
+    private var cachedStatuses: [String: CacheEntry] = [:]
+
+    func status(
+        for address: String,
+        forceRefresh: Bool = false
+    ) async throws -> AddressUsageStatus {
+        if !forceRefresh, let cachedEntry = cachedStatuses[address] {
+            if cachedEntry.status == .used
+                || Date().timeIntervalSince(cachedEntry.checkedAt) < freshCacheLifetime {
+                return cachedEntry.status
+            }
+        }
+
+        guard address.hasPrefix("kaspa:") else {
+            throw AddressUsageError.invalidAddress
+        }
+
+        let url = URL(string: "https://api.kaspa.org")!
+            .appending(path: "addresses")
+            .appending(path: address)
+            .appending(path: "transactions-count")
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw AddressUsageError.invalidResponse
+        }
+
+        let result = try JSONDecoder().decode(AddressTransactionCountResponse.self, from: data)
+        guard result.total >= 0 else {
+            throw AddressUsageError.invalidTransactionCount
+        }
+
+        let status: AddressUsageStatus = result.total == 0 ? .fresh : .used
+        cachedStatuses[address] = CacheEntry(status: status, checkedAt: Date())
+        return status
+    }
+}
+
 struct ReceiveView: View {
     @Environment(\.colorScheme) private var colorScheme
     @EnvironmentObject private var syncService: WalletSyncService
@@ -15,6 +84,7 @@ struct ReceiveView: View {
     @State private var isGeneratingAddress = false
     @State private var generationError: String?
     @State private var selectedAddressIndex = 0
+    @State private var addressUsageStatus: AddressUsageStatus = .checking
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -34,9 +104,15 @@ struct ReceiveView: View {
                 }
 
                 VStack(spacing: 10) {
-                    Text("Address #\(selectedAddressIndex + 1)")
+                    HStack(spacing: 8) {
+                        Text("Address #\(selectedAddressIndex + 1)")
+                            .foregroundStyle(.secondary)
+
+                        if preferences.addressStatusEnabled {
+                            addressUsageLabel
+                        }
+                    }
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .center)
 
                     HStack(spacing: 8) {
@@ -174,6 +250,10 @@ struct ReceiveView: View {
         .task {
             engine.startIfNeeded()
         }
+        .task(id: addressUsageTaskID) {
+            guard preferences.addressStatusEnabled else { return }
+            await checkAddressUsage(receiveAddress)
+        }
         .onAppear {
             selectedAddressIndex = min(
                 max(
@@ -226,6 +306,52 @@ struct ReceiveView: View {
             offsetBy: receiveAddress.count / 2
         )
         return String(receiveAddress[..<midpoint]) + "\n" + String(receiveAddress[midpoint...])
+    }
+
+    private var addressUsageTaskID: String {
+        "\(preferences.addressStatusEnabled):\(receiveAddress)"
+    }
+
+    @ViewBuilder
+    private var addressUsageLabel: some View {
+        switch addressUsageStatus {
+        case .checking:
+            HStack(spacing: 5) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Checking…")
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Checking address usage")
+        case .fresh:
+            Button {
+                Task {
+                    await checkAddressUsage(receiveAddress, forceRefresh: true)
+                }
+            } label: {
+                Label("Fresh Address", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Fresh address")
+            .accessibilityHint("Checks this address again")
+        case .used:
+            Button {
+                Task {
+                    await checkAddressUsage(receiveAddress, forceRefresh: true)
+                }
+            } label: {
+                Label("Used Address", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.yellow)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Used address")
+            .accessibilityHint("Checks this address again")
+        case .unavailable:
+            Label("Status Unavailable", systemImage: "questionmark.circle.fill")
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Address usage status unavailable")
+        }
     }
 
     private func persistSelectedAddressIndex(addressCount: Int? = nil) {
@@ -298,6 +424,37 @@ struct ReceiveView: View {
         guard !receiveAddress.isEmpty else { return }
         UIPasteboard.general.string = receiveAddress
         copyFeedbackCenter.show("Address copied")
+    }
+
+    @MainActor
+    private func checkAddressUsage(
+        _ address: String,
+        forceRefresh: Bool = false
+    ) async {
+        guard preferences.addressStatusEnabled, !address.isEmpty else {
+            addressUsageStatus = .unavailable
+            return
+        }
+
+        addressUsageStatus = .checking
+
+        do {
+            if !forceRefresh {
+                try await Task.sleep(for: .milliseconds(200))
+            }
+            let status = try await AddressUsageChecker.shared.status(
+                for: address,
+                forceRefresh: forceRefresh
+            )
+            try Task.checkCancellation()
+            guard address == receiveAddress else { return }
+            addressUsageStatus = status
+        } catch is CancellationError {
+            return
+        } catch {
+            guard address == receiveAddress else { return }
+            addressUsageStatus = .unavailable
+        }
     }
 
     private func refreshAge(now: Date) -> String {
