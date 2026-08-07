@@ -1819,11 +1819,11 @@ private struct BroadcastSuccessView: View {
                     )
 
                 VStack(spacing: 10) {
-                    Text("Transaction Broadcast")
+                    Text("Transaction Broadcasted Successfully")
                         .font(.title2.weight(.bold))
 
                     Text(
-                        "Your transaction was successfully broadcast "
+                        "Your transaction was successfully broadcasted "
                         + "to the Kaspa network."
                     )
                     .font(.subheadline)

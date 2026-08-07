@@ -42,6 +42,9 @@ struct KasSignerApp: App {
 private struct AppSecurityContainer<Content: View>: View {
     @EnvironmentObject private var appLockService: AppLockService
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
+    private var decoyLaunchScreenEnabled = false
+    @State private var privacyCoverUnlocked = false
 
     let content: Content
 
@@ -51,27 +54,40 @@ private struct AppSecurityContainer<Content: View>: View {
 
     var body: some View {
         ZStack {
-            content
-
-            if shouldCoverContent {
-                Color(uiColor: .systemBackground)
-                    .ignoresSafeArea()
-                    .overlay {
-                        if scenePhase == .active, appLockService.isLocked {
-                            lockedView
-                        }
+            if appLockService.isEnabled &&
+                decoyLaunchScreenEnabled &&
+                !privacyCoverUnlocked &&
+                !appLockService.isPrivacyCoverSuspendedForSession {
+                WeatherCoverView {
+                    if await appLockService.unlockFromPrivacyCover() {
+                        privacyCoverUnlocked = true
                     }
-                    .transition(.opacity)
-                    .zIndex(1)
+                }
+                .zIndex(2)
+            } else {
+                content
+
+                if shouldCoverContent {
+                    Color(uiColor: .systemBackground)
+                        .ignoresSafeArea()
+                        .overlay {
+                            if scenePhase == .active, appLockService.isLocked {
+                                lockedView
+                            }
+                        }
+                        .transition(.opacity)
+                        .zIndex(1)
+                }
             }
         }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
+                privacyCoverUnlocked = false
                 appLockService.sceneDidEnterBackground()
             case .active:
                 appLockService.sceneDidBecomeActive()
-                if appLockService.isLocked {
+                if appLockService.isLocked && !decoyLaunchScreenEnabled {
                     Task { await appLockService.unlock() }
                 }
             default:
@@ -79,9 +95,15 @@ private struct AppSecurityContainer<Content: View>: View {
             }
         }
         .task {
-            if appLockService.isLocked {
+            if appLockService.isLocked && !decoyLaunchScreenEnabled {
                 await appLockService.unlock()
             }
+        }
+        .onChange(of: decoyLaunchScreenEnabled) { _, _ in
+            // Enabling the cover from Security settings must not hide those
+            // settings before the user finishes choosing the unlock gesture.
+            // The cover takes effect after the app backgrounds or relaunches.
+            privacyCoverUnlocked = true
         }
     }
 

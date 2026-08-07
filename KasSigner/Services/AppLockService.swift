@@ -31,10 +31,12 @@ final class AppLockService: ObservableObject {
         static let isEnabled = "kassigner.security.appLockEnabled"
         static let lockDelay = "kassigner.security.lockDelay"
         static let hideAppSwitcherPreview = "kassigner.security.hideAppSwitcherPreview"
+        static let privacyCoverEnabled = "kassigner.security.decoyLaunchScreenEnabled"
     }
 
     @Published private(set) var isLocked = false
     @Published private(set) var isAuthenticating = false
+    @Published private(set) var isPrivacyCoverSuspendedForSession = false
     @Published var authenticationError: String?
 
     @Published var isEnabled: Bool {
@@ -58,6 +60,9 @@ final class AppLockService: ObservableObject {
         lockDelay = LockDelay(rawValue: defaults.string(forKey: Key.lockDelay) ?? "") ?? .immediately
         hideAppSwitcherPreview = defaults.object(forKey: Key.hideAppSwitcherPreview) as? Bool ?? true
         isLocked = isEnabled
+        if !isEnabled {
+            defaults.set(false, forKey: Key.privacyCoverEnabled)
+        }
     }
 
     var biometricName: String {
@@ -84,6 +89,7 @@ final class AppLockService: ObservableObject {
         if succeeded {
             isEnabled = false
             isLocked = false
+            defaults.set(false, forKey: Key.privacyCoverEnabled)
         }
         return succeeded
     }
@@ -95,7 +101,26 @@ final class AppLockService: ObservableObject {
         }
     }
 
+    func unlockFromPrivacyCover() async -> Bool {
+        guard isEnabled else { return false }
+        guard isLocked else { return true }
+        let succeeded = await authenticate(reason: "Open protected content")
+        if succeeded {
+            isLocked = false
+        }
+        return succeeded
+    }
+
+    func authorizePrivacyCoverChange() async -> Bool {
+        await authenticate(reason: "Change Privacy Cover settings")
+    }
+
+    func suspendPrivacyCoverForCurrentSession() {
+        isPrivacyCoverSuspendedForSession = true
+    }
+
     func sceneDidEnterBackground() {
+        isPrivacyCoverSuspendedForSession = false
         backgroundedAt = Date()
         if isEnabled, lockDelay == .immediately {
             isLocked = true
