@@ -4,13 +4,11 @@ struct SecuritySettingsView: View {
     @EnvironmentObject private var appLockService: AppLockService
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var appLockToggle = false
-    @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
-    private var decoyLaunchScreenEnabled = false
 
     var body: some View {
         Form {
             Section {
-                Toggle("Face ID", isOn: $appLockToggle)
+                Toggle(appLockService.biometricName, isOn: $appLockToggle)
                     .disabled(appLockService.isAuthenticating)
                     .onChange(of: appLockToggle) { oldValue, newValue in
                         guard oldValue != newValue,
@@ -41,7 +39,7 @@ struct SecuritySettingsView: View {
                     } label: {
                         if dynamicTypeSize.isAccessibilitySize {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Require Authentication")
+                                Text("Authentication")
                                     .foregroundStyle(.primary)
                                 HStack {
                                     Spacer()
@@ -50,7 +48,7 @@ struct SecuritySettingsView: View {
                             }
                         } else {
                             HStack {
-                                Text("Require Authentication")
+                                Text("Authentication")
                                     .foregroundStyle(.primary)
                                 Spacer()
                                 collapsedLockDelayLabel
@@ -66,7 +64,9 @@ struct SecuritySettingsView: View {
 
             Section("Privacy") {
                 Toggle("Hide App Switcher Preview", isOn: $appLockService.hideAppSwitcherPreview)
-                Toggle("Decoy Launch Screen", isOn: $decoyLaunchScreenEnabled)
+                NavigationLink("Decoy Launch") {
+                    DecoyLaunchSettingsView()
+                }
             }
         }
         .navigationTitle("Security")

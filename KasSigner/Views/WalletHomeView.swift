@@ -2,6 +2,11 @@ import SwiftUI
 import UIKit
 
 struct WalletHomeView: View {
+    private enum WalletRoute: Hashable {
+        case receive(UUID)
+    }
+
+    @State private var navigationPath = NavigationPath()
     @State private var showingSendFlow = false
     @Environment(\.legibilityWeight) private var legibilityWeight
     @EnvironmentObject private var walletStore: WalletStore
@@ -15,7 +20,7 @@ struct WalletHomeView: View {
     @State private var showingSecondaryCurrency = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $navigationPath) {
             Group {
                 if let profile = walletStore.selectedProfile {
                     walletContent(profile)
@@ -47,6 +52,25 @@ struct WalletHomeView: View {
                 async let priceRefresh: Void = priceService.refresh(preferences: preferences)
                 _ = await (walletRefresh, priceRefresh)
             }
+            .navigationDestination(for: WalletRoute.self) { route in
+                switch route {
+                case .receive(let profileID):
+                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
+                        ReceiveView(profile: profile)
+                    } else {
+                        ContentUnavailableView(
+                            "Account Unavailable",
+                            systemImage: "wallet.pass",
+                            description: Text("Return to the Wallet screen and select an account.")
+                        )
+                    }
+                }
+            }
+        }
+        .onChange(of: walletStore.selectedProfileID) { oldValue, newValue in
+            guard oldValue != newValue else { return }
+            showingSendFlow = false
+            navigationPath = NavigationPath()
         }
     }
 
@@ -131,9 +155,7 @@ struct WalletHomeView: View {
                 }
 
                 HStack(spacing: 10) {
-                    NavigationLink {
-                        ReceiveView(profile: profile)
-                    } label: {
+                    NavigationLink(value: WalletRoute.receive(profile.id)) {
                         compactActionLabel("Receive", systemImage: "arrow.down")
                     }
                     .buttonStyle(.borderedProminent)
