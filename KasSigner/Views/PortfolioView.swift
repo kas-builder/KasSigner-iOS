@@ -40,6 +40,7 @@ struct PortfolioView: View {
                     } label: {
                         Image(systemName: "plus")
                     }
+                    .tint(activePortfolioColor)
                     .accessibilityLabel("Add Portfolio Account")
                 }
 
@@ -60,6 +61,7 @@ struct PortfolioView: View {
                         } label: {
                             Image(systemName: "ellipsis.circle")
                         }
+                        .tint(activePortfolioColor)
                         .accessibilityLabel("Portfolio Account Actions")
                     }
                 }
@@ -209,10 +211,10 @@ struct PortfolioView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
                             .background(
-                                selectedRange == range ? teal.opacity(0.18) : .clear,
+                                selectedRange == range ? activePortfolioColor.opacity(0.18) : .clear,
                                 in: Capsule()
                             )
-                            .foregroundStyle(selectedRange == range ? teal : .secondary)
+                            .foregroundStyle(selectedRange == range ? activePortfolioColor : .secondary)
                     }
                     .buttonStyle(.plain)
                 }
@@ -253,9 +255,9 @@ struct PortfolioView: View {
             HStack(spacing: 12) {
                 Image(systemName: systemImage)
                     .font(.title2)
-                    .foregroundStyle(teal)
+                    .foregroundStyle(activePortfolioColor)
                     .frame(width: 38, height: 38)
-                    .background(teal.opacity(0.12), in: Circle())
+                    .background(activePortfolioColor.opacity(0.12), in: Circle())
 
                 Text(message)
                     .font(.subheadline)
@@ -272,6 +274,10 @@ struct PortfolioView: View {
     private var selectedAccount: PortfolioAccount? {
         guard let selectedAccountID else { return nil }
         return accounts.first(where: { $0.id == selectedAccountID })
+    }
+
+    private var activePortfolioColor: Color {
+        selectedAccount.map(accountColor) ?? teal
     }
 
     private func beginAddingAccount() {
