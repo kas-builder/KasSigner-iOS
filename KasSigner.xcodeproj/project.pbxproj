@@ -32,6 +32,8 @@
 		E2DBABBC2EB755738881D92B /* KasSigner/Models/WalletStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */; };
 		E3ABFB8EC0E95ADAA3E230DA /* KasSigner/Views/ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69F784D57F685389BA1E254F /* KasSigner/Views/ActivityView.swift */; };
 		EC947F3EB01353DF8160A659 /* KasSigner/App/KasSignerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C00F46C73F5A82BA55B83E /* KasSigner/App/KasSignerApp.swift */; };
+		F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */; };
+		F10000000000000000000002 /* KasSigner/Views/PortfolioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -61,6 +63,8 @@
 		D80000000000000000000002 /* KasSigner/Views/WeatherCoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/WeatherCoverView.swift; sourceTree = "<group>"; };
 		C80000000000000000000002 /* KasSigner/Services/CopyFeedbackCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/CopyFeedbackCenter.swift; sourceTree = "<group>"; };
 		E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletStore.swift; sourceTree = "<group>"; };
+		F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioAccount.swift; sourceTree = "<group>"; };
+		F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/PortfolioView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -88,6 +92,7 @@
 				99C00F46C73F5A82BA55B83E /* KasSigner/App/KasSignerApp.swift */,
 				D936ECD50D8257028EDB129F /* KasSigner/Models/WalletProfile.swift */,
 				E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */,
+				F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */,
 				0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */,
 				537C66CC539F5FD89E51681C /* KasSigner/Views/RootView.swift */,
 				852F6B53D2075E8EAE5AF159 /* KasSigner/Views/WalletHomeView.swift */,
@@ -95,6 +100,7 @@
 				B1C2D3E4F5061728394A5B6C /* KasSigner/Views/ReceiveView.swift */,
 				14C87A28CAF0595797804C3F /* KasSigner/Views/AddWalletView.swift */,
 				69F784D57F685389BA1E254F /* KasSigner/Views/ActivityView.swift */,
+				F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */,
 				DC22F71F3E7154269BA90790 /* KasSigner/Views/SettingsView.swift */,
 				B24C8D0E2F31425364758697 /* KasSigner/Views/QRScannerView.swift */,
 				D46E0F2131425364758697B9 /* KasSigner/Models/WalletImportResult.swift */,
@@ -188,6 +194,7 @@
 				EC947F3EB01353DF8160A659 /* KasSigner/App/KasSignerApp.swift in Sources */,
 				74F77A10AF9654CEACA20ADC /* KasSigner/Models/WalletProfile.swift in Sources */,
 				E2DBABBC2EB755738881D92B /* KasSigner/Models/WalletStore.swift in Sources */,
+				F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */,
 				3E0992BA4A395DCCAB278670 /* KasSigner/Services/KasSignerEngine.swift in Sources */,
 				4FC7EC177D2653D784021833 /* KasSigner/Views/RootView.swift in Sources */,
 				0DAD6E624BA95A15B1094D73 /* KasSigner/Views/WalletHomeView.swift in Sources */,
@@ -195,6 +202,7 @@
 				A1B2C3D4E5F60718293A4B5C /* KasSigner/Views/ReceiveView.swift in Sources */,
 				539A527804645EDDA20C0261 /* KasSigner/Views/AddWalletView.swift in Sources */,
 				E3ABFB8EC0E95ADAA3E230DA /* KasSigner/Views/ActivityView.swift in Sources */,
+				F10000000000000000000002 /* KasSigner/Views/PortfolioView.swift in Sources */,
 				53CA8F6057105D3A85FF0CD5 /* KasSigner/Views/SettingsView.swift in Sources */,
 				A13B7C9D1E2F304152637485 /* KasSigner/Views/QRScannerView.swift in Sources */,
 				C35D9E1F30415263748596A8 /* KasSigner/Models/WalletImportResult.swift in Sources */,

@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct KasSignerApp: App {
@@ -27,6 +28,7 @@ struct KasSignerApp: App {
                 .environmentObject(priceService)
                 .environmentObject(appLockService)
                 .environmentObject(copyFeedbackCenter)
+                .modelContainer(for: PortfolioAccount.self)
         }
     }
 

@@ -48,6 +48,7 @@ struct RootView: View {
     private enum Tab: Hashable {
         case wallet
         case activity
+        case portfolio
         case utxos
         case settings
     }
@@ -73,6 +74,10 @@ struct RootView: View {
             ActivityView()
                 .tag(Tab.activity)
                 .tabItem { Label("Activity", systemImage: "clock.arrow.circlepath") }
+
+            PortfolioView()
+                .tag(Tab.portfolio)
+                .tabItem { Label("Portfolio", systemImage: "briefcase.fill") }
 
             UTXOsView()
                 .tag(Tab.utxos)
