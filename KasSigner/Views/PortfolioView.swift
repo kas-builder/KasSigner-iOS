@@ -242,42 +242,33 @@ struct PortfolioView: View {
     }
 
     private var valueCard: some View {
-        VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Portfolio Value")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+        VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Portfolio Value")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
-                    Text("$0.00")
-                        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-
-                    Text("No performance data")
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
-
-                Divider()
-
-                HStack {
-                    metricLabel("KAS Price", value: "—")
-                    Spacer()
-                    metricLabel("Total Cost", value: "$0.00", alignment: .trailing)
-                }
+                Text("$0.00")
+                    .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
             }
             .padding()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            Divider()
-
-            HStack(spacing: 0) {
-                ForEach(PortfolioSection.allCases) { section in
-                    sectionButton(section)
-                }
-            }
+            sectionSelector
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var sectionSelector: some View {
+        HStack(spacing: 0) {
+            ForEach(PortfolioSection.allCases) { section in
+                sectionButton(section)
+            }
+        }
+        .padding(.top, 2)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
@@ -466,21 +457,6 @@ struct PortfolioView: View {
             .foregroundStyle(activePortfolioColor)
             .frame(width: 38, height: 38)
             .background(activePortfolioColor.opacity(0.12), in: Circle())
-    }
-
-    private func metricLabel(
-        _ title: String,
-        value: String,
-        alignment: HorizontalAlignment = .leading
-    ) -> some View {
-        VStack(alignment: alignment, spacing: 3) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-        }
     }
 
     private var selectedAccount: PortfolioAccount? {
