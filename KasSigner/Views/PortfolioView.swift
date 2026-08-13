@@ -98,11 +98,11 @@ struct PortfolioView: View {
 
     private var emptyState: some View {
         ContentUnavailableView {
-            Label("No Portfolio Accounts", systemImage: "briefcase.fill")
+            Label("No Portfolios", systemImage: "briefcase.fill")
         } description: {
-            Text("Create a local account to start tracking KAS buys, sells, and transfers.")
+            Text("Create an account to start tracking KAS buys, sells, and transfers.")
         } actions: {
-            Button("Add Account") {
+            Button("New Portfolio") {
                 beginAddingAccount()
             }
             .buttonStyle(.borderedProminent)
@@ -287,13 +287,11 @@ struct PortfolioView: View {
     private func saveAccount(_ draft: PortfolioAccountDraft) {
         if let accountBeingEdited {
             accountBeingEdited.name = draft.name
-            accountBeingEdited.accountDescription = draft.accountDescription
             accountBeingEdited.iconName = draft.iconName
             accountBeingEdited.accentName = draft.accentName
         } else {
             let account = PortfolioAccount(
                 name: draft.name,
-                accountDescription: draft.accountDescription,
                 iconName: draft.iconName,
                 accentName: draft.accentName
             )
@@ -326,7 +324,7 @@ struct PortfolioView: View {
         case "blue": .blue
         case "indigo": .indigo
         case "orange": .orange
-        case "purple": .purple
+        case "red", "purple": .red
         default: teal
         }
     }
@@ -334,7 +332,6 @@ struct PortfolioView: View {
 
 private struct PortfolioAccountDraft {
     let name: String
-    let accountDescription: String
     let iconName: String
     let accentName: String
 }
@@ -342,12 +339,12 @@ private struct PortfolioAccountDraft {
 private struct PortfolioAccountEditor: View {
     private static let icons = [
         "briefcase.fill",
-        "wallet.pass.fill",
+        "creditcard.fill",
         "building.columns.fill",
         "lock.shield.fill",
         "tray.full.fill"
     ]
-    private static let colors = ["teal", "blue", "indigo", "orange", "purple"]
+    private static let colors = ["teal", "blue", "indigo", "orange", "red"]
 
     @Environment(\.dismiss) private var dismiss
 
@@ -355,7 +352,6 @@ private struct PortfolioAccountEditor: View {
     let onSave: (PortfolioAccountDraft) -> Void
 
     @State private var name: String
-    @State private var accountDescription: String
     @State private var iconName: String
     @State private var accentName: String
 
@@ -363,9 +359,8 @@ private struct PortfolioAccountEditor: View {
         self.account = account
         self.onSave = onSave
         _name = State(initialValue: account?.name ?? "")
-        _accountDescription = State(initialValue: account?.accountDescription ?? "")
         _iconName = State(initialValue: account?.iconName ?? "briefcase.fill")
-        _accentName = State(initialValue: account?.accentName ?? "teal")
+        _accentName = State(initialValue: account?.accentName == "purple" ? "red" : account?.accentName ?? "teal")
     }
 
     var body: some View {
@@ -374,9 +369,6 @@ private struct PortfolioAccountEditor: View {
                 Section("Account") {
                     TextField("Name", text: $name)
                         .textInputAutocapitalization(.words)
-
-                    TextField("Description (Optional)", text: $accountDescription, axis: .vertical)
-                        .lineLimit(2...4)
                 }
 
                 Section("Icon") {
@@ -427,7 +419,7 @@ private struct PortfolioAccountEditor: View {
                     }
                 }
             }
-            .navigationTitle(account == nil ? "New Account" : "Edit Account")
+            .navigationTitle(account == nil ? "New Portfolio" : "Edit Account")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -439,7 +431,6 @@ private struct PortfolioAccountEditor: View {
                         onSave(
                             PortfolioAccountDraft(
                                 name: trimmedName,
-                                accountDescription: accountDescription.trimmingCharacters(in: .whitespacesAndNewlines),
                                 iconName: iconName,
                                 accentName: accentName
                             )
@@ -465,7 +456,7 @@ private struct PortfolioAccountEditor: View {
         case "blue": .blue
         case "indigo": .indigo
         case "orange": .orange
-        case "purple": .purple
+        case "red", "purple": .red
         default: Color(red: 0.20, green: 0.62, blue: 0.57)
         }
     }
