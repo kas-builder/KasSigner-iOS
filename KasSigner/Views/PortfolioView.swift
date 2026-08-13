@@ -13,13 +13,15 @@ struct PortfolioView: View {
     }
 
     private enum PortfolioSection: String, CaseIterable, Identifiable {
-        case holdings = "Holdings"
+        case holdings = "Overview"
         case transactions = "Transactions"
 
         var id: Self { self }
     }
 
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var priceService: PriceService
     @Query(sort: \PortfolioAccount.createdAt) private var accounts: [PortfolioAccount]
     @Query(sort: \PortfolioTransaction.timestamp, order: .reverse)
     private var transactions: [PortfolioTransaction]
@@ -36,6 +38,7 @@ struct PortfolioView: View {
     @State private var transactionBeingEdited: PortfolioTransaction?
     @State private var transactionPendingDeletion: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
+    @State private var showingHoldingDetail = false
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -122,6 +125,15 @@ struct PortfolioView: View {
                 }
             )
             .presentationDetents([.medium])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showingHoldingDetail) {
+            PortfolioHoldingDetail(
+                summary: holdingSummary,
+                kasPriceUSD: priceService.price(for: .usd),
+                accentColor: activePortfolioColor
+            )
+            .presentationDetents([.fraction(0.9)])
             .presentationDragIndicator(.visible)
         }
         .alert(
@@ -331,30 +343,46 @@ struct PortfolioView: View {
 
     private var holdingsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 12) {
-                Image("KaspaLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 38, height: 38)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Kaspa")
-                        .font(.subheadline.weight(.semibold))
-                    Text("KAS")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            Button {
+                showingHoldingDetail = true
+                Task {
+                    await priceService.refresh(preferences: preferences)
                 }
+            } label: {
+                HStack(spacing: 12) {
+                    Image("KaspaLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 38, height: 38)
 
-                Spacer()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Kaspa")
+                            .font(.subheadline.weight(.semibold))
+                        Text("KAS")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
 
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("0 KAS")
-                        .font(.subheadline.weight(.semibold))
-                    Text("$0.00")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(holdingAmountText)
+                            .font(.subheadline.weight(.semibold))
+                        Text(holdingValueText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+            .frame(maxWidth: .infinity)
 
             Divider()
             newTransactionButton
@@ -473,6 +501,21 @@ struct PortfolioView: View {
         return transactions.filter { $0.portfolioID == selectedPortfolioUUID }
     }
 
+    private var holdingSummary: PortfolioHoldingSummary {
+        PortfolioHoldingSummary(transactions: visibleTransactions)
+    }
+
+    private var holdingAmountText: String {
+        holdingSummary.holdings.formatted(
+            .number.grouping(.automatic).precision(.fractionLength(0...8))
+        ) + " KAS"
+    }
+
+    private var holdingValueText: String {
+        guard let kasPriceUSD = priceService.price(for: .usd) else { return "—" }
+        return (holdingSummary.holdings * kasPriceUSD).formatted(.currency(code: "USD"))
+    }
+
     private var activePortfolioColor: Color {
         selectedAccount.map(accountColor) ?? teal
     }
@@ -575,6 +618,165 @@ struct PortfolioView: View {
         case "red", "purple": .red
         default: teal
         }
+    }
+}
+
+private struct PortfolioHoldingSummary {
+    let holdings: Double
+    let costBasis: Double
+    let totalBought: Double
+    let totalSold: Double
+    let totalTransferredIn: Double
+    let totalTransferredOut: Double
+
+    init(transactions: [PortfolioTransaction]) {
+        var holdings = 0.0
+        var costBasis = 0.0
+        var totalBought = 0.0
+        var totalSold = 0.0
+        var totalTransferredIn = 0.0
+        var totalTransferredOut = 0.0
+
+        for transaction in transactions.sorted(by: { $0.timestamp < $1.timestamp }) {
+            switch transaction.type {
+            case PortfolioTransactionType.buy.rawValue:
+                holdings += transaction.kasAmount
+                costBasis += transaction.kasAmount * transaction.kasPriceUSD
+                totalBought += transaction.kasAmount
+            case PortfolioTransactionType.sell.rawValue:
+                let averageCost = holdings > 0 ? costBasis / holdings : 0
+                let disposedAmount = min(transaction.kasAmount, max(holdings, 0))
+                holdings -= transaction.kasAmount
+                costBasis = max(0, costBasis - (disposedAmount * averageCost))
+                totalSold += transaction.kasAmount
+            case PortfolioTransactionType.transferIn.rawValue:
+                holdings += transaction.kasAmount
+                totalTransferredIn += transaction.kasAmount
+            case PortfolioTransactionType.transferOut.rawValue:
+                holdings -= transaction.kasAmount
+                totalTransferredOut += transaction.kasAmount
+            default:
+                continue
+            }
+        }
+
+        self.holdings = max(0, holdings)
+        self.costBasis = costBasis
+        self.totalBought = totalBought
+        self.totalSold = totalSold
+        self.totalTransferredIn = totalTransferredIn
+        self.totalTransferredOut = totalTransferredOut
+    }
+
+    var averageCost: Double? {
+        guard holdings > 0, costBasis > 0 else { return nil }
+        return costBasis / holdings
+    }
+}
+
+private struct PortfolioHoldingDetail: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let summary: PortfolioHoldingSummary
+    let kasPriceUSD: Double?
+    let accentColor: Color
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    HStack(spacing: 14) {
+                        Image("KaspaLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 48, height: 48)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(kasAmount(summary.holdings))
+                                .font(.title2.weight(.semibold))
+                            Text(marketValueText)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                Section("Market") {
+                    LabeledContent("KAS Price", value: kasPriceText)
+                    LabeledContent("Market Value", value: marketValueText)
+                    LabeledContent("Unrealized P/L") {
+                        Text(unrealizedProfitLossText)
+                            .foregroundStyle(unrealizedProfitLossColor)
+                    }
+                }
+
+                Section("Cost") {
+                    LabeledContent("Average Cost", value: averageCostText)
+                    LabeledContent("Cost Basis", value: currency(summary.costBasis))
+                }
+
+                Section("Activity") {
+                    LabeledContent("Bought", value: kasAmount(summary.totalBought))
+                    LabeledContent("Sold", value: kasAmount(summary.totalSold))
+                    LabeledContent("Transferred In", value: kasAmount(summary.totalTransferredIn))
+                    LabeledContent("Transferred Out", value: kasAmount(summary.totalTransferredOut))
+                }
+            }
+            .navigationTitle("Kaspa")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .tint(accentColor)
+        }
+    }
+
+    private var kasPriceText: String {
+        guard let kasPriceUSD else { return "—" }
+        return kasPriceUSD.formatted(
+            .currency(code: "USD").precision(.fractionLength(0...8))
+        )
+    }
+
+    private var marketValueText: String {
+        guard let kasPriceUSD else { return "—" }
+        return currency(summary.holdings * kasPriceUSD)
+    }
+
+    private var averageCostText: String {
+        guard let averageCost = summary.averageCost else { return "—" }
+        return averageCost.formatted(
+            .currency(code: "USD").precision(.fractionLength(0...8))
+        )
+    }
+
+    private var unrealizedProfitLossText: String {
+        guard let unrealizedProfitLoss else { return "—" }
+        return currency(unrealizedProfitLoss)
+    }
+
+    private var unrealizedProfitLoss: Double? {
+        guard let kasPriceUSD else { return nil }
+        return (summary.holdings * kasPriceUSD) - summary.costBasis
+    }
+
+    private var unrealizedProfitLossColor: Color {
+        guard let unrealizedProfitLoss else { return .secondary }
+        if unrealizedProfitLoss > 0 { return .green }
+        if unrealizedProfitLoss < 0 { return .red }
+        return .secondary
+    }
+
+    private func kasAmount(_ value: Double) -> String {
+        value.formatted(
+            .number.grouping(.automatic).precision(.fractionLength(0...8))
+        ) + " KAS"
+    }
+
+    private func currency(_ value: Double) -> String {
+        value.formatted(.currency(code: "USD"))
     }
 }
 
