@@ -33,7 +33,8 @@ struct PortfolioView: View {
                     portfolioContent
                 }
             }
-            .navigationTitle("Portfolio")
+            .navigationTitle(accounts.isEmpty ? "Portfolio" : "")
+            .navigationBarTitleDisplayMode(accounts.isEmpty ? .large : .inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -115,7 +116,7 @@ struct PortfolioView: View {
     private var portfolioContent: some View {
         ScrollView {
             VStack(spacing: 16) {
-                accountSelector
+                largePortfolioMenu
                 valueCard
                 chartCard
                 holdingsCard
@@ -125,7 +126,7 @@ struct PortfolioView: View {
         }
     }
 
-    private var accountSelector: some View {
+    private var largePortfolioMenu: some View {
         Menu {
             Button {
                 selectedPortfolioID = ""
@@ -151,33 +152,24 @@ struct PortfolioView: View {
                 }
             }
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: selectedAccount?.iconName ?? "square.stack.3d.up.fill")
-                    .font(.headline)
-                    .foregroundStyle(selectedAccount.map(accountColor) ?? teal)
-                    .frame(width: 34, height: 34)
-                    .background(.thinMaterial, in: Circle())
+            HStack(spacing: 7) {
+                Text(selectedAccount?.name ?? "All Portfolios")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Viewing")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(selectedAccount?.name ?? "All Portfolios")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                }
+                Image(systemName: "chevron.down")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(activePortfolioColor)
 
                 Spacer(minLength: 0)
-
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
             }
-            .padding()
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .contentShape(Rectangle())
         }
-        .buttonStyle(SubtlePressButtonStyle())
+        .buttonStyle(.plain)
+        .accessibilityLabel("Select Portfolio")
+        .accessibilityValue(selectedAccount?.name ?? "All Portfolios")
     }
 
     private var valueCard: some View {
