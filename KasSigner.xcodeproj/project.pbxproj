@@ -34,6 +34,7 @@
 		EC947F3EB01353DF8160A659 /* KasSigner/App/KasSignerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C00F46C73F5A82BA55B83E /* KasSigner/App/KasSignerApp.swift */; };
 		F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */; };
 		F10000000000000000000002 /* KasSigner/Views/PortfolioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */; };
+		F20000000000000000000001 /* KasSigner/Models/PortfolioTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -65,6 +66,7 @@
 		E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletStore.swift; sourceTree = "<group>"; };
 		F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioAccount.swift; sourceTree = "<group>"; };
 		F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/PortfolioView.swift; sourceTree = "<group>"; };
+		F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioTransaction.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -93,6 +95,7 @@
 				D936ECD50D8257028EDB129F /* KasSigner/Models/WalletProfile.swift */,
 				E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */,
 				F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */,
+				F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */,
 				0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */,
 				537C66CC539F5FD89E51681C /* KasSigner/Views/RootView.swift */,
 				852F6B53D2075E8EAE5AF159 /* KasSigner/Views/WalletHomeView.swift */,
@@ -195,6 +198,7 @@
 				74F77A10AF9654CEACA20ADC /* KasSigner/Models/WalletProfile.swift in Sources */,
 				E2DBABBC2EB755738881D92B /* KasSigner/Models/WalletStore.swift in Sources */,
 				F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */,
+				F20000000000000000000001 /* KasSigner/Models/PortfolioTransaction.swift in Sources */,
 				3E0992BA4A395DCCAB278670 /* KasSigner/Services/KasSignerEngine.swift in Sources */,
 				4FC7EC177D2653D784021833 /* KasSigner/Views/RootView.swift in Sources */,
 				0DAD6E624BA95A15B1094D73 /* KasSigner/Views/WalletHomeView.swift in Sources */,

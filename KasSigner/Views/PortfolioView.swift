@@ -12,15 +12,26 @@ struct PortfolioView: View {
         var id: Self { self }
     }
 
+    private enum PortfolioSection: String, CaseIterable, Identifiable {
+        case holdings = "Holdings"
+        case transactions = "Transactions"
+
+        var id: Self { self }
+    }
+
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PortfolioAccount.createdAt) private var accounts: [PortfolioAccount]
+    @Query(sort: \PortfolioTransaction.timestamp, order: .reverse)
+    private var transactions: [PortfolioTransaction]
 
     @AppStorage("kassigner.portfolio.selectedID.v1")
     private var selectedPortfolioID = ""
+    @State private var selectedSection: PortfolioSection = .holdings
     @State private var selectedRange: TimeRange = .day
     @State private var accountBeingEdited: PortfolioAccount?
     @State private var accountPendingDeletion: PortfolioAccount?
     @State private var showingAccountEditor = false
+    @State private var showingTransactionEditor = false
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -74,6 +85,17 @@ struct PortfolioView: View {
                 saveAccount(draft)
             }
         }
+        .sheet(isPresented: $showingTransactionEditor) {
+            PortfolioTransactionEditor(
+                accounts: accounts,
+                initialPortfolioID: selectedPortfolioUUID,
+                accentColor: activePortfolioColor
+            ) { draft in
+                saveTransaction(draft)
+            }
+            .presentationDetents([.fraction(0.9)])
+            .presentationDragIndicator(.visible)
+        }
         .alert(
             "Delete Portfolio Account?",
             isPresented: Binding(
@@ -118,9 +140,13 @@ struct PortfolioView: View {
             VStack(spacing: 16) {
                 largePortfolioMenu
                 valueCard
-                chartCard
-                holdingsCard
-                transactionsCard
+
+                if selectedSection == .holdings {
+                    chartCard
+                    holdingsSection
+                } else {
+                    transactionsSection
+                }
             }
             .padding()
         }
@@ -173,33 +199,68 @@ struct PortfolioView: View {
     }
 
     private var valueCard: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Portfolio Value")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Portfolio Value")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
 
-                Text(0, format: .currency(code: "USD"))
-                    .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
+                    Text("$0.00")
+                        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
 
-                Text("No performance data")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    Text("No performance data")
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                HStack {
+                    metricLabel("KAS Price", value: "—")
+                    Spacer()
+                    metricLabel("Total Cost", value: "$0.00", alignment: .trailing)
+                }
             }
+            .padding()
 
             Divider()
 
-            HStack {
-                metricLabel("KAS Price", value: "—")
-                Spacer()
-                metricLabel("Total Cost", value: "$0.00", alignment: .trailing)
+            HStack(spacing: 0) {
+                ForEach(PortfolioSection.allCases) { section in
+                    sectionButton(section)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func sectionButton(_ section: PortfolioSection) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                selectedSection = section
+            }
+        } label: {
+            VStack(spacing: 9) {
+                Text(section.rawValue)
+                    .font(.subheadline.weight(selectedSection == section ? .semibold : .regular))
+                    .foregroundStyle(selectedSection == section ? .primary : .secondary)
+
+                Capsule()
+                    .fill(selectedSection == section ? activePortfolioColor : .clear)
+                    .frame(height: 3)
+                    .padding(.horizontal, 18)
+            }
+            .padding(.top, 13)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity)
+        .accessibilityAddTraits(selectedSection == section ? .isSelected : [])
     }
 
     private var chartCard: some View {
@@ -234,13 +295,13 @@ struct PortfolioView: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private var holdingsCard: some View {
+    private var holdingsSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Holdings")
-                .font(.headline)
-
             HStack(spacing: 12) {
-                themedIcon("bitcoinsign.circle")
+                Image("KaspaLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 38, height: 38)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Kaspa")
@@ -262,59 +323,91 @@ struct PortfolioView: View {
             }
 
             Divider()
-
-            HStack(alignment: .top) {
-                metricLabel("Average Cost", value: "—")
-                Spacer()
-                metricLabel("Cost Basis", value: "$0.00", alignment: .center)
-                Spacer()
-                metricLabel("Unrealized P/L", value: "—", alignment: .trailing)
-            }
+            newTransactionButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 2)
+        .padding(.vertical, 6)
     }
 
-    private var transactionsCard: some View {
+    private var transactionsSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Transactions")
                     .font(.headline)
 
                 Spacer()
-
-                Menu {
-                    transactionMenuButton("Buy", systemImage: "plus.circle")
-                    transactionMenuButton("Sell", systemImage: "minus.circle")
-                    Divider()
-                    transactionMenuButton("Transfer In", systemImage: "arrow.down.circle")
-                    transactionMenuButton("Transfer Out", systemImage: "arrow.up.circle")
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title3)
-                }
-                .tint(activePortfolioColor)
-                .accessibilityLabel("New Portfolio Transaction")
             }
 
-            HStack(spacing: 12) {
-                themedIcon("arrow.left.arrow.right")
-
-                VStack(alignment: .leading, spacing: 3) {
+            if visibleTransactions.isEmpty {
+                HStack(spacing: 12) {
+                    themedIcon("arrow.left.arrow.right")
                     Text("No Transactions")
                         .font(.subheadline.weight(.semibold))
-                    Text("Add a buy, sell, or transfer to begin tracking this portfolio.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
                 }
-
-                Spacer(minLength: 0)
+                .padding(.vertical, 24)
+            } else {
+                ForEach(visibleTransactions) { transaction in
+                    transactionRow(transaction)
+                    if transaction.id != visibleTransactions.last?.id {
+                        Divider()
+                    }
+                }
             }
+
+            newTransactionButton
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(.horizontal, 2)
+        .padding(.top, 4)
+    }
+
+    private var newTransactionButton: some View {
+        Button {
+            showingTransactionEditor = true
+        } label: {
+            Label("New Transaction", systemImage: "plus")
+                .font(.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 5)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(activePortfolioColor)
+        .accessibilityLabel("New Portfolio Transaction")
+    }
+
+    private func transactionRow(_ transaction: PortfolioTransaction) -> some View {
+        HStack(spacing: 12) {
+            themedIcon(transactionIcon(for: transaction.type))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(transaction.type)
+                    .font(.subheadline.weight(.semibold))
+                HStack(spacing: 5) {
+                    if selectedAccount == nil,
+                       let accountName = accountName(for: transaction.portfolioID) {
+                        Text(accountName)
+                        Text("•")
+                    }
+                    Text(transaction.timestamp.formatted(date: .abbreviated, time: .shortened))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS")
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD")))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 8)
     }
 
     private func themedIcon(_ systemImage: String) -> some View {
@@ -340,13 +433,6 @@ struct PortfolioView: View {
         }
     }
 
-    private func transactionMenuButton(_ title: String, systemImage: String) -> some View {
-        Button {} label: {
-            Label(title, systemImage: systemImage)
-        }
-        .disabled(true)
-    }
-
     private var selectedAccount: PortfolioAccount? {
         guard let selectedPortfolioUUID else { return nil }
         return accounts.first(where: { $0.id == selectedPortfolioUUID })
@@ -354,6 +440,11 @@ struct PortfolioView: View {
 
     private var selectedPortfolioUUID: UUID? {
         UUID(uuidString: selectedPortfolioID)
+    }
+
+    private var visibleTransactions: [PortfolioTransaction] {
+        guard let selectedPortfolioUUID else { return transactions }
+        return transactions.filter { $0.portfolioID == selectedPortfolioUUID }
     }
 
     private var activePortfolioColor: Color {
@@ -389,13 +480,44 @@ struct PortfolioView: View {
         self.accountBeingEdited = nil
     }
 
+    private func saveTransaction(_ draft: PortfolioTransactionDraft) {
+        modelContext.insert(
+            PortfolioTransaction(
+                portfolioID: draft.portfolioID,
+                type: draft.type.rawValue,
+                kasAmount: draft.kasAmount,
+                kasPriceUSD: draft.kasPriceUSD,
+                timestamp: draft.timestamp,
+                notes: draft.notes
+            )
+        )
+        try? modelContext.save()
+    }
+
     private func deleteAccount(_ account: PortfolioAccount) {
         if selectedPortfolioID == account.id.uuidString {
             selectedPortfolioID = ""
         }
+        for transaction in transactions where transaction.portfolioID == account.id {
+            modelContext.delete(transaction)
+        }
         modelContext.delete(account)
         try? modelContext.save()
         accountPendingDeletion = nil
+    }
+
+    private func accountName(for id: UUID) -> String? {
+        accounts.first(where: { $0.id == id })?.name
+    }
+
+    private func transactionIcon(for type: String) -> String {
+        switch type {
+        case PortfolioTransactionType.buy.rawValue: "plus.circle"
+        case PortfolioTransactionType.sell.rawValue: "minus.circle"
+        case PortfolioTransactionType.transferIn.rawValue: "arrow.down.circle"
+        case PortfolioTransactionType.transferOut.rawValue: "arrow.up.circle"
+        default: "arrow.left.arrow.right.circle"
+        }
     }
 
     private func migrateLegacyPortfolioIcons() {
@@ -413,6 +535,153 @@ struct PortfolioView: View {
         case "red", "purple": .red
         default: teal
         }
+    }
+}
+
+private enum PortfolioTransactionType: String, CaseIterable, Identifiable {
+    case buy = "Buy"
+    case sell = "Sell"
+    case transferIn = "Transfer In"
+    case transferOut = "Transfer Out"
+
+    var id: Self { self }
+}
+
+private struct PortfolioTransactionDraft {
+    let portfolioID: UUID
+    let type: PortfolioTransactionType
+    let kasAmount: Double
+    let kasPriceUSD: Double
+    let timestamp: Date
+    let notes: String
+}
+
+private struct PortfolioTransactionEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var priceService: PriceService
+
+    let accounts: [PortfolioAccount]
+    let initialPortfolioID: UUID?
+    let accentColor: Color
+    let onSave: (PortfolioTransactionDraft) -> Void
+
+    @State private var portfolioID: UUID?
+    @State private var transactionType: PortfolioTransactionType = .buy
+    @State private var kasAmount: Double?
+    @State private var kasPriceUSD: Double?
+    @State private var timestamp = Date()
+    @State private var notes = ""
+    @State private var hasEditedPrice = false
+
+    init(
+        accounts: [PortfolioAccount],
+        initialPortfolioID: UUID?,
+        accentColor: Color,
+        onSave: @escaping (PortfolioTransactionDraft) -> Void
+    ) {
+        self.accounts = accounts
+        self.initialPortfolioID = initialPortfolioID
+        self.accentColor = accentColor
+        self.onSave = onSave
+        _portfolioID = State(initialValue: initialPortfolioID ?? accounts.first?.id)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Transaction") {
+                    if initialPortfolioID == nil {
+                        Picker("Portfolio", selection: $portfolioID) {
+                            ForEach(accounts) { account in
+                                Text(account.name).tag(account.id as UUID?)
+                            }
+                        }
+                    }
+
+                    Picker("Type", selection: $transactionType) {
+                        ForEach(PortfolioTransactionType.allCases) { type in
+                            Text(type.rawValue).tag(type)
+                        }
+                    }
+
+                    TextField("KAS Amount", value: $kasAmount, format: .number)
+                        .keyboardType(.decimalPad)
+
+                    TextField(
+                        "Price per KAS (USD)",
+                        value: $kasPriceUSD,
+                        format: .number.precision(.fractionLength(0...8))
+                    )
+                    .keyboardType(.decimalPad)
+                    .onChange(of: kasPriceUSD) { _, _ in
+                        hasEditedPrice = true
+                    }
+
+                    LabeledContent("Total Value", value: totalValueText)
+                }
+
+                Section("Date & Time") {
+                    DatePicker("Date", selection: $timestamp, displayedComponents: .date)
+                    DatePicker("Time", selection: $timestamp, displayedComponents: .hourAndMinute)
+                }
+
+                Section("Notes") {
+                    TextField("Optional notes", text: $notes, axis: .vertical)
+                        .lineLimit(3...6)
+                }
+            }
+            .navigationTitle("New Transaction")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let portfolioID, let kasAmount, let kasPriceUSD else { return }
+                        onSave(
+                            PortfolioTransactionDraft(
+                                portfolioID: portfolioID,
+                                type: transactionType,
+                                kasAmount: kasAmount,
+                                kasPriceUSD: kasPriceUSD,
+                                timestamp: timestamp,
+                                notes: notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                            )
+                        )
+                        dismiss()
+                    }
+                    .disabled(!canSave)
+                }
+            }
+            .tint(accentColor)
+            .task {
+                await priceService.refresh(preferences: preferences)
+                populateLivePriceIfNeeded()
+            }
+            .onChange(of: priceService.prices) { _, _ in
+                populateLivePriceIfNeeded()
+            }
+        }
+    }
+
+    private var canSave: Bool {
+        guard portfolioID != nil, let kasAmount, let kasPriceUSD else { return false }
+        return kasAmount > 0 && kasPriceUSD > 0
+    }
+
+    private var totalValueText: String {
+        guard let kasAmount, let kasPriceUSD else { return "$0.00" }
+        return (kasAmount * kasPriceUSD).formatted(.currency(code: "USD"))
+    }
+
+    private func populateLivePriceIfNeeded() {
+        guard !hasEditedPrice,
+              let livePrice = priceService.price(for: .usd) else { return }
+        kasPriceUSD = livePrice
+        hasEditedPrice = false
     }
 }
 

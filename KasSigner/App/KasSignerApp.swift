@@ -28,7 +28,7 @@ struct KasSignerApp: App {
                 .environmentObject(priceService)
                 .environmentObject(appLockService)
                 .environmentObject(copyFeedbackCenter)
-                .modelContainer(for: PortfolioAccount.self)
+                .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
         }
     }
 
