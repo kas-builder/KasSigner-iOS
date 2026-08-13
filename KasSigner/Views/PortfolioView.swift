@@ -15,7 +15,8 @@ struct PortfolioView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PortfolioAccount.createdAt) private var accounts: [PortfolioAccount]
 
-    @State private var selectedAccountID: UUID?
+    @AppStorage("kassigner.portfolio.selectedID.v1")
+    private var selectedPortfolioID = ""
     @State private var selectedRange: TimeRange = .day
     @State private var accountBeingEdited: PortfolioAccount?
     @State private var accountPendingDeletion: PortfolioAccount?
@@ -88,9 +89,9 @@ struct PortfolioView: View {
             Text("“\(account.name)” and its future portfolio transactions will be removed from this device.")
         }
         .onChange(of: accounts.map(\.id)) { _, accountIDs in
-            guard let selectedAccountID else { return }
-            if !accountIDs.contains(selectedAccountID) {
-                self.selectedAccountID = nil
+            guard let selectedPortfolioUUID else { return }
+            if !accountIDs.contains(selectedPortfolioUUID) {
+                selectedPortfolioID = ""
             }
         }
         .task {
@@ -127,12 +128,12 @@ struct PortfolioView: View {
     private var accountSelector: some View {
         Menu {
             Button {
-                selectedAccountID = nil
+                selectedPortfolioID = ""
             } label: {
-                if selectedAccountID == nil {
-                    Label("All Accounts", systemImage: "checkmark")
+                if selectedPortfolioID.isEmpty {
+                    Label("All Portfolios", systemImage: "checkmark")
                 } else {
-                    Text("All Accounts")
+                    Text("All Portfolios")
                 }
             }
 
@@ -140,9 +141,9 @@ struct PortfolioView: View {
 
             ForEach(accounts) { account in
                 Button {
-                    selectedAccountID = account.id
+                    selectedPortfolioID = account.id.uuidString
                 } label: {
-                    if selectedAccountID == account.id {
+                    if selectedPortfolioID == account.id.uuidString {
                         Label(account.name, systemImage: "checkmark")
                     } else {
                         Text(account.name)
@@ -161,13 +162,13 @@ struct PortfolioView: View {
                     Text("Viewing")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(selectedAccount?.name ?? "All Accounts")
+                    Text(selectedAccount?.name ?? "All Portfolios")
                         .font(.headline)
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                 }
 
-                Spacer()
+                Spacer(minLength: 0)
 
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.caption.weight(.semibold))
@@ -180,19 +181,29 @@ struct PortfolioView: View {
     }
 
     private var valueCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Portfolio Value")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Portfolio Value")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
-            Text(0, format: .currency(code: "USD"))
-                .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
+                Text(0, format: .currency(code: "USD"))
+                    .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
 
-            Text("Add transactions to calculate performance")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                Text("No performance data")
+                    .font(.footnote.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            HStack {
+                metricLabel("KAS Price", value: "—")
+                Spacer()
+                metricLabel("Total Cost", value: "$0.00", alignment: .trailing)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
@@ -232,36 +243,79 @@ struct PortfolioView: View {
     }
 
     private var holdingsCard: some View {
-        placeholderCard(
-            title: "Holdings",
-            message: "KAS amount, average cost, current value, and performance will appear here.",
-            systemImage: "bitcoinsign.circle"
-        )
-    }
-
-    private var transactionsCard: some View {
-        placeholderCard(
-            title: "Transactions",
-            message: "Buys, sells, and transfers will appear here.",
-            systemImage: "arrow.left.arrow.right"
-        )
-    }
-
-    private func placeholderCard(title: String, message: String, systemImage: String) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title)
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Holdings")
                 .font(.headline)
 
             HStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.title2)
-                    .foregroundStyle(activePortfolioColor)
-                    .frame(width: 38, height: 38)
-                    .background(activePortfolioColor.opacity(0.12), in: Circle())
+                themedIcon("bitcoinsign.circle")
 
-                Text(message)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Kaspa")
+                        .font(.subheadline.weight(.semibold))
+                    Text("KAS")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("0 KAS")
+                        .font(.subheadline.weight(.semibold))
+                    Text("$0.00")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            HStack(alignment: .top) {
+                metricLabel("Average Cost", value: "—")
+                Spacer()
+                metricLabel("Cost Basis", value: "$0.00", alignment: .center)
+                Spacer()
+                metricLabel("Unrealized P/L", value: "—", alignment: .trailing)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var transactionsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Transactions")
+                    .font(.headline)
+
+                Spacer()
+
+                Menu {
+                    transactionMenuButton("Buy", systemImage: "plus.circle")
+                    transactionMenuButton("Sell", systemImage: "minus.circle")
+                    Divider()
+                    transactionMenuButton("Transfer In", systemImage: "arrow.down.circle")
+                    transactionMenuButton("Transfer Out", systemImage: "arrow.up.circle")
+                } label: {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.title3)
+                }
+                .tint(activePortfolioColor)
+                .accessibilityLabel("New Portfolio Transaction")
+            }
+
+            HStack(spacing: 12) {
+                themedIcon("arrow.left.arrow.right")
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("No Transactions")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Add a buy, sell, or transfer to begin tracking this portfolio.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer(minLength: 0)
             }
@@ -271,9 +325,43 @@ struct PortfolioView: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
+    private func themedIcon(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.title2)
+            .foregroundStyle(activePortfolioColor)
+            .frame(width: 38, height: 38)
+            .background(activePortfolioColor.opacity(0.12), in: Circle())
+    }
+
+    private func metricLabel(
+        _ title: String,
+        value: String,
+        alignment: HorizontalAlignment = .leading
+    ) -> some View {
+        VStack(alignment: alignment, spacing: 3) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+        }
+    }
+
+    private func transactionMenuButton(_ title: String, systemImage: String) -> some View {
+        Button {} label: {
+            Label(title, systemImage: systemImage)
+        }
+        .disabled(true)
+    }
+
     private var selectedAccount: PortfolioAccount? {
-        guard let selectedAccountID else { return nil }
-        return accounts.first(where: { $0.id == selectedAccountID })
+        guard let selectedPortfolioUUID else { return nil }
+        return accounts.first(where: { $0.id == selectedPortfolioUUID })
+    }
+
+    private var selectedPortfolioUUID: UUID? {
+        UUID(uuidString: selectedPortfolioID)
     }
 
     private var activePortfolioColor: Color {
@@ -302,7 +390,7 @@ struct PortfolioView: View {
                 accentName: draft.accentName
             )
             modelContext.insert(account)
-            selectedAccountID = account.id
+            selectedPortfolioID = account.id.uuidString
         }
 
         try? modelContext.save()
@@ -310,8 +398,8 @@ struct PortfolioView: View {
     }
 
     private func deleteAccount(_ account: PortfolioAccount) {
-        if selectedAccountID == account.id {
-            selectedAccountID = nil
+        if selectedPortfolioID == account.id.uuidString {
+            selectedPortfolioID = ""
         }
         modelContext.delete(account)
         try? modelContext.save()
