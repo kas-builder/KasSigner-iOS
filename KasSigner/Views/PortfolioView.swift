@@ -32,6 +32,10 @@ struct PortfolioView: View {
     @State private var accountPendingDeletion: PortfolioAccount?
     @State private var showingAccountEditor = false
     @State private var showingTransactionEditor = false
+    @State private var selectedTransaction: PortfolioTransaction?
+    @State private var transactionBeingEdited: PortfolioTransaction?
+    @State private var transactionPendingDeletion: PortfolioTransaction?
+    @State private var openEditorAfterDetailDismisses = false
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -88,12 +92,36 @@ struct PortfolioView: View {
         .sheet(isPresented: $showingTransactionEditor) {
             PortfolioTransactionEditor(
                 accounts: accounts,
-                initialPortfolioID: selectedPortfolioUUID,
+                initialPortfolioID: transactionBeingEdited?.portfolioID ?? selectedPortfolioUUID,
+                transaction: transactionBeingEdited,
                 accentColor: activePortfolioColor
             ) { draft in
                 saveTransaction(draft)
             }
             .presentationDetents([.fraction(0.9)])
+            .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $selectedTransaction, onDismiss: {
+            if openEditorAfterDetailDismisses {
+                openEditorAfterDetailDismisses = false
+                showingTransactionEditor = true
+            }
+        }) { transaction in
+            PortfolioTransactionDetail(
+                transaction: transaction,
+                portfolioName: accountName(for: transaction.portfolioID) ?? "Unknown Portfolio",
+                accentColor: activePortfolioColor,
+                onEdit: {
+                    transactionBeingEdited = transaction
+                    openEditorAfterDetailDismisses = true
+                    selectedTransaction = nil
+                },
+                onDelete: {
+                    selectedTransaction = nil
+                    transactionPendingDeletion = transaction
+                }
+            )
+            .presentationDetents([.medium])
             .presentationDragIndicator(.visible)
         }
         .alert(
@@ -110,6 +138,21 @@ struct PortfolioView: View {
             Button("Cancel", role: .cancel) {}
         } message: { account in
             Text("“\(account.name)” and its future portfolio transactions will be removed from this device.")
+        }
+        .alert(
+            "Delete Transaction?",
+            isPresented: Binding(
+                get: { transactionPendingDeletion != nil },
+                set: { if !$0 { transactionPendingDeletion = nil } }
+            ),
+            presenting: transactionPendingDeletion
+        ) { transaction in
+            Button("Delete", role: .destructive) {
+                deleteTransaction(transaction)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("This transaction will be permanently removed from this device.")
         }
         .onChange(of: accounts.map(\.id)) { _, accountIDs in
             guard let selectedPortfolioUUID else { return }
@@ -365,6 +408,7 @@ struct PortfolioView: View {
 
     private var newTransactionButton: some View {
         Button {
+            transactionBeingEdited = nil
             showingTransactionEditor = true
         } label: {
             Label("New Transaction", systemImage: "plus")
@@ -378,35 +422,41 @@ struct PortfolioView: View {
     }
 
     private func transactionRow(_ transaction: PortfolioTransaction) -> some View {
-        HStack(spacing: 12) {
-            themedIcon(transactionIcon(for: transaction.type))
+        Button {
+            selectedTransaction = transaction
+        } label: {
+            HStack(spacing: 12) {
+                themedIcon(transactionIcon(for: transaction.type))
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(transaction.type)
-                    .font(.subheadline.weight(.semibold))
-                HStack(spacing: 5) {
-                    if selectedAccount == nil,
-                       let accountName = accountName(for: transaction.portfolioID) {
-                        Text(accountName)
-                        Text("•")
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(transaction.type)
+                        .font(.subheadline.weight(.semibold))
+                    HStack(spacing: 5) {
+                        if selectedAccount == nil,
+                           let accountName = accountName(for: transaction.portfolioID) {
+                            Text(accountName)
+                            Text("•")
+                        }
+                        Text(transaction.timestamp.formatted(date: .abbreviated, time: .shortened))
                     }
-                    Text(transaction.timestamp.formatted(date: .abbreviated, time: .shortened))
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD")))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD")))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
         .padding(.vertical, 8)
     }
 
@@ -481,17 +531,31 @@ struct PortfolioView: View {
     }
 
     private func saveTransaction(_ draft: PortfolioTransactionDraft) {
-        modelContext.insert(
-            PortfolioTransaction(
+        if let transactionBeingEdited {
+            transactionBeingEdited.portfolioID = draft.portfolioID
+            transactionBeingEdited.type = draft.type.rawValue
+            transactionBeingEdited.kasAmount = draft.kasAmount
+            transactionBeingEdited.kasPriceUSD = draft.kasPriceUSD
+            transactionBeingEdited.timestamp = draft.timestamp
+            transactionBeingEdited.notes = draft.notes
+        } else {
+            modelContext.insert(PortfolioTransaction(
                 portfolioID: draft.portfolioID,
                 type: draft.type.rawValue,
                 kasAmount: draft.kasAmount,
                 kasPriceUSD: draft.kasPriceUSD,
                 timestamp: draft.timestamp,
                 notes: draft.notes
-            )
-        )
+            ))
+        }
         try? modelContext.save()
+        transactionBeingEdited = nil
+    }
+
+    private func deleteTransaction(_ transaction: PortfolioTransaction) {
+        modelContext.delete(transaction)
+        try? modelContext.save()
+        transactionPendingDeletion = nil
     }
 
     private func deleteAccount(_ account: PortfolioAccount) {
@@ -556,6 +620,73 @@ private struct PortfolioTransactionDraft {
     let notes: String
 }
 
+private struct PortfolioTransactionDetail: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let transaction: PortfolioTransaction
+    let portfolioName: String
+    let accentColor: Color
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Portfolio", value: portfolioName)
+                    LabeledContent("Type", value: transaction.type)
+                    LabeledContent("KAS Amount", value: kasAmountText)
+                    LabeledContent("Price per KAS", value: kasPriceText)
+                    LabeledContent("Total Value", value: totalValueText)
+                    LabeledContent(
+                        "Date & Time",
+                        value: transaction.timestamp.formatted(date: .abbreviated, time: .shortened)
+                    )
+                }
+
+                if !transaction.notes.isEmpty {
+                    Section("Notes") {
+                        Text(transaction.notes)
+                    }
+                }
+
+                Section {
+                    Button("Edit Transaction") {
+                        onEdit()
+                    }
+                    .foregroundStyle(accentColor)
+
+                    Button("Delete Transaction", role: .destructive) {
+                        onDelete()
+                    }
+                }
+            }
+            .navigationTitle("Transaction")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .tint(accentColor)
+        }
+    }
+
+    private var kasAmountText: String {
+        transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS"
+    }
+
+    private var kasPriceText: String {
+        transaction.kasPriceUSD.formatted(
+            .currency(code: "USD").precision(.fractionLength(0...8))
+        )
+    }
+
+    private var totalValueText: String {
+        (transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD"))
+    }
+}
+
 private struct PortfolioTransactionEditor: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var preferences: AppPreferences
@@ -563,6 +694,7 @@ private struct PortfolioTransactionEditor: View {
 
     let accounts: [PortfolioAccount]
     let initialPortfolioID: UUID?
+    let transaction: PortfolioTransaction?
     let accentColor: Color
     let onSave: (PortfolioTransactionDraft) -> Void
 
@@ -577,14 +709,24 @@ private struct PortfolioTransactionEditor: View {
     init(
         accounts: [PortfolioAccount],
         initialPortfolioID: UUID?,
+        transaction: PortfolioTransaction? = nil,
         accentColor: Color,
         onSave: @escaping (PortfolioTransactionDraft) -> Void
     ) {
         self.accounts = accounts
         self.initialPortfolioID = initialPortfolioID
+        self.transaction = transaction
         self.accentColor = accentColor
         self.onSave = onSave
-        _portfolioID = State(initialValue: initialPortfolioID ?? accounts.first?.id)
+        _portfolioID = State(initialValue: transaction?.portfolioID ?? initialPortfolioID ?? accounts.first?.id)
+        _transactionType = State(
+            initialValue: transaction.flatMap { PortfolioTransactionType(rawValue: $0.type) } ?? .buy
+        )
+        _kasAmount = State(initialValue: transaction?.kasAmount)
+        _kasPriceUSD = State(initialValue: transaction?.kasPriceUSD)
+        _timestamp = State(initialValue: transaction?.timestamp ?? Date())
+        _notes = State(initialValue: transaction?.notes ?? "")
+        _hasEditedPrice = State(initialValue: transaction != nil)
     }
 
     var body: some View {
@@ -605,13 +747,21 @@ private struct PortfolioTransactionEditor: View {
                         }
                     }
 
-                    TextField("KAS Amount", value: $kasAmount, format: .number)
+                    TextField(
+                        "KAS Amount",
+                        value: $kasAmount,
+                        format: .number
+                            .grouping(.automatic)
+                            .precision(.fractionLength(0...8))
+                    )
                         .keyboardType(.decimalPad)
 
                     TextField(
                         "Price per KAS (USD)",
                         value: $kasPriceUSD,
-                        format: .number.precision(.fractionLength(0...8))
+                        format: .number
+                            .grouping(.automatic)
+                            .precision(.fractionLength(0...8))
                     )
                     .keyboardType(.decimalPad)
                     .onChange(of: kasPriceUSD) { _, _ in
@@ -631,7 +781,7 @@ private struct PortfolioTransactionEditor: View {
                         .lineLimit(3...6)
                 }
             }
-            .navigationTitle("New Transaction")
+            .navigationTitle(transaction == nil ? "New Transaction" : "Edit Transaction")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
