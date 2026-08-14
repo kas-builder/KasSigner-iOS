@@ -1,5 +1,12 @@
 import Foundation
 
+struct HistoricalPricePoint: Identifiable, Equatable {
+    let timestamp: Date
+    let priceUSD: Double
+
+    var id: Date { timestamp }
+}
+
 @MainActor
 final class PriceService: ObservableObject {
     static let shared = PriceService()
@@ -34,6 +41,15 @@ final class PriceService: ObservableObject {
         let quotes: [String: Quote]
     }
 
+    private struct CoinGeckoMarketChartResponse: Decodable {
+        let prices: [[Double]]
+    }
+
+    private struct CoinPaprikaHistoricalPoint: Decodable {
+        let timestamp: String
+        let price: Double
+    }
+
     private enum PriceError: LocalizedError {
         case invalidResponse
         case incompleteQuote
@@ -53,6 +69,7 @@ final class PriceService: ObservableObject {
     private let requestTimeout: TimeInterval = 8
     private var refreshTask: Task<Void, Never>?
     private var lastRefreshAttempt: Date?
+    private var historicalCache: [String: [HistoricalPricePoint]] = [:]
 
     private init() {
         loadCache()
@@ -65,6 +82,104 @@ final class PriceService: ObservableObject {
     func convertedBalance(kas: Double, currency: SecondaryCurrency) -> Double? {
         guard let price = price(for: currency) else { return nil }
         return kas * price
+    }
+
+    func historicalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
+        do {
+            let points = try await fetchCoinGeckoHistory(days: days)
+            historicalCache[days] = points
+            return points
+        } catch {
+            do {
+                let points = try await fetchCoinPaprikaHistory(days: days)
+                historicalCache[days] = points
+                return points
+            } catch {
+                if let cached = historicalCache[days], !cached.isEmpty {
+                    return cached
+                }
+                throw error
+            }
+        }
+    }
+
+    private func fetchCoinGeckoHistory(days: String) async throws -> [HistoricalPricePoint] {
+        var components = URLComponents(
+            string: "https://api.coingecko.com/api/v3/coins/kaspa/market_chart"
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "vs_currency", value: "usd"),
+            URLQueryItem(name: "days", value: days),
+            URLQueryItem(name: "precision", value: "full")
+        ]
+
+        guard let url = components?.url else {
+            throw PriceError.invalidResponse
+        }
+
+        let data = try await requestData(from: url)
+        let response = try JSONDecoder().decode(CoinGeckoMarketChartResponse.self, from: data)
+        let points = response.prices.compactMap { entry -> HistoricalPricePoint? in
+            guard entry.count >= 2,
+                  entry[0].isFinite,
+                  entry[1].isFinite,
+                  entry[1] > 0 else {
+                return nil
+            }
+            return HistoricalPricePoint(
+                timestamp: Date(timeIntervalSince1970: entry[0] / 1_000),
+                priceUSD: entry[1]
+            )
+        }
+
+        guard !points.isEmpty else {
+            throw PriceError.invalidResponse
+        }
+        return points.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private func fetchCoinPaprikaHistory(days: String) async throws -> [HistoricalPricePoint] {
+        guard let requestedDays = Int(days), requestedDays <= 365 else {
+            throw PriceError.invalidResponse
+        }
+
+        let isIntraday = requestedDays <= 1
+        let availableDays = isIntraday ? 23.0 / 24.0 : Double(requestedDays)
+        let start = Date().addingTimeInterval(-availableDays * 86_400)
+        var components = URLComponents(
+            string: "https://api.coinpaprika.com/v1/tickers/kas-kaspa/historical"
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "start", value: String(Int(start.timeIntervalSince1970))),
+            URLQueryItem(name: "interval", value: isIntraday ? "1h" : "1d"),
+            URLQueryItem(name: "limit", value: "5000"),
+            URLQueryItem(name: "quote", value: "usd")
+        ]
+
+        guard let url = components?.url else {
+            throw PriceError.invalidResponse
+        }
+
+        let data = try await requestData(from: url)
+        let response = try JSONDecoder().decode([CoinPaprikaHistoricalPoint].self, from: data)
+        let formatter = ISO8601DateFormatter()
+        var points = response.compactMap { entry -> HistoricalPricePoint? in
+            guard entry.price.isFinite,
+                  entry.price > 0,
+                  let timestamp = formatter.date(from: entry.timestamp) else {
+                return nil
+            }
+            return HistoricalPricePoint(timestamp: timestamp, priceUSD: entry.price)
+        }
+
+        if let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
+            points.append(HistoricalPricePoint(timestamp: Date(), priceUSD: currentUSD))
+        }
+
+        guard !points.isEmpty else {
+            throw PriceError.invalidResponse
+        }
+        return points.sorted { $0.timestamp < $1.timestamp }
     }
 
     func refresh(

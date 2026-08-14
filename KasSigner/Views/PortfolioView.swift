@@ -1,3 +1,4 @@
+import Charts
 import SwiftData
 import SwiftUI
 
@@ -10,6 +11,16 @@ struct PortfolioView: View {
         case all = "All"
 
         var id: Self { self }
+
+        var days: String? {
+            switch self {
+            case .day: "1"
+            case .week: "7"
+            case .month: "30"
+            case .quarter: "90"
+            case .all: nil
+            }
+        }
     }
 
     private enum PortfolioSection: String, CaseIterable, Identifiable {
@@ -57,6 +68,12 @@ struct PortfolioView: View {
     @State private var transactionPendingDeletion: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
     @State private var showingHoldingDetail = false
+    @State private var chartPoints: [PortfolioChartPoint] = []
+    @State private var selectionChartPoints: [PortfolioChartPoint] = []
+    @State private var chartValueDomain: ClosedRange<Double> = 0...1
+    @State private var isLoadingChart = false
+    @State private var chartLoadFailed = false
+    @State private var selectedChartPoint: PortfolioChartPoint?
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -194,6 +211,9 @@ struct PortfolioView: View {
         .task {
             await priceService.refresh(preferences: preferences)
         }
+        .task(id: chartRequestID) {
+            await loadChartHistory()
+        }
     }
 
     private var emptyState: some View {
@@ -209,20 +229,34 @@ struct PortfolioView: View {
         }
     }
 
+    @ViewBuilder
     private var portfolioContent: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                largePortfolioMenu
-                valueCard
-
-                if selectedSection == .holdings {
+        if selectedSection == .holdings {
+            ScrollView {
+                VStack(spacing: 16) {
+                    largePortfolioMenu
+                    valueCard
                     chartCard
                     holdingsSection
-                } else {
+                }
+                .padding()
+            }
+        } else {
+            VStack(spacing: 0) {
+                VStack(spacing: 16) {
+                    largePortfolioMenu
+                    valueCard
+                }
+                .padding(.horizontal)
+                .padding(.top)
+
+                ScrollView {
                     transactionsSection
+                        .padding(.horizontal)
+                        .padding(.top, 16)
+                        .padding(.bottom)
                 }
             }
-            .padding()
         }
     }
 
@@ -279,7 +313,7 @@ struct PortfolioView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text(holdingValueText)
+                Text(displayedPortfolioValueText)
                     .font(.system(.largeTitle, design: .rounded, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
@@ -334,6 +368,7 @@ struct PortfolioView: View {
                 ForEach(TimeRange.allCases) { range in
                     Button {
                         selectedRange = range
+                        selectedChartPoint = nil
                     } label: {
                         Text(range.rawValue)
                             .font(.caption.weight(.semibold))
@@ -349,15 +384,140 @@ struct PortfolioView: View {
                 }
             }
 
-            ContentUnavailableView {
-                Label("No Chart Data", systemImage: "chart.xyaxis.line")
-            } description: {
-                Text("Portfolio history will appear here after transactions and historical prices are added.")
+            Group {
+                if isLoadingChart && chartPoints.isEmpty {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 230)
+                } else if chartLoadFailed && chartPoints.isEmpty {
+                    ContentUnavailableView {
+                        Label("Chart Unavailable", systemImage: "wifi.exclamationmark")
+                    } actions: {
+                        Button("Try Again") {
+                            Task { await loadChartHistory() }
+                        }
+                    }
+                    .frame(minHeight: 230)
+                } else if chartPoints.isEmpty {
+                    ContentUnavailableView("No Chart Data", systemImage: "chart.xyaxis.line")
+                        .frame(minHeight: 230)
+                } else {
+                    portfolioChart
+                }
             }
-            .frame(minHeight: 185)
         }
         .padding()
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var portfolioChart: some View {
+        Chart {
+            ForEach(chartPoints) { point in
+                AreaMark(
+                    x: .value("Time", point.timestamp),
+                    yStart: .value("Baseline", chartValueDomain.lowerBound),
+                    yEnd: .value("Portfolio Value", point.valueUSD)
+                )
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [activePortfolioColor.opacity(0.28), activePortfolioColor.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                LineMark(
+                    x: .value("Time", point.timestamp),
+                    y: .value("Portfolio Value", point.valueUSD)
+                )
+                .foregroundStyle(activePortfolioColor)
+                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+            }
+
+            if let selectedChartPoint {
+                RuleMark(x: .value("Selected Time", selectedChartPoint.timestamp))
+                    .foregroundStyle(activePortfolioColor)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+                PointMark(
+                    x: .value("Selected Time", selectedChartPoint.timestamp),
+                    y: .value("Selected Value", selectedChartPoint.valueUSD)
+                )
+                .foregroundStyle(activePortfolioColor)
+                .symbolSize(55)
+                .annotation(
+                    position: .top,
+                    spacing: 10,
+                    overflowResolution: AnnotationOverflowResolution(
+                        x: .fit(to: .chart),
+                        y: .disabled
+                    )
+                ) {
+                    Text(chartSelectionTime(selectedChartPoint.timestamp))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                        }
+                }
+            }
+        }
+        .chartYScale(domain: chartValueDomain)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisValueLabel {
+                    if let date = value.as(Date.self) {
+                        Text(chartAxisDate(date))
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisValueLabel {
+                    if let amount = value.as(Double.self) {
+                        Text(compactCurrency(amount))
+                    }
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                guard let plotFrameAnchor = proxy.plotFrame else { return }
+                                let plotFrame = geometry[plotFrameAnchor]
+                                let xPosition = gesture.location.x - plotFrame.origin.x
+                                guard xPosition >= 0,
+                                      xPosition <= plotFrame.width,
+                                      let date: Date = proxy.value(atX: xPosition) else {
+                                    return
+                                }
+                                let nearestPoint = nearestChartPoint(to: date)
+                                if nearestPoint != selectedChartPoint {
+                                    selectedChartPoint = nearestPoint
+                                }
+                            }
+                            .onEnded { _ in
+                                selectedChartPoint = nil
+                            }
+                    )
+            }
+        }
+        .frame(height: 250)
+        .animation(.easeInOut(duration: 0.2), value: selectedRange)
+        .accessibilityLabel("Portfolio value chart")
     }
 
     private var holdingsSection: some View {
@@ -547,6 +707,220 @@ struct PortfolioView: View {
         return (holdingSummary.holdings * kasPriceUSD).formatted(.currency(code: "USD"))
     }
 
+    private var displayedPortfolioValueText: String {
+        guard let selectedChartPoint else { return holdingValueText }
+        return selectedChartPoint.valueUSD.formatted(.currency(code: "USD"))
+    }
+
+    private func chartYDomain(for points: [PortfolioChartPoint]) -> ClosedRange<Double> {
+        let values = points.map(\.valueUSD)
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
+        let spread = maximum - minimum
+        let reference = max(abs(maximum), 1)
+        let padding = max(spread * 0.12, reference * 0.04)
+        let lower = max(0, minimum - padding)
+        let upper = max(lower + 1, maximum + padding)
+        return lower...upper
+    }
+
+    private var chartRequestID: String {
+        let transactionState = visibleTransactions.map {
+            "\($0.id.uuidString):\($0.timestamp.timeIntervalSince1970):\($0.type):\($0.kasAmount)"
+        }.joined(separator: "|")
+        return "\(selectedRange.rawValue):\(selectedPortfolioID):\(transactionState)"
+    }
+
+    private func loadChartHistory() async {
+        isLoadingChart = true
+        chartLoadFailed = false
+        selectedChartPoint = nil
+
+        do {
+            let days = selectedRange.days ?? allHistoryDays
+            let prices = try await priceService.historicalUSDPrices(days: days)
+            guard !Task.isCancelled else { return }
+            let applicableTransactions = visibleTransactions.sorted {
+                $0.timestamp < $1.timestamp
+            }
+            guard let firstTransactionDate = applicableTransactions.first?.timestamp else {
+                chartPoints = []
+                selectionChartPoints = []
+                chartValueDomain = 0...1
+                chartLoadFailed = false
+                isLoadingChart = false
+                return
+            }
+
+            var applicablePrices = prices
+            var startingPoint: PortfolioChartPoint?
+            if let rangeStart = prices.first?.timestamp,
+               firstTransactionDate > rangeStart {
+                applicablePrices = prices.filter { $0.timestamp >= firstTransactionDate }
+                if let startingPrice = historicalPrice(at: firstTransactionDate, in: prices) {
+                    let startingHoldings = PortfolioHoldingSummary(
+                        transactions: applicableTransactions.filter {
+                            $0.timestamp <= firstTransactionDate
+                        }
+                    ).holdings
+                    startingPoint = PortfolioChartPoint(
+                        timestamp: firstTransactionDate,
+                        valueUSD: startingHoldings * startingPrice
+                    )
+                }
+            }
+
+            var fullResolutionPoints = applicablePrices.map { pricePoint in
+                let transactionsAtTime = applicableTransactions.filter {
+                    $0.timestamp <= pricePoint.timestamp
+                }
+                let holdings = PortfolioHoldingSummary(transactions: transactionsAtTime).holdings
+                return PortfolioChartPoint(
+                    timestamp: pricePoint.timestamp,
+                    valueUSD: holdings * pricePoint.priceUSD
+                )
+            }
+            if let startingPoint,
+               fullResolutionPoints.first?.timestamp != startingPoint.timestamp {
+                fullResolutionPoints.insert(startingPoint, at: 0)
+            }
+            selectionChartPoints = fullResolutionPoints
+            chartPoints = downsampledChartPoints(fullResolutionPoints, maximumCount: 280)
+            chartValueDomain = chartYDomain(for: fullResolutionPoints)
+            chartLoadFailed = false
+        } catch {
+            guard !Task.isCancelled else { return }
+            chartPoints = []
+            selectionChartPoints = []
+            chartValueDomain = 0...1
+            chartLoadFailed = true
+        }
+        isLoadingChart = false
+    }
+
+    private func historicalPrice(
+        at date: Date,
+        in prices: [HistoricalPricePoint]
+    ) -> Double? {
+        guard let first = prices.first, let last = prices.last else { return nil }
+        if date <= first.timestamp { return first.priceUSD }
+        if date >= last.timestamp { return last.priceUSD }
+
+        var lowerBound = 0
+        var upperBound = prices.count
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            if prices[middle].timestamp < date {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+
+        let previous = prices[lowerBound - 1]
+        let next = prices[lowerBound]
+        let interval = next.timestamp.timeIntervalSince(previous.timestamp)
+        guard interval > 0 else { return previous.priceUSD }
+        let progress = date.timeIntervalSince(previous.timestamp) / interval
+        return previous.priceUSD + ((next.priceUSD - previous.priceUSD) * progress)
+    }
+
+    private var allHistoryDays: String {
+        guard let earliest = visibleTransactions.map(\.timestamp).min() else { return "1" }
+        let elapsedDays = Calendar.current.dateComponents([.day], from: earliest, to: Date()).day ?? 1
+        return String(max(1, elapsedDays + 1))
+    }
+
+    private func nearestChartPoint(to date: Date) -> PortfolioChartPoint? {
+        guard !selectionChartPoints.isEmpty else { return nil }
+
+        var lowerBound = 0
+        var upperBound = selectionChartPoints.count
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            if selectionChartPoints[middle].timestamp < date {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+
+        if lowerBound == 0 { return selectionChartPoints[0] }
+        if lowerBound == selectionChartPoints.count { return selectionChartPoints.last }
+
+        let previous = selectionChartPoints[lowerBound - 1]
+        let next = selectionChartPoints[lowerBound]
+        if abs(previous.timestamp.timeIntervalSince(date)) <= abs(next.timestamp.timeIntervalSince(date)) {
+            return previous
+        }
+        return next
+    }
+
+    private func downsampledChartPoints(
+        _ points: [PortfolioChartPoint],
+        maximumCount: Int
+    ) -> [PortfolioChartPoint] {
+        guard points.count > maximumCount, maximumCount >= 4 else { return points }
+
+        let interior = Array(points.dropFirst().dropLast())
+        let bucketCount = max(1, (maximumCount - 2) / 2)
+        let bucketSize = Int(ceil(Double(interior.count) / Double(bucketCount)))
+        var result = [points[0]]
+
+        for start in stride(from: 0, to: interior.count, by: bucketSize) {
+            let end = min(start + bucketSize, interior.count)
+            let bucket = interior[start..<end]
+            guard let minimum = bucket.min(by: { $0.valueUSD < $1.valueUSD }),
+                  let maximum = bucket.max(by: { $0.valueUSD < $1.valueUSD }) else {
+                continue
+            }
+
+            if minimum.timestamp <= maximum.timestamp {
+                result.append(minimum)
+                if maximum.id != minimum.id { result.append(maximum) }
+            } else {
+                result.append(maximum)
+                if minimum.id != maximum.id { result.append(minimum) }
+            }
+        }
+
+        result.append(points[points.count - 1])
+        return result
+    }
+
+    private func chartSelectionTime(_ date: Date) -> String {
+        switch selectedRange {
+        case .day:
+            date.formatted(date: .omitted, time: .shortened)
+        default:
+            date.formatted(date: .abbreviated, time: .shortened)
+        }
+    }
+
+    private func chartAxisDate(_ date: Date) -> String {
+        switch selectedRange {
+        case .day:
+            date.formatted(.dateTime.hour().minute())
+        case .week, .month:
+            date.formatted(.dateTime.month(.abbreviated).day())
+        case .quarter, .all:
+            date.formatted(.dateTime.month(.abbreviated).year(.twoDigits))
+        }
+    }
+
+    private func compactCurrency(_ value: Double) -> String {
+        let magnitude = abs(value)
+        if magnitude >= 1_000_000_000 {
+            return "$" + (value / 1_000_000_000).formatted(.number.precision(.fractionLength(0...1))) + "B"
+        }
+        if magnitude >= 1_000_000 {
+            return "$" + (value / 1_000_000).formatted(.number.precision(.fractionLength(0...1))) + "M"
+        }
+        if magnitude >= 1_000 {
+            return "$" + (value / 1_000).formatted(.number.precision(.fractionLength(0...1))) + "K"
+        }
+        return value.formatted(.currency(code: "USD").precision(.fractionLength(0...2)))
+    }
+
     private var activePortfolioColor: Color {
         selectedAccount.map(accountColor) ?? teal
     }
@@ -638,6 +1012,13 @@ struct PortfolioView: View {
         default: teal
         }
     }
+}
+
+private struct PortfolioChartPoint: Identifiable, Equatable {
+    let timestamp: Date
+    let valueUSD: Double
+
+    var id: Date { timestamp }
 }
 
 private struct PortfolioHoldingSummary {
