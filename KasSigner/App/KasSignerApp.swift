@@ -15,20 +15,35 @@ struct KasSignerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppSecurityContainer {
-                RootView()
+            ZStack {
+                AppSecurityContainer {
+                    RootView()
+                }
+
+                if priceService.isPreparingInitialHistory {
+                    HistoricalPricePreparationView(
+                        progress: priceService.historicalPreparationProgress
+                    )
+                    .transition(.opacity)
+                    .zIndex(3)
+                }
             }
-                .preferredColorScheme(preferredColorScheme)
-                .environmentObject(walletStore)
-                .environmentObject(engine)
-                .environmentObject(preferences)
-                .environmentObject(syncService)
-                .environmentObject(liveRPCService)
-                .environmentObject(coinControlStore)
-                .environmentObject(priceService)
-                .environmentObject(appLockService)
-                .environmentObject(copyFeedbackCenter)
-                .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
+            .animation(.easeInOut(duration: 0.2), value: priceService.isPreparingInitialHistory)
+            .preferredColorScheme(preferredColorScheme)
+            .environmentObject(walletStore)
+            .environmentObject(engine)
+            .environmentObject(preferences)
+            .environmentObject(syncService)
+            .environmentObject(liveRPCService)
+            .environmentObject(coinControlStore)
+            .environmentObject(priceService)
+            .environmentObject(appLockService)
+            .environmentObject(copyFeedbackCenter)
+            .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
+            .task {
+                await priceService.prepareHistoricalPrices()
+                await priceService.refreshHistoricalPricesIfNeeded()
+            }
         }
     }
 
@@ -38,6 +53,34 @@ struct KasSignerApp: App {
         case .light: .light
         case .dark: .dark
         }
+    }
+}
+
+private struct HistoricalPricePreparationView: View {
+    let progress: Double
+
+    var body: some View {
+        ZStack {
+            Color(uiColor: .systemBackground)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Text("Preparing Price History")
+                    .font(.headline)
+
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 240)
+
+                Text("Building the local portfolio chart cache")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Preparing local portfolio price history")
+        .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
     }
 }
 

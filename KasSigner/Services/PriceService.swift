@@ -1,6 +1,6 @@
 import Foundation
 
-struct HistoricalPricePoint: Identifiable, Equatable {
+struct HistoricalPricePoint: Identifiable, Equatable, Codable, Sendable {
     let timestamp: Date
     let priceUSD: Double
 
@@ -22,6 +22,9 @@ final class PriceService: ObservableObject {
     @Published private(set) var prices: [SecondaryCurrency: Double] = [:]
     @Published private(set) var activeProvider: PriceProviderChoice?
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var isPreparingInitialHistory = false
+    @Published private(set) var historicalPreparationProgress = 0.0
+    @Published private(set) var historyRevision = 0
 
     private struct CachedPrices: Codable {
         let values: [String: Double]
@@ -69,10 +72,13 @@ final class PriceService: ObservableObject {
     private let requestTimeout: TimeInterval = 8
     private var refreshTask: Task<Void, Never>?
     private var lastRefreshAttempt: Date?
-    private var historicalCache: [String: [HistoricalPricePoint]] = [:]
+    private var isHistoricalPrepared = false
+    private var historicalDiskCache: HistoricalPriceDiskCache?
+    private let historicalCacheURL = HistoricalPriceCacheStore.defaultCacheURL()
 
     private init() {
         loadCache()
+        loadHistoricalDiskCache()
     }
 
     func price(for currency: SecondaryCurrency) -> Double? {
@@ -85,22 +91,122 @@ final class PriceService: ObservableObject {
     }
 
     func historicalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
-        do {
-            let points = try await fetchCoinGeckoHistory(days: days)
-            historicalCache[days] = points
-            return points
-        } catch {
-            do {
-                let points = try await fetchCoinPaprikaHistory(days: days)
-                historicalCache[days] = points
-                return points
-            } catch {
-                if let cached = historicalCache[days], !cached.isEmpty {
-                    return cached
-                }
-                throw error
+        await prepareHistoricalPrices()
+        guard let historicalDiskCache else {
+            throw PriceError.invalidResponse
+        }
+
+        let requestedDays = max(1, Int(days) ?? 1)
+        let cutoff = Calendar(identifier: .gregorian).date(
+            byAdding: .day,
+            value: -requestedDays,
+            to: Date()
+        ) ?? .distantPast
+
+        let dailyPoints = historicalDiskCache.dailyCandles
+            .lazy
+            .filter { $0.timestamp >= cutoff }
+            .map { HistoricalPricePoint(timestamp: $0.timestamp, priceUSD: $0.closeUSD) }
+        let recentHourlyPoints = historicalDiskCache.hourlyPoints.filter { $0.timestamp >= cutoff }
+
+        var points: [HistoricalPricePoint]
+        if requestedDays <= 1, recentHourlyPoints.count >= 2 {
+            points = recentHourlyPoints
+        } else {
+            points = Array(dailyPoints)
+            if let latestDailyDate = points.last?.timestamp {
+                points.append(contentsOf: recentHourlyPoints.filter { $0.timestamp > latestDailyDate })
+            } else {
+                points.append(contentsOf: recentHourlyPoints)
             }
         }
+
+        if let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
+            points.append(HistoricalPricePoint(timestamp: Date(), priceUSD: currentUSD))
+        }
+        points = normalizedHistoricalPoints(points)
+
+        guard !points.isEmpty else {
+            throw PriceError.invalidResponse
+        }
+        return points
+    }
+
+    func prepareHistoricalPrices() async {
+        guard !isHistoricalPrepared else { return }
+
+        isPreparingInitialHistory = true
+        historicalPreparationProgress = 0.12
+        let startedAt = Date()
+
+        do {
+            let bundledCandles = try HistoricalPriceCacheStore.bundledCandles()
+            historicalPreparationProgress = 0.65
+
+            var dailyByTimestamp = Dictionary(
+                uniqueKeysWithValues: bundledCandles.map { ($0.timestamp, $0) }
+            )
+            if let existing = historicalDiskCache {
+                for candle in existing.dailyCandles
+                where candle.timestamp > (bundledCandles.last?.timestamp ?? .distantFuture) {
+                    dailyByTimestamp[candle.timestamp] = candle
+                }
+            }
+
+            let cache = HistoricalPriceDiskCache(
+                schemaVersion: HistoricalPriceCacheStore.schemaVersion,
+                bundledVersion: HistoricalPriceCacheStore.bundledVersion,
+                dailyCandles: dailyByTimestamp.values.sorted { $0.timestamp < $1.timestamp },
+                hourlyPoints: historicalDiskCache?.hourlyPoints ?? [],
+                lastRefreshAttemptDayUTC: historicalDiskCache?.lastRefreshAttemptDayUTC
+            )
+            historicalDiskCache = cache
+            try saveHistoricalDiskCache()
+            historicalPreparationProgress = 1
+            isHistoricalPrepared = true
+            historyRevision += 1
+
+            let elapsed = Date().timeIntervalSince(startedAt)
+            if elapsed < 0.45 {
+                try? await Task.sleep(for: .seconds(0.45 - elapsed))
+            }
+        } catch {
+            isHistoricalPrepared = historicalDiskCache != nil
+        }
+
+        isPreparingInitialHistory = false
+    }
+
+    func refreshHistoricalPricesIfNeeded() async {
+        await prepareHistoricalPrices()
+        guard var cache = historicalDiskCache else { return }
+
+        let todayUTC = utcDayString(Date())
+        guard cache.lastRefreshAttemptDayUTC != todayUTC else { return }
+        cache.lastRefreshAttemptDayUTC = todayUTC
+        historicalDiskCache = cache
+        try? saveHistoricalDiskCache()
+
+        let requestedDays = historicalRefreshDays(for: cache)
+        let fetched: [HistoricalPricePoint]
+        do {
+            fetched = try await fetchCoinGeckoHistory(days: requestedDays)
+        } catch {
+            let fallbackDays = min(Int(requestedDays) ?? 2, 365)
+            guard let fallback = try? await fetchCoinPaprikaHistory(
+                    days: String(fallbackDays)
+                  ) else { return }
+            fetched = fallback
+        }
+
+        let cutoff = Date().addingTimeInterval(-72 * 60 * 60)
+        cache.hourlyPoints = normalizedHistoricalPoints(
+            cache.hourlyPoints.filter { $0.timestamp >= cutoff } + fetched
+        )
+        mergeCompletedDailyCandles(from: fetched, into: &cache)
+        historicalDiskCache = cache
+        try? saveHistoricalDiskCache()
+        historyRevision += 1
     }
 
     private func fetchCoinGeckoHistory(days: String) async throws -> [HistoricalPricePoint] {
@@ -344,5 +450,85 @@ final class PriceService: ObservableObject {
         )
         guard let data = try? JSONEncoder().encode(cached) else { return }
         UserDefaults.standard.set(data, forKey: cacheKey)
+    }
+
+    private func loadHistoricalDiskCache() {
+        guard let historicalCacheURL,
+              let cache = HistoricalPriceCacheStore.load(from: historicalCacheURL) else {
+            return
+        }
+        historicalDiskCache = cache
+        isHistoricalPrepared = cache.bundledVersion == HistoricalPriceCacheStore.bundledVersion
+    }
+
+    private func saveHistoricalDiskCache() throws {
+        guard let historicalCacheURL, let historicalDiskCache else {
+            throw HistoricalPriceCacheStore.CacheError.unavailableCacheDirectory
+        }
+        try HistoricalPriceCacheStore.save(historicalDiskCache, to: historicalCacheURL)
+    }
+
+    private func normalizedHistoricalPoints(
+        _ points: [HistoricalPricePoint]
+    ) -> [HistoricalPricePoint] {
+        var pointsByTimestamp: [Date: HistoricalPricePoint] = [:]
+        for point in points where point.priceUSD.isFinite && point.priceUSD > 0 {
+            pointsByTimestamp[point.timestamp] = point
+        }
+        return pointsByTimestamp.values.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private func mergeCompletedDailyCandles(
+        from points: [HistoricalPricePoint],
+        into cache: inout HistoricalPriceDiskCache
+    ) {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let currentDay = calendar.startOfDay(for: Date())
+        let grouped = Dictionary(grouping: points) {
+            calendar.startOfDay(for: $0.timestamp)
+        }
+        var candlesByDay = Dictionary(uniqueKeysWithValues: cache.dailyCandles.map {
+            (calendar.startOfDay(for: $0.timestamp), $0)
+        })
+
+        for (day, dayPoints) in grouped
+        where day < currentDay && candlesByDay[day] == nil {
+            let ordered = dayPoints.sorted { $0.timestamp < $1.timestamp }
+            guard let first = ordered.first, let last = ordered.last else { continue }
+            let prices = ordered.map(\.priceUSD)
+            guard let high = prices.max(), let low = prices.min() else { continue }
+            candlesByDay[day] = DailyPriceCandle(
+                timestamp: calendar.date(byAdding: .day, value: 1, to: day)?
+                    .addingTimeInterval(-0.001) ?? last.timestamp,
+                openUSD: first.priceUSD,
+                highUSD: high,
+                lowUSD: low,
+                closeUSD: last.priceUSD
+            )
+        }
+
+        cache.dailyCandles = candlesByDay.values.sorted { $0.timestamp < $1.timestamp }
+    }
+
+    private func utcDayString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    private func historicalRefreshDays(for cache: HistoricalPriceDiskCache) -> String {
+        guard let latest = cache.dailyCandles.last?.timestamp else { return "2" }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let elapsed = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: latest),
+            to: calendar.startOfDay(for: Date())
+        ).day ?? 1
+        return String(max(2, elapsed + 1))
     }
 }

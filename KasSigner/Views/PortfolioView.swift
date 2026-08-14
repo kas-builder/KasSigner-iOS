@@ -727,7 +727,7 @@ struct PortfolioView: View {
         let transactionState = visibleTransactions.map {
             "\($0.id.uuidString):\($0.timestamp.timeIntervalSince1970):\($0.type):\($0.kasAmount)"
         }.joined(separator: "|")
-        return "\(selectedRange.rawValue):\(selectedPortfolioID):\(transactionState)"
+        return "\(selectedRange.rawValue):\(selectedPortfolioID):\(priceService.historyRevision):\(transactionState)"
     }
 
     private func loadChartHistory() async {
@@ -739,9 +739,9 @@ struct PortfolioView: View {
             let days = selectedRange.days ?? allHistoryDays
             let prices = try await priceService.historicalUSDPrices(days: days)
             guard !Task.isCancelled else { return }
-            let applicableTransactions = visibleTransactions.sorted {
-                $0.timestamp < $1.timestamp
-            }
+            let applicableTransactions = visibleTransactions.sorted(
+                by: PortfolioTransactionOrder.ascending
+            )
             guard let firstTransactionDate = applicableTransactions.first?.timestamp else {
                 chartPoints = []
                 selectionChartPoints = []
@@ -751,40 +751,15 @@ struct PortfolioView: View {
                 return
             }
 
-            var applicablePrices = prices
-            var startingPoint: PortfolioChartPoint?
-            if let rangeStart = prices.first?.timestamp,
-               firstTransactionDate > rangeStart {
-                applicablePrices = prices.filter { $0.timestamp >= firstTransactionDate }
-                if let startingPrice = historicalPrice(at: firstTransactionDate, in: prices) {
-                    let startingHoldings = PortfolioHoldingSummary(
-                        transactions: applicableTransactions.filter {
-                            $0.timestamp <= firstTransactionDate
-                        }
-                    ).holdings
-                    startingPoint = PortfolioChartPoint(
-                        timestamp: firstTransactionDate,
-                        valueUSD: startingHoldings * startingPrice
-                    )
-                }
-            }
-
-            var fullResolutionPoints = applicablePrices.map { pricePoint in
-                let transactionsAtTime = applicableTransactions.filter {
-                    $0.timestamp <= pricePoint.timestamp
-                }
-                let holdings = PortfolioHoldingSummary(transactions: transactionsAtTime).holdings
-                return PortfolioChartPoint(
-                    timestamp: pricePoint.timestamp,
-                    valueUSD: holdings * pricePoint.priceUSD
-                )
-            }
-            if let startingPoint,
-               fullResolutionPoints.first?.timestamp != startingPoint.timestamp {
-                fullResolutionPoints.insert(startingPoint, at: 0)
-            }
+            let fullResolutionPoints = PortfolioChartBuilder.points(
+                transactions: applicableTransactions,
+                prices: prices
+            )
             selectionChartPoints = fullResolutionPoints
-            chartPoints = downsampledChartPoints(fullResolutionPoints, maximumCount: 280)
+            chartPoints = PortfolioChartBuilder.downsampled(
+                fullResolutionPoints,
+                maximumCount: 280
+            )
             chartValueDomain = chartYDomain(for: fullResolutionPoints)
             chartLoadFailed = false
         } catch {
@@ -795,33 +770,6 @@ struct PortfolioView: View {
             chartLoadFailed = true
         }
         isLoadingChart = false
-    }
-
-    private func historicalPrice(
-        at date: Date,
-        in prices: [HistoricalPricePoint]
-    ) -> Double? {
-        guard let first = prices.first, let last = prices.last else { return nil }
-        if date <= first.timestamp { return first.priceUSD }
-        if date >= last.timestamp { return last.priceUSD }
-
-        var lowerBound = 0
-        var upperBound = prices.count
-        while lowerBound < upperBound {
-            let middle = (lowerBound + upperBound) / 2
-            if prices[middle].timestamp < date {
-                lowerBound = middle + 1
-            } else {
-                upperBound = middle
-            }
-        }
-
-        let previous = prices[lowerBound - 1]
-        let next = prices[lowerBound]
-        let interval = next.timestamp.timeIntervalSince(previous.timestamp)
-        guard interval > 0 else { return previous.priceUSD }
-        let progress = date.timeIntervalSince(previous.timestamp) / interval
-        return previous.priceUSD + ((next.priceUSD - previous.priceUSD) * progress)
     }
 
     private var allHistoryDays: String {
@@ -853,38 +801,6 @@ struct PortfolioView: View {
             return previous
         }
         return next
-    }
-
-    private func downsampledChartPoints(
-        _ points: [PortfolioChartPoint],
-        maximumCount: Int
-    ) -> [PortfolioChartPoint] {
-        guard points.count > maximumCount, maximumCount >= 4 else { return points }
-
-        let interior = Array(points.dropFirst().dropLast())
-        let bucketCount = max(1, (maximumCount - 2) / 2)
-        let bucketSize = Int(ceil(Double(interior.count) / Double(bucketCount)))
-        var result = [points[0]]
-
-        for start in stride(from: 0, to: interior.count, by: bucketSize) {
-            let end = min(start + bucketSize, interior.count)
-            let bucket = interior[start..<end]
-            guard let minimum = bucket.min(by: { $0.valueUSD < $1.valueUSD }),
-                  let maximum = bucket.max(by: { $0.valueUSD < $1.valueUSD }) else {
-                continue
-            }
-
-            if minimum.timestamp <= maximum.timestamp {
-                result.append(minimum)
-                if maximum.id != minimum.id { result.append(maximum) }
-            } else {
-                result.append(maximum)
-                if minimum.id != maximum.id { result.append(minimum) }
-            }
-        }
-
-        result.append(points[points.count - 1])
-        return result
     }
 
     private func chartSelectionTime(_ date: Date) -> String {
@@ -1014,66 +930,6 @@ struct PortfolioView: View {
     }
 }
 
-private struct PortfolioChartPoint: Identifiable, Equatable {
-    let timestamp: Date
-    let valueUSD: Double
-
-    var id: Date { timestamp }
-}
-
-private struct PortfolioHoldingSummary {
-    let holdings: Double
-    let costBasis: Double
-    let totalBought: Double
-    let totalSold: Double
-    let totalTransferredIn: Double
-    let totalTransferredOut: Double
-
-    init(transactions: [PortfolioTransaction]) {
-        var holdings = 0.0
-        var costBasis = 0.0
-        var totalBought = 0.0
-        var totalSold = 0.0
-        var totalTransferredIn = 0.0
-        var totalTransferredOut = 0.0
-
-        for transaction in transactions.sorted(by: { $0.timestamp < $1.timestamp }) {
-            switch transaction.type {
-            case PortfolioTransactionType.buy.rawValue:
-                holdings += transaction.kasAmount
-                costBasis += transaction.kasAmount * transaction.kasPriceUSD
-                totalBought += transaction.kasAmount
-            case PortfolioTransactionType.sell.rawValue:
-                let averageCost = holdings > 0 ? costBasis / holdings : 0
-                let disposedAmount = min(transaction.kasAmount, max(holdings, 0))
-                holdings -= transaction.kasAmount
-                costBasis = max(0, costBasis - (disposedAmount * averageCost))
-                totalSold += transaction.kasAmount
-            case PortfolioTransactionType.transferIn.rawValue:
-                holdings += transaction.kasAmount
-                totalTransferredIn += transaction.kasAmount
-            case PortfolioTransactionType.transferOut.rawValue:
-                holdings -= transaction.kasAmount
-                totalTransferredOut += transaction.kasAmount
-            default:
-                continue
-            }
-        }
-
-        self.holdings = max(0, holdings)
-        self.costBasis = costBasis
-        self.totalBought = totalBought
-        self.totalSold = totalSold
-        self.totalTransferredIn = totalTransferredIn
-        self.totalTransferredOut = totalTransferredOut
-    }
-
-    var averageCost: Double? {
-        guard holdings > 0, costBasis > 0 else { return nil }
-        return costBasis / holdings
-    }
-}
-
 private struct PortfolioHoldingDetail: View {
     @Environment(\.dismiss) private var dismiss
 
@@ -1178,15 +1034,6 @@ private struct PortfolioHoldingDetail: View {
     private func currency(_ value: Double) -> String {
         value.formatted(.currency(code: "USD"))
     }
-}
-
-private enum PortfolioTransactionType: String, CaseIterable, Identifiable {
-    case buy = "Buy"
-    case sell = "Sell"
-    case transferIn = "Transfer In"
-    case transferOut = "Transfer Out"
-
-    var id: Self { self }
 }
 
 private struct PortfolioTransactionDraft {

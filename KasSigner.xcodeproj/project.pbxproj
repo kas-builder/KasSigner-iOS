@@ -35,7 +35,21 @@
 		F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */; };
 		F10000000000000000000002 /* KasSigner/Views/PortfolioView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */; };
 		F20000000000000000000001 /* KasSigner/Models/PortfolioTransaction.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */; };
+		F30000000000000000000001 /* KasSigner/Models/PortfolioCalculations.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000002 /* KasSigner/Models/PortfolioCalculations.swift */; };
+		F40000000000000000000001 /* KasSignerTests/PortfolioCalculationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */; };
+		F50000000000000000000001 /* KasSigner/Services/HistoricalPriceCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */; };
+		F50000000000000000000002 /* KaspaDailyUSD.csv in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000004 /* KaspaDailyUSD.csv */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		F4000000000000000000000C /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 7A025726E1D052929F74E4AB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = BE1F5D545907559CB2F5BAEB;
+			remoteInfo = KasSigner;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/KasSignerEngine.swift; sourceTree = "<group>"; };
@@ -67,10 +81,22 @@
 		F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioAccount.swift; sourceTree = "<group>"; };
 		F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/PortfolioView.swift; sourceTree = "<group>"; };
 		F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioTransaction.swift; sourceTree = "<group>"; };
+		F30000000000000000000002 /* KasSigner/Models/PortfolioCalculations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioCalculations.swift; sourceTree = "<group>"; };
+		F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSignerTests/PortfolioCalculationsTests.swift; sourceTree = "<group>"; };
+		F40000000000000000000003 /* KasSignerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KasSignerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/HistoricalPriceCache.swift; sourceTree = "<group>"; };
+		F50000000000000000000004 /* KaspaDailyUSD.csv */ = {isa = PBXFileReference; lastKnownFileType = text; path = KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		D66D401460755D22B129D59F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F40000000000000000000004 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -84,6 +110,7 @@
 			isa = PBXGroup;
 			children = (
 				2E9D668BFA8F548D9470136C /* KasSigner.app */,
+				F40000000000000000000003 /* KasSignerTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -96,6 +123,10 @@
 				E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */,
 				F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */,
 				F20000000000000000000002 /* KasSigner/Models/PortfolioTransaction.swift */,
+				F30000000000000000000002 /* KasSigner/Models/PortfolioCalculations.swift */,
+				F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */,
+				F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */,
+				F50000000000000000000004 /* KaspaDailyUSD.csv */,
 				0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */,
 				537C66CC539F5FD89E51681C /* KasSigner/Views/RootView.swift */,
 				852F6B53D2075E8EAE5AF159 /* KasSigner/Views/WalletHomeView.swift */,
@@ -143,6 +174,24 @@
 			productReference = 2E9D668BFA8F548D9470136C /* KasSigner.app */;
 			productType = "com.apple.product-type.application";
 		};
+		F40000000000000000000007 /* KasSignerTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F40000000000000000000008 /* Build configuration list for PBXNativeTarget "KasSignerTests" */;
+			buildPhases = (
+				F40000000000000000000005 /* Sources */,
+				F40000000000000000000004 /* Frameworks */,
+				F40000000000000000000006 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				F4000000000000000000000B /* PBXTargetDependency */,
+			);
+			name = KasSignerTests;
+			productName = KasSignerTests;
+			productReference = F40000000000000000000003 /* KasSignerTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -155,6 +204,10 @@
 				TargetAttributes = {
 					BE1F5D545907559CB2F5BAEB = {
 						CreatedOnToolsVersion = 16.0;
+					};
+					F40000000000000000000007 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = BE1F5D545907559CB2F5BAEB;
 					};
 				};
 			};
@@ -172,6 +225,7 @@
 			projectRoot = "";
 			targets = (
 				BE1F5D545907559CB2F5BAEB /* KasSigner */,
+				F40000000000000000000007 /* KasSignerTests */,
 			);
 		};
 /* End PBXProject section */
@@ -184,6 +238,14 @@
 				D6A544FA38465CB1A2FD75A2 /* KasSigner/Resources/Web in Resources */,
 				A50000000000000000000001 /* KasSigner/Assets.xcassets in Resources */,
 				A60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy in Resources */,
+				F50000000000000000000002 /* KaspaDailyUSD.csv in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F40000000000000000000006 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -199,6 +261,8 @@
 				E2DBABBC2EB755738881D92B /* KasSigner/Models/WalletStore.swift in Sources */,
 				F10000000000000000000001 /* KasSigner/Models/PortfolioAccount.swift in Sources */,
 				F20000000000000000000001 /* KasSigner/Models/PortfolioTransaction.swift in Sources */,
+				F30000000000000000000001 /* KasSigner/Models/PortfolioCalculations.swift in Sources */,
+				F50000000000000000000001 /* KasSigner/Services/HistoricalPriceCache.swift in Sources */,
 				3E0992BA4A395DCCAB278670 /* KasSigner/Services/KasSignerEngine.swift in Sources */,
 				4FC7EC177D2653D784021833 /* KasSigner/Views/RootView.swift in Sources */,
 				0DAD6E624BA95A15B1094D73 /* KasSigner/Views/WalletHomeView.swift in Sources */,
@@ -222,7 +286,23 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		F40000000000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				F40000000000000000000001 /* KasSignerTests/PortfolioCalculationsTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		F4000000000000000000000B /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = BE1F5D545907559CB2F5BAEB /* KasSigner */;
+			targetProxy = F4000000000000000000000C /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		955FCF893AE85857A281101E /* Debug */ = {
@@ -249,6 +329,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 10;
 				DEVELOPMENT_TEAM = XGKP3E53F2;
+				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
@@ -308,6 +389,44 @@
 			};
 			name = Release;
 		};
+		F40000000000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSignerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KasSigner.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KasSigner";
+			};
+			name = Debug;
+		};
+		F4000000000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSignerTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KasSigner.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KasSigner";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -325,6 +444,15 @@
 			buildConfigurations = (
 				955FCF893AE85857A281101E /* Debug */,
 				A7D44005E0A25767B4106761 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		F40000000000000000000008 /* Build configuration list for PBXNativeTarget "KasSignerTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F40000000000000000000009 /* Debug */,
+				F4000000000000000000000A /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
