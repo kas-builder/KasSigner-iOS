@@ -19,6 +19,25 @@ struct PortfolioView: View {
         var id: Self { self }
     }
 
+    private enum AccountEditorPresentation: Identifiable {
+        case create
+        case edit(PortfolioAccount)
+
+        var id: String {
+            switch self {
+            case .create: "create"
+            case .edit(let account): account.id.uuidString
+            }
+        }
+
+        var account: PortfolioAccount? {
+            switch self {
+            case .create: nil
+            case .edit(let account): account
+            }
+        }
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var priceService: PriceService
@@ -30,9 +49,8 @@ struct PortfolioView: View {
     private var selectedPortfolioID = ""
     @State private var selectedSection: PortfolioSection = .holdings
     @State private var selectedRange: TimeRange = .day
-    @State private var accountBeingEdited: PortfolioAccount?
     @State private var accountPendingDeletion: PortfolioAccount?
-    @State private var showingAccountEditor = false
+    @State private var accountEditorPresentation: AccountEditorPresentation?
     @State private var showingTransactionEditor = false
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
@@ -87,9 +105,9 @@ struct PortfolioView: View {
                 }
             }
         }
-        .sheet(isPresented: $showingAccountEditor) {
-            PortfolioAccountEditor(account: accountBeingEdited) { draft in
-                saveAccount(draft)
+        .sheet(item: $accountEditorPresentation) { presentation in
+            PortfolioAccountEditor(account: presentation.account) { draft in
+                saveAccount(draft, editing: presentation.account)
             }
         }
         .sheet(isPresented: $showingTransactionEditor) {
@@ -174,7 +192,6 @@ struct PortfolioView: View {
             }
         }
         .task {
-            migrateLegacyPortfolioIcons()
             await priceService.refresh(preferences: preferences)
         }
     }
@@ -535,24 +552,20 @@ struct PortfolioView: View {
     }
 
     private func beginAddingAccount() {
-        accountBeingEdited = nil
-        showingAccountEditor = true
+        accountEditorPresentation = .create
     }
 
     private func beginEditing(_ account: PortfolioAccount) {
-        accountBeingEdited = account
-        showingAccountEditor = true
+        accountEditorPresentation = .edit(account)
     }
 
-    private func saveAccount(_ draft: PortfolioAccountDraft) {
-        if let accountBeingEdited {
-            accountBeingEdited.name = draft.name
-            accountBeingEdited.iconName = draft.iconName
-            accountBeingEdited.accentName = draft.accentName
+    private func saveAccount(_ draft: PortfolioAccountDraft, editing account: PortfolioAccount?) {
+        if let account {
+            account.name = draft.name
+            account.accentName = draft.accentName
         } else {
             let account = PortfolioAccount(
                 name: draft.name,
-                iconName: draft.iconName,
                 accentName: draft.accentName
             )
             modelContext.insert(account)
@@ -560,7 +573,6 @@ struct PortfolioView: View {
         }
 
         try? modelContext.save()
-        self.accountBeingEdited = nil
     }
 
     private func saveTransaction(_ draft: PortfolioTransactionDraft) {
@@ -615,13 +627,6 @@ struct PortfolioView: View {
         case PortfolioTransactionType.transferOut.rawValue: "arrow.up.circle"
         default: "arrow.left.arrow.right.circle"
         }
-    }
-
-    private func migrateLegacyPortfolioIcons() {
-        let legacyAccounts = accounts.filter { $0.iconName == "chart.pie.fill" }
-        guard !legacyAccounts.isEmpty else { return }
-        legacyAccounts.forEach { $0.iconName = "briefcase.fill" }
-        try? modelContext.save()
     }
 
     private func accountColor(_ account: PortfolioAccount) -> Color {
@@ -1045,18 +1050,10 @@ private struct PortfolioTransactionEditor: View {
 
 private struct PortfolioAccountDraft {
     let name: String
-    let iconName: String
     let accentName: String
 }
 
 private struct PortfolioAccountEditor: View {
-    private static let icons = [
-        "briefcase.fill",
-        "creditcard.fill",
-        "building.columns.fill",
-        "lock.shield.fill",
-        "tray.full.fill"
-    ]
     private static let colors = ["teal", "blue", "indigo", "orange", "red"]
 
     @Environment(\.dismiss) private var dismiss
@@ -1065,14 +1062,12 @@ private struct PortfolioAccountEditor: View {
     let onSave: (PortfolioAccountDraft) -> Void
 
     @State private var name: String
-    @State private var iconName: String
     @State private var accentName: String
 
     init(account: PortfolioAccount?, onSave: @escaping (PortfolioAccountDraft) -> Void) {
         self.account = account
         self.onSave = onSave
         _name = State(initialValue: account?.name ?? "")
-        _iconName = State(initialValue: account?.iconName ?? "briefcase.fill")
         _accentName = State(initialValue: account?.accentName == "purple" ? "red" : account?.accentName ?? "teal")
     }
 
@@ -1082,29 +1077,6 @@ private struct PortfolioAccountEditor: View {
                 Section("Account") {
                     TextField("Name", text: $name)
                         .textInputAutocapitalization(.words)
-                }
-
-                Section("Icon") {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 5), spacing: 14) {
-                        ForEach(Self.icons, id: \.self) { icon in
-                            Button {
-                                iconName = icon
-                            } label: {
-                                Image(systemName: icon)
-                                    .font(.title2)
-                                    .foregroundStyle(iconName == icon ? selectedColor : .secondary)
-                                    .frame(width: 46, height: 46)
-                                    .background(
-                                        iconName == icon ? selectedColor.opacity(0.14) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel(icon)
-                            .accessibilityAddTraits(iconName == icon ? .isSelected : [])
-                        }
-                    }
-                    .padding(.vertical, 4)
                 }
 
                 Section("Color") {
@@ -1144,7 +1116,6 @@ private struct PortfolioAccountEditor: View {
                         onSave(
                             PortfolioAccountDraft(
                                 name: trimmedName,
-                                iconName: iconName,
                                 accentName: accentName
                             )
                         )
@@ -1158,10 +1129,6 @@ private struct PortfolioAccountEditor: View {
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var selectedColor: Color {
-        color(for: accentName)
     }
 
     private func color(for name: String) -> Color {
