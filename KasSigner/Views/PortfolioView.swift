@@ -1175,25 +1175,30 @@ private struct PortfolioTransactionEditor: View {
                         }
                     }
 
-                    TextField(
-                        "KAS Amount",
-                        value: $kasAmount,
-                        format: .number
-                            .grouping(.automatic)
-                            .precision(.fractionLength(0...8))
-                    )
+                    LabeledContent("Amount") {
+                        TextField(
+                            "0",
+                            value: $kasAmount,
+                            format: .number
+                                .grouping(.automatic)
+                                .precision(.fractionLength(0...8))
+                        )
+                        .multilineTextAlignment(.trailing)
                         .keyboardType(.decimalPad)
+                    }
 
-                    TextField(
-                        "Price per KAS (USD)",
-                        value: $kasPriceUSD,
-                        format: .number
-                            .grouping(.automatic)
-                            .precision(.fractionLength(0...8))
-                    )
-                    .keyboardType(.decimalPad)
-                    .onChange(of: kasPriceUSD) { _, _ in
-                        hasEditedPrice = true
+                    LabeledContent("Price (USD)") {
+                        TextField(
+                            "$0.0000",
+                            value: $kasPriceUSD,
+                            format: .currency(code: "USD")
+                                .precision(.fractionLength(4))
+                        )
+                        .multilineTextAlignment(.trailing)
+                        .keyboardType(.decimalPad)
+                        .onChange(of: kasPriceUSD) { _, _ in
+                            hasEditedPrice = true
+                        }
                     }
 
                     LabeledContent("Total Value", value: totalValueText)
@@ -1206,8 +1211,18 @@ private struct PortfolioTransactionEditor: View {
                 }
 
                 Section("Date & Time") {
-                    DatePicker("Date", selection: $timestamp, displayedComponents: .date)
-                    DatePicker("Time", selection: $timestamp, displayedComponents: .hourAndMinute)
+                    DatePicker(
+                        "Date",
+                        selection: $timestamp,
+                        in: transactionDateRange,
+                        displayedComponents: .date
+                    )
+                    DatePicker(
+                        "Time",
+                        selection: $timestamp,
+                        in: transactionDateRange,
+                        displayedComponents: .hourAndMinute
+                    )
                 }
 
                 Section("Notes") {
@@ -1254,6 +1269,14 @@ private struct PortfolioTransactionEditor: View {
     private var canSave: Bool {
         guard portfolioID != nil, let kasAmount, let kasPriceUSD else { return false }
         return kasAmount > 0 && kasPriceUSD > 0 && !exceedsAvailableHoldings
+    }
+
+    private var transactionDateRange: ClosedRange<Date> {
+        let calendar = Calendar.current
+        let earliestDate = calendar.date(
+            from: DateComponents(year: 2022, month: 6, day: 1)
+        ) ?? .distantPast
+        return earliestDate...Date()
     }
 
     private var exceedsAvailableHoldings: Bool {
