@@ -97,6 +97,7 @@ struct PortfolioView: View {
                 accounts: accounts,
                 initialPortfolioID: transactionBeingEdited?.portfolioID ?? selectedPortfolioUUID,
                 transaction: transactionBeingEdited,
+                availableHoldingsByPortfolio: availableHoldingsByPortfolio,
                 accentColor: activePortfolioColor
             ) { draft in
                 saveTransaction(draft)
@@ -174,6 +175,7 @@ struct PortfolioView: View {
         }
         .task {
             migrateLegacyPortfolioIcons()
+            await priceService.refresh(preferences: preferences)
         }
     }
 
@@ -260,7 +262,7 @@ struct PortfolioView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text("$0.00")
+                Text(holdingValueText)
                     .font(.system(.largeTitle, design: .rounded, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
@@ -503,6 +505,18 @@ struct PortfolioView: View {
 
     private var holdingSummary: PortfolioHoldingSummary {
         PortfolioHoldingSummary(transactions: visibleTransactions)
+    }
+
+    private var availableHoldingsByPortfolio: [UUID: Double] {
+        Dictionary(uniqueKeysWithValues: accounts.map { account in
+            let applicableTransactions = transactions.filter {
+                $0.portfolioID == account.id && $0.id != transactionBeingEdited?.id
+            }
+            return (
+                account.id,
+                PortfolioHoldingSummary(transactions: applicableTransactions).holdings
+            )
+        })
     }
 
     private var holdingAmountText: String {
@@ -873,6 +887,7 @@ private struct PortfolioTransactionEditor: View {
     let accounts: [PortfolioAccount]
     let initialPortfolioID: UUID?
     let transaction: PortfolioTransaction?
+    let availableHoldingsByPortfolio: [UUID: Double]
     let accentColor: Color
     let onSave: (PortfolioTransactionDraft) -> Void
 
@@ -888,12 +903,14 @@ private struct PortfolioTransactionEditor: View {
         accounts: [PortfolioAccount],
         initialPortfolioID: UUID?,
         transaction: PortfolioTransaction? = nil,
+        availableHoldingsByPortfolio: [UUID: Double],
         accentColor: Color,
         onSave: @escaping (PortfolioTransactionDraft) -> Void
     ) {
         self.accounts = accounts
         self.initialPortfolioID = initialPortfolioID
         self.transaction = transaction
+        self.availableHoldingsByPortfolio = availableHoldingsByPortfolio
         self.accentColor = accentColor
         self.onSave = onSave
         _portfolioID = State(initialValue: transaction?.portfolioID ?? initialPortfolioID ?? accounts.first?.id)
@@ -947,6 +964,12 @@ private struct PortfolioTransactionEditor: View {
                     }
 
                     LabeledContent("Total Value", value: totalValueText)
+
+                    if exceedsAvailableHoldings {
+                        Text("Amount exceeds available holdings.")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
                 }
 
                 Section("Date & Time") {
@@ -997,7 +1020,14 @@ private struct PortfolioTransactionEditor: View {
 
     private var canSave: Bool {
         guard portfolioID != nil, let kasAmount, let kasPriceUSD else { return false }
-        return kasAmount > 0 && kasPriceUSD > 0
+        return kasAmount > 0 && kasPriceUSD > 0 && !exceedsAvailableHoldings
+    }
+
+    private var exceedsAvailableHoldings: Bool {
+        guard transactionType == .sell || transactionType == .transferOut,
+              let portfolioID,
+              let kasAmount else { return false }
+        return kasAmount > (availableHoldingsByPortfolio[portfolioID] ?? 0)
     }
 
     private var totalValueText: String {
