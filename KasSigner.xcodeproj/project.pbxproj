@@ -12,10 +12,6 @@
 		4FC7EC177D2653D784021833 /* KasSigner/Views/RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 537C66CC539F5FD89E51681C /* KasSigner/Views/RootView.swift */; };
 		539A527804645EDDA20C0261 /* KasSigner/Views/AddWalletView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14C87A28CAF0595797804C3F /* KasSigner/Views/AddWalletView.swift */; };
 		53CA8F6057105D3A85FF0CD5 /* KasSigner/Views/SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC22F71F3E7154269BA90790 /* KasSigner/Views/SettingsView.swift */; };
-		C70000000000000000000001 /* KasSigner/Services/AppLockService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70000000000000000000003 /* KasSigner/Services/AppLockService.swift */; };
-		C70000000000000000000002 /* KasSigner/Views/SecuritySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70000000000000000000004 /* KasSigner/Views/SecuritySettingsView.swift */; };
-		D80000000000000000000001 /* KasSigner/Views/WeatherCoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80000000000000000000002 /* KasSigner/Views/WeatherCoverView.swift */; };
-		C80000000000000000000001 /* KasSigner/Services/CopyFeedbackCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80000000000000000000002 /* KasSigner/Services/CopyFeedbackCenter.swift */; };
 		74F77A10AF9654CEACA20ADC /* KasSigner/Models/WalletProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D936ECD50D8257028EDB129F /* KasSigner/Models/WalletProfile.swift */; };
 		A10000000000000000000001 /* KasSigner/Models/WalletSyncModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* KasSigner/Models/WalletSyncModels.swift */; };
 		A10000000000000000000002 /* KasSigner/Models/AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* KasSigner/Models/AppPreferences.swift */; };
@@ -28,7 +24,11 @@
 		A60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy */; };
 		C20000000000000000000001 /* KasSigner/Views/SendDestinationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C20000000000000000000002 /* KasSigner/Views/SendDestinationView.swift */; };
 		C35D9E1F30415263748596A8 /* KasSigner/Models/WalletImportResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = D46E0F2131425364758697B9 /* KasSigner/Models/WalletImportResult.swift */; };
+		C70000000000000000000001 /* KasSigner/Services/AppLockService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70000000000000000000003 /* KasSigner/Services/AppLockService.swift */; };
+		C70000000000000000000002 /* KasSigner/Views/SecuritySettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C70000000000000000000004 /* KasSigner/Views/SecuritySettingsView.swift */; };
+		C80000000000000000000001 /* KasSigner/Services/CopyFeedbackCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C80000000000000000000002 /* KasSigner/Services/CopyFeedbackCenter.swift */; };
 		D6A544FA38465CB1A2FD75A2 /* KasSigner/Resources/Web in Resources */ = {isa = PBXBuildFile; fileRef = 6397099E4CF65E1EA30FB542 /* KasSigner/Resources/Web */; };
+		D80000000000000000000001 /* KasSigner/Views/WeatherCoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D80000000000000000000002 /* KasSigner/Views/WeatherCoverView.swift */; };
 		E2DBABBC2EB755738881D92B /* KasSigner/Models/WalletStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */; };
 		E3ABFB8EC0E95ADAA3E230DA /* KasSigner/Views/ActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69F784D57F685389BA1E254F /* KasSigner/Views/ActivityView.swift */; };
 		EC947F3EB01353DF8160A659 /* KasSigner/App/KasSignerApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99C00F46C73F5A82BA55B83E /* KasSigner/App/KasSignerApp.swift */; };
@@ -38,7 +38,7 @@
 		F30000000000000000000001 /* KasSigner/Models/PortfolioCalculations.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30000000000000000000002 /* KasSigner/Models/PortfolioCalculations.swift */; };
 		F40000000000000000000001 /* KasSignerTests/PortfolioCalculationsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */; };
 		F50000000000000000000001 /* KasSigner/Services/HistoricalPriceCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */; };
-		F50000000000000000000002 /* KaspaDailyUSD.csv in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000004 /* KaspaDailyUSD.csv */; };
+		F50000000000000000000002 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */; };
 		F60000000000000000000001 /* KasSigner/Models/PortfolioCSVImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */; };
 /* End PBXBuildFile section */
 
@@ -71,13 +71,13 @@
 		B50000000000000000000001 /* KasSigner/Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = KasSigner/Assets.xcassets; sourceTree = "<group>"; };
 		B60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = KasSigner/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		C20000000000000000000002 /* KasSigner/Views/SendDestinationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/SendDestinationView.swift; sourceTree = "<group>"; };
-		D46E0F2131425364758697B9 /* KasSigner/Models/WalletImportResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletImportResult.swift; sourceTree = "<group>"; };
-		D936ECD50D8257028EDB129F /* KasSigner/Models/WalletProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletProfile.swift; sourceTree = "<group>"; };
-		DC22F71F3E7154269BA90790 /* KasSigner/Views/SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/SettingsView.swift; sourceTree = "<group>"; };
 		C70000000000000000000003 /* KasSigner/Services/AppLockService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/AppLockService.swift; sourceTree = "<group>"; };
 		C70000000000000000000004 /* KasSigner/Views/SecuritySettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/SecuritySettingsView.swift; sourceTree = "<group>"; };
-		D80000000000000000000002 /* KasSigner/Views/WeatherCoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/WeatherCoverView.swift; sourceTree = "<group>"; };
 		C80000000000000000000002 /* KasSigner/Services/CopyFeedbackCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/CopyFeedbackCenter.swift; sourceTree = "<group>"; };
+		D46E0F2131425364758697B9 /* KasSigner/Models/WalletImportResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletImportResult.swift; sourceTree = "<group>"; };
+		D80000000000000000000002 /* KasSigner/Views/WeatherCoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/WeatherCoverView.swift; sourceTree = "<group>"; };
+		D936ECD50D8257028EDB129F /* KasSigner/Models/WalletProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletProfile.swift; sourceTree = "<group>"; };
+		DC22F71F3E7154269BA90790 /* KasSigner/Views/SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/SettingsView.swift; sourceTree = "<group>"; };
 		E73C7914B54456A1A9C4C06E /* KasSigner/Models/WalletStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/WalletStore.swift; sourceTree = "<group>"; };
 		F10000000000000000000003 /* KasSigner/Models/PortfolioAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioAccount.swift; sourceTree = "<group>"; };
 		F10000000000000000000004 /* KasSigner/Views/PortfolioView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Views/PortfolioView.swift; sourceTree = "<group>"; };
@@ -86,7 +86,7 @@
 		F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSignerTests/PortfolioCalculationsTests.swift; sourceTree = "<group>"; };
 		F40000000000000000000003 /* KasSignerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = KasSignerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/HistoricalPriceCache.swift; sourceTree = "<group>"; };
-		F50000000000000000000004 /* KaspaDailyUSD.csv */ = {isa = PBXFileReference; lastKnownFileType = text; path = KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv; sourceTree = "<group>"; };
+		F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */ = {isa = PBXFileReference; lastKnownFileType = text; path = KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv; sourceTree = "<group>"; };
 		F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioCSVImporter.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -129,7 +129,7 @@
 				F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */,
 				F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */,
 				F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */,
-				F50000000000000000000004 /* KaspaDailyUSD.csv */,
+				F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */,
 				0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */,
 				537C66CC539F5FD89E51681C /* KasSigner/Views/RootView.swift */,
 				852F6B53D2075E8EAE5AF159 /* KasSigner/Views/WalletHomeView.swift */,
@@ -241,7 +241,7 @@
 				D6A544FA38465CB1A2FD75A2 /* KasSigner/Resources/Web in Resources */,
 				A50000000000000000000001 /* KasSigner/Assets.xcassets in Resources */,
 				A60000000000000000000001 /* KasSigner/PrivacyInfo.xcprivacy in Resources */,
-				F50000000000000000000002 /* KaspaDailyUSD.csv in Resources */,
+				F50000000000000000000002 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -331,13 +331,13 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
+				CURRENT_PROJECT_VERSION = 11;
 				DEVELOPMENT_TEAM = XGKP3E53F2;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner uses the camera to scan watch-only wallet data and signed transaction QR codes from KasSigner.";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner uses Face ID to protect access to your watch-only wallet information.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -349,7 +349,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0;
+				MARKETING_VERSION = 3.0;
 				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSigner;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -359,39 +359,6 @@
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
-		};
-		FFDA01A37DFC562DBB92FAEB /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 10;
-				DEVELOPMENT_TEAM = XGKP3E53F2;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner uses the camera to scan watch-only wallet data and signed transaction QR codes from KasSigner.";
-				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner uses Face ID to protect access to your watch-only wallet information.";
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
-				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/Frameworks",
-				);
-				MARKETING_VERSION = 2.0;
-				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSigner;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-				TARGETED_DEVICE_FAMILY = 1;
-			};
-			name = Release;
 		};
 		F40000000000000000000009 /* Debug */ = {
 			isa = XCBuildConfiguration;
@@ -428,6 +395,39 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/KasSigner.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/KasSigner";
+			};
+			name = Release;
+		};
+		FFDA01A37DFC562DBB92FAEB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 11;
+				DEVELOPMENT_TEAM = XGKP3E53F2;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner uses the camera to scan watch-only wallet data and signed transaction QR codes from KasSigner.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner uses Face ID to protect access to your watch-only wallet information.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 3.0;
+				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSigner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
