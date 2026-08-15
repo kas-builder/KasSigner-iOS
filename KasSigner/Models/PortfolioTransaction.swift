@@ -8,6 +8,7 @@ final class PortfolioTransaction {
     var type: String
     var kasAmount: Double
     var kasPriceUSD: Double
+    var feeUSD: Double = 0
     var timestamp: Date
     var notes: String
     var createdAt: Date
@@ -20,13 +21,15 @@ final class PortfolioTransaction {
         kasPriceUSD: Double,
         timestamp: Date,
         notes: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        feeUSD: Double = 0
     ) {
         self.id = id
         self.portfolioID = portfolioID
         self.type = type
         self.kasAmount = kasAmount
         self.kasPriceUSD = kasPriceUSD
+        self.feeUSD = feeUSD
         self.timestamp = timestamp
         self.notes = notes
         self.createdAt = createdAt

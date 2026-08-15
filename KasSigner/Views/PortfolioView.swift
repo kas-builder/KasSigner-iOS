@@ -1,6 +1,7 @@
 import Charts
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct PortfolioView: View {
     private enum TimeRange: String, CaseIterable, Identifiable {
@@ -49,6 +50,12 @@ struct PortfolioView: View {
         }
     }
 
+    private struct CSVImportAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var priceService: PriceService
@@ -63,6 +70,7 @@ struct PortfolioView: View {
     @State private var accountPendingDeletion: PortfolioAccount?
     @State private var accountEditorPresentation: AccountEditorPresentation?
     @State private var showingTransactionEditor = false
+    @State private var transactionEditorDetent: PresentationDetent = .fraction(0.9)
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
     @State private var transactionPendingDeletion: PortfolioTransaction?
@@ -74,6 +82,9 @@ struct PortfolioView: View {
     @State private var isLoadingChart = false
     @State private var chartLoadFailed = false
     @State private var selectedChartPoint: PortfolioChartPoint?
+    @State private var showingCSVFileImporter = false
+    @State private var csvImportPreview: PortfolioCSVImportPreview?
+    @State private var csvImportAlert: CSVImportAlert?
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -108,6 +119,12 @@ struct PortfolioView: View {
                                 Label("Edit Account", systemImage: "pencil")
                             }
 
+                            Button {
+                                showingCSVFileImporter = true
+                            } label: {
+                                Label("Import CSV", systemImage: "square.and.arrow.down")
+                            }
+
                             Button(role: .destructive) {
                                 accountPendingDeletion = selectedAccount
                             } label: {
@@ -137,12 +154,14 @@ struct PortfolioView: View {
             ) { draft in
                 saveTransaction(draft)
             }
-            .presentationDetents([.fraction(0.9)])
+            .id(transactionBeingEdited?.id.uuidString ?? "new-transaction")
+            .presentationDetents([.fraction(0.9)], selection: $transactionEditorDetent)
             .presentationDragIndicator(.visible)
         }
         .sheet(item: $selectedTransaction, onDismiss: {
             if openEditorAfterDetailDismisses {
                 openEditorAfterDetailDismisses = false
+                transactionEditorDetent = .fraction(0.9)
                 showingTransactionEditor = true
             }
         }) { transaction in
@@ -160,7 +179,7 @@ struct PortfolioView: View {
                     transactionPendingDeletion = transaction
                 }
             )
-            .presentationDetents([.medium])
+            .presentationDetents([.fraction(0.9)])
             .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showingHoldingDetail) {
@@ -171,6 +190,30 @@ struct PortfolioView: View {
             )
             .presentationDetents([.fraction(0.9)])
             .presentationDragIndicator(.visible)
+        }
+        .fileImporter(
+            isPresented: $showingCSVFileImporter,
+            allowedContentTypes: [.commaSeparatedText, .plainText]
+        ) { result in
+            handleCSVSelection(result)
+        }
+        .sheet(item: $csvImportPreview) { preview in
+            PortfolioCSVImportPreviewView(
+                preview: preview,
+                portfolioName: accountName(for: preview.portfolioID) ?? "Unknown Portfolio",
+                accentColor: activePortfolioColor,
+                onCancel: { csvImportPreview = nil },
+                onImport: { importCSVTransactions(preview) }
+            )
+            .presentationDetents([.fraction(0.9)])
+            .presentationDragIndicator(.visible)
+        }
+        .alert(item: $csvImportAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
         .alert(
             "Delete Portfolio Account?",
@@ -572,7 +615,10 @@ struct PortfolioView: View {
     }
 
     private var transactionsSection: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let displayedTransactions = visibleTransactions
+        let lastTransactionID = displayedTransactions.last?.id
+
+        return VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Transactions")
                     .font(.headline)
@@ -580,7 +626,7 @@ struct PortfolioView: View {
                 Spacer()
             }
 
-            if visibleTransactions.isEmpty {
+            if displayedTransactions.isEmpty {
                 HStack(spacing: 12) {
                     themedIcon("arrow.left.arrow.right")
                     Text("No Transactions")
@@ -589,10 +635,12 @@ struct PortfolioView: View {
                 }
                 .padding(.vertical, 24)
             } else {
-                ForEach(visibleTransactions) { transaction in
-                    transactionRow(transaction)
-                    if transaction.id != visibleTransactions.last?.id {
-                        Divider()
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    ForEach(displayedTransactions) { transaction in
+                        transactionRow(transaction)
+                        if transaction.id != lastTransactionID {
+                            Divider()
+                        }
                     }
                 }
             }
@@ -607,6 +655,7 @@ struct PortfolioView: View {
     private var newTransactionButton: some View {
         Button {
             transactionBeingEdited = nil
+            transactionEditorDetent = .fraction(0.9)
             showingTransactionEditor = true
         } label: {
             Label("New Transaction", systemImage: "plus")
@@ -871,6 +920,7 @@ struct PortfolioView: View {
             transactionBeingEdited.type = draft.type.rawValue
             transactionBeingEdited.kasAmount = draft.kasAmount
             transactionBeingEdited.kasPriceUSD = draft.kasPriceUSD
+            transactionBeingEdited.feeUSD = draft.feeUSD
             transactionBeingEdited.timestamp = draft.timestamp
             transactionBeingEdited.notes = draft.notes
         } else {
@@ -880,11 +930,93 @@ struct PortfolioView: View {
                 kasAmount: draft.kasAmount,
                 kasPriceUSD: draft.kasPriceUSD,
                 timestamp: draft.timestamp,
-                notes: draft.notes
+                notes: draft.notes,
+                feeUSD: draft.feeUSD
             ))
         }
         try? modelContext.save()
         transactionBeingEdited = nil
+    }
+
+    private func handleCSVSelection(_ result: Result<URL, Error>) {
+        guard let account = selectedAccount else {
+            csvImportAlert = CSVImportAlert(
+                title: "Select a Portfolio",
+                message: "Choose one portfolio before importing transactions."
+            )
+            return
+        }
+
+        switch result {
+        case .success(let url):
+            let hasAccess = url.startAccessingSecurityScopedResource()
+            defer {
+                if hasAccess { url.stopAccessingSecurityScopedResource() }
+            }
+
+            do {
+                let data = try Data(contentsOf: url, options: .mappedIfSafe)
+                csvImportPreview = try PortfolioCSVImporter.preview(
+                    data: data,
+                    fileName: url.lastPathComponent,
+                    portfolioID: account.id,
+                    existingTransactions: transactions
+                )
+            } catch {
+                csvImportAlert = CSVImportAlert(
+                    title: "Unable to Import CSV",
+                    message: error.localizedDescription
+                )
+            }
+        case .failure(let error):
+            if (error as NSError).code != NSUserCancelledError {
+                csvImportAlert = CSVImportAlert(
+                    title: "Unable to Open CSV",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private func importCSVTransactions(_ preview: PortfolioCSVImportPreview) {
+        guard accounts.contains(where: { $0.id == preview.portfolioID }) else {
+            csvImportPreview = nil
+            csvImportAlert = CSVImportAlert(
+                title: "Portfolio Unavailable",
+                message: "The selected portfolio no longer exists."
+            )
+            return
+        }
+
+        let createdAt = Date()
+        for (index, transaction) in preview.transactions.enumerated() {
+            modelContext.insert(PortfolioTransaction(
+                portfolioID: preview.portfolioID,
+                type: transaction.type.rawValue,
+                kasAmount: transaction.kasAmount,
+                kasPriceUSD: transaction.kasPriceUSD,
+                timestamp: transaction.timestamp,
+                notes: transaction.notes,
+                createdAt: createdAt.addingTimeInterval(Double(index) / 1_000),
+                feeUSD: transaction.feeUSD
+            ))
+        }
+
+        do {
+            try modelContext.save()
+            csvImportPreview = nil
+            csvImportAlert = CSVImportAlert(
+                title: "Import Complete",
+                message: "Imported \(preview.transactions.count) transactions."
+            )
+        } catch {
+            modelContext.rollback()
+            csvImportPreview = nil
+            csvImportAlert = CSVImportAlert(
+                title: "Import Failed",
+                message: "No transactions were imported."
+            )
+        }
     }
 
     private func deleteTransaction(_ transaction: PortfolioTransaction) {
@@ -967,7 +1099,7 @@ private struct PortfolioHoldingDetail: View {
                 }
 
                 Section("Cost") {
-                    LabeledContent("Average Cost", value: averageCostText)
+                    LabeledContent("Average Buy Price", value: averageCostText)
                     LabeledContent("Cost Basis", value: currency(summary.costBasis))
                 }
 
@@ -992,7 +1124,7 @@ private struct PortfolioHoldingDetail: View {
     private var kasPriceText: String {
         guard let kasPriceUSD else { return "—" }
         return kasPriceUSD.formatted(
-            .currency(code: "USD").precision(.fractionLength(0...8))
+            .currency(code: "USD").precision(.fractionLength(4))
         )
     }
 
@@ -1015,7 +1147,7 @@ private struct PortfolioHoldingDetail: View {
 
     private var unrealizedProfitLoss: Double? {
         guard let kasPriceUSD else { return nil }
-        return (summary.holdings * kasPriceUSD) - summary.costBasis
+        return (summary.holdings * kasPriceUSD) - summary.remainingCostBasis
     }
 
     private var unrealizedProfitLossColor: Color {
@@ -1041,6 +1173,7 @@ private struct PortfolioTransactionDraft {
     let type: PortfolioTransactionType
     let kasAmount: Double
     let kasPriceUSD: Double
+    let feeUSD: Double
     let timestamp: Date
     let notes: String
 }
@@ -1061,7 +1194,10 @@ private struct PortfolioTransactionDetail: View {
                     LabeledContent("Portfolio", value: portfolioName)
                     LabeledContent("Type", value: transaction.type)
                     LabeledContent("KAS Amount", value: kasAmountText)
-                    LabeledContent("Price per KAS", value: kasPriceText)
+                    if transactionType == .buy || transactionType == .sell {
+                        LabeledContent("Price per KAS", value: kasPriceText)
+                    }
+                    LabeledContent("Fee", value: feeText)
                     LabeledContent("Total Value", value: totalValueText)
                     LabeledContent(
                         "Date & Time",
@@ -1110,6 +1246,64 @@ private struct PortfolioTransactionDetail: View {
     private var totalValueText: String {
         (transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD"))
     }
+
+    private var transactionType: PortfolioTransactionType? {
+        PortfolioTransactionType(rawValue: transaction.type)
+    }
+
+    private var feeText: String {
+        transaction.feeUSD.formatted(.currency(code: "USD"))
+    }
+}
+
+private struct PortfolioCSVImportPreviewView: View {
+    let preview: PortfolioCSVImportPreview
+    let portfolioName: String
+    let accentColor: Color
+    let onCancel: () -> Void
+    let onImport: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Portfolio", value: portfolioName)
+                    LabeledContent("File", value: preview.fileName)
+                }
+
+                Section("Import Summary") {
+                    LabeledContent("Ready", value: preview.transactions.count.formatted())
+                    LabeledContent("Duplicates", value: preview.duplicateCount.formatted())
+                    LabeledContent("Rejected", value: preview.issues.count.formatted())
+                }
+
+                if !preview.issues.isEmpty {
+                    Section("Rejected Rows") {
+                        ForEach(preview.issues) { issue in
+                            LabeledContent("Row \(issue.lineNumber)") {
+                                Text(issue.message)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Import Transactions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel", action: onCancel)
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import", action: onImport)
+                        .disabled(preview.transactions.isEmpty)
+                }
+            }
+            .tint(accentColor)
+        }
+    }
 }
 
 private struct PortfolioTransactionEditor: View {
@@ -1128,6 +1322,7 @@ private struct PortfolioTransactionEditor: View {
     @State private var transactionType: PortfolioTransactionType = .buy
     @State private var kasAmount: Double?
     @State private var kasPriceUSD: Double?
+    @State private var feeUSD: Double
     @State private var timestamp = Date()
     @State private var notes = ""
     @State private var hasEditedPrice = false
@@ -1152,6 +1347,7 @@ private struct PortfolioTransactionEditor: View {
         )
         _kasAmount = State(initialValue: transaction?.kasAmount)
         _kasPriceUSD = State(initialValue: transaction?.kasPriceUSD)
+        _feeUSD = State(initialValue: transaction?.feeUSD ?? 0)
         _timestamp = State(initialValue: transaction?.timestamp ?? Date())
         _notes = State(initialValue: transaction?.notes ?? "")
         _hasEditedPrice = State(initialValue: transaction != nil)
@@ -1187,18 +1383,31 @@ private struct PortfolioTransactionEditor: View {
                         .keyboardType(.decimalPad)
                     }
 
-                    LabeledContent("Price (USD)") {
+                    if transactionType == .buy || transactionType == .sell {
+                        LabeledContent("Price") {
+                            TextField(
+                                "$0.0000",
+                                value: $kasPriceUSD,
+                                format: .currency(code: "USD")
+                                    .precision(.fractionLength(4))
+                            )
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.decimalPad)
+                            .onChange(of: kasPriceUSD) { _, _ in
+                                hasEditedPrice = true
+                            }
+                        }
+                    }
+
+                    LabeledContent("Fee") {
                         TextField(
-                            "$0.0000",
-                            value: $kasPriceUSD,
+                            "$0.00",
+                            value: $feeUSD,
                             format: .currency(code: "USD")
-                                .precision(.fractionLength(4))
+                                .precision(.fractionLength(2))
                         )
                         .multilineTextAlignment(.trailing)
                         .keyboardType(.decimalPad)
-                        .onChange(of: kasPriceUSD) { _, _ in
-                            hasEditedPrice = true
-                        }
                     }
 
                     LabeledContent("Total Value", value: totalValueText)
@@ -1239,13 +1448,15 @@ private struct PortfolioTransactionEditor: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let portfolioID, let kasAmount, let kasPriceUSD else { return }
+                        guard let portfolioID, let kasAmount else { return }
+                        let savedPrice = kasPriceUSD ?? 0
                         onSave(
                             PortfolioTransactionDraft(
                                 portfolioID: portfolioID,
                                 type: transactionType,
                                 kasAmount: kasAmount,
-                                kasPriceUSD: kasPriceUSD,
+                                kasPriceUSD: savedPrice,
+                                feeUSD: max(0, feeUSD),
                                 timestamp: timestamp,
                                 notes: notes.trimmingCharacters(in: .whitespacesAndNewlines)
                             )
@@ -1263,12 +1474,17 @@ private struct PortfolioTransactionEditor: View {
             .onChange(of: priceService.prices) { _, _ in
                 populateLivePriceIfNeeded()
             }
+            .task(id: transferPriceRequestID) {
+                await populateTransferPriceIfNeeded()
+            }
         }
     }
 
     private var canSave: Bool {
-        guard portfolioID != nil, let kasAmount, let kasPriceUSD else { return false }
-        return kasAmount > 0 && kasPriceUSD > 0 && !exceedsAvailableHoldings
+        guard portfolioID != nil, let kasAmount else { return false }
+        let hasValidPrice = transactionType == .transferIn || transactionType == .transferOut ||
+            (kasPriceUSD ?? 0) > 0
+        return kasAmount > 0 && hasValidPrice && !exceedsAvailableHoldings
     }
 
     private var transactionDateRange: ClosedRange<Date> {
@@ -1292,10 +1508,31 @@ private struct PortfolioTransactionEditor: View {
     }
 
     private func populateLivePriceIfNeeded() {
+        guard transactionType == .buy || transactionType == .sell else { return }
         guard !hasEditedPrice,
               let livePrice = priceService.price(for: .usd) else { return }
         kasPriceUSD = livePrice
         hasEditedPrice = false
+    }
+
+    private var transferPriceRequestID: String {
+        guard transactionType == .transferIn || transactionType == .transferOut else {
+            return "purchase"
+        }
+        return "\(transactionType.rawValue):\(timestamp.timeIntervalSince1970)"
+    }
+
+    private func populateTransferPriceIfNeeded() async {
+        guard transactionType == .transferIn || transactionType == .transferOut else { return }
+        let elapsedDays = Calendar.current.dateComponents([.day], from: timestamp, to: Date()).day ?? 1
+        guard let prices = try? await priceService.historicalUSDPrices(
+            days: String(max(1, elapsedDays + 1))
+        ),
+        let historicalPrice = PortfolioChartBuilder.interpolatedPrice(at: timestamp, in: prices) else {
+            kasPriceUSD = 0
+            return
+        }
+        kasPriceUSD = historicalPrice
     }
 }
 

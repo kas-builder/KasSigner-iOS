@@ -13,7 +13,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(summary.holdings, 400, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.costBasis, 14, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 14, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.averageCost!, 0.035, accuracy: 0.000_000_01)
+    }
+
+    func testBuyFeeDoesNotChangeCMCCostBasis() {
+        let summary = PortfolioHoldingSummary(transactions: [
+            transaction(.buy, amount: 100, price: 0.02, fee: 0.50, offset: 0)
+        ])
+
+        XCTAssertEqual(summary.holdings, 100, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.costBasis, 2, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 2, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.averageCost!, 0.02, accuracy: 0.000_000_01)
     }
 
     func testPartialSellRemovesWeightedAverageCost() {
@@ -24,11 +36,12 @@ final class PortfolioCalculationsTests: XCTestCase {
         ])
 
         XCTAssertEqual(summary.holdings, 300, accuracy: 0.000_000_01)
-        XCTAssertEqual(summary.costBasis, 10.5, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.costBasis, 14, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 10.5, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.averageCost!, 0.035, accuracy: 0.000_000_01)
     }
 
-    func testTransfersChangeHoldingsButNotCostBasis() {
+    func testTransferOutRemovesProportionalBasisWithoutCreatingPurchaseCost() {
         let summary = PortfolioHoldingSummary(transactions: [
             transaction(.buy, amount: 100, price: 0.03, offset: 0),
             transaction(.transferIn, amount: 50, price: 0.20, offset: 60),
@@ -37,6 +50,8 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(summary.holdings, 125, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.costBasis, 3, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 2.5, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.averageCost!, 0.03, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.totalTransferredIn, 50, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.totalTransferredOut, 25, accuracy: 0.000_000_01)
     }
@@ -48,7 +63,8 @@ final class PortfolioCalculationsTests: XCTestCase {
         ])
 
         XCTAssertEqual(summary.holdings, 0, accuracy: 0.000_000_01)
-        XCTAssertEqual(summary.costBasis, 0, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.costBasis, 0.3, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 0, accuracy: 0.000_000_01)
     }
 
     func testTransferOutCannotMakeLaterHoldingsDisappear() {
@@ -59,6 +75,7 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(summary.holdings, 10, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.costBasis, 0, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 0, accuracy: 0.000_000_01)
     }
 
     func testEqualTimestampsUseCreationOrder() {
@@ -92,6 +109,7 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
         XCTAssertEqual(summary.holdings, 10, accuracy: 0.000_000_01)
         XCTAssertEqual(summary.costBasis, 0.2, accuracy: 0.000_000_01)
+        XCTAssertEqual(summary.remainingCostBasis, 0.2, accuracy: 0.000_000_01)
     }
 
     func testChartStartsAtFirstTransactionAndNotBefore() {
@@ -227,10 +245,150 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(HistoricalPriceCacheStore.load(from: url), cache)
     }
 
+    func testPortfolioCSVImportParsesQuotedAmountsAndFixedTimezone() throws {
+        let csv = """
+        Date (UTC-4:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes
+        "2026-03-04 11:40:00","KAS","buy","0.03202","1,178.32","37.73","0.","USD","Fold rewards, converted"
+        """
+        let now = ISO8601DateFormatter().date(from: "2026-08-14T12:00:00Z")!
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: Data(csv.utf8),
+            fileName: "transactions.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: now
+        )
+
+        XCTAssertEqual(preview.transactions.count, 1)
+        XCTAssertEqual(preview.transactions[0].kasAmount, 1_178.32, accuracy: 0.000_000_01)
+        XCTAssertEqual(preview.transactions[0].kasPriceUSD, 0.03202, accuracy: 0.000_000_01)
+        XCTAssertEqual(preview.transactions[0].notes, "Fold rewards, converted")
+        XCTAssertEqual(
+            preview.transactions[0].timestamp,
+            ISO8601DateFormatter().date(from: "2026-03-04T15:40:00Z")
+        )
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
+    func testPortfolioCSVImportSkipsExistingAndFileDuplicates() throws {
+        let csv = """
+        Date (UTC-4:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes
+        2026-06-02 22:30:00,KAS,buy,0.02888,687.02,19.84,0,USD,Fold rewards
+        2026-06-02 22:30:00,KAS,buy,0.02888,687.02,19.84,0,USD,Fold rewards
+        """
+        let timestamp = ISO8601DateFormatter().date(from: "2026-06-03T02:30:00Z")!
+        let existing = PortfolioTransaction(
+            portfolioID: portfolioID,
+            type: PortfolioTransactionType.buy.rawValue,
+            kasAmount: 687.02,
+            kasPriceUSD: 0.02888,
+            timestamp: timestamp,
+            notes: "Fold rewards"
+        )
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: Data(csv.utf8),
+            fileName: "transactions.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [existing],
+            now: ISO8601DateFormatter().date(from: "2026-08-14T12:00:00Z")!
+        )
+
+        XCTAssertTrue(preview.transactions.isEmpty)
+        XCTAssertEqual(preview.duplicateCount, 2)
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
+    func testPortfolioCSVImportAcceptsFeeAndRejectsOversell() throws {
+        let csv = """
+        Date (UTC-4:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes
+        2026-06-01 12:00:00,KAS,buy,0.03,10,0.30,0,USD,
+        2026-06-02 12:00:00,KAS,sell,0.04,20,0.80,0,USD,
+        2026-06-03 12:00:00,KAS,buy,0.05,10,0.50,1,USD,
+        """
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: Data(csv.utf8),
+            fileName: "transactions.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: ISO8601DateFormatter().date(from: "2026-08-14T12:00:00Z")!
+        )
+
+        XCTAssertEqual(preview.transactions.count, 2)
+        XCTAssertEqual(preview.transactions[0].type, .buy)
+        XCTAssertEqual(preview.transactions[1].feeUSD, 1)
+        XCTAssertEqual(preview.issues.count, 1)
+        XCTAssertTrue(preview.issues.contains { $0.message.contains("exceeds holdings") })
+    }
+
+    func testPortfolioCSVImportAcceptsCMCTransfersWithoutPurchasePriceOrFee() throws {
+        let csv = """
+        Date (UTC-4:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes
+        2026-07-05 12:00:00,KAS,transferIn,0,250,7.729,,,Received
+        2026-07-05 13:00:00,KAS,transferOut,0,250,7.765,0,KAS,Sent
+        """
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: Data(csv.utf8),
+            fileName: "cmc-transfers.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: ISO8601DateFormatter().date(from: "2026-08-14T12:00:00Z")!
+        )
+
+        XCTAssertEqual(preview.transactions.count, 2)
+        XCTAssertEqual(preview.transactions[0].type, .transferIn)
+        XCTAssertEqual(preview.transactions[0].kasPriceUSD, 7.729 / 250, accuracy: 0.000_000_01)
+        XCTAssertEqual(preview.transactions[1].type, .transferOut)
+        XCTAssertEqual(preview.transactions[1].kasPriceUSD, 7.765 / 250, accuracy: 0.000_000_01)
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
+    func testPortfolioCSVImportIdentifiesRenamedNumbersDocument() {
+        var data = Data([0x50, 0x4b, 0x03, 0x04])
+        data.append(Data("Index/Document.iwa".utf8))
+
+        XCTAssertThrowsError(
+            try PortfolioCSVImporter.preview(
+                data: data,
+                fileName: "renamed.csv",
+                portfolioID: portfolioID,
+                existingTransactions: []
+            )
+        ) { error in
+            XCTAssertEqual(
+                error.localizedDescription,
+                "This is an Apple Numbers document, not a CSV. In Numbers, choose Export → CSV, then try again."
+            )
+        }
+    }
+
+    func testPortfolioCSVImportParsesNumbersExportCRLFLineEndings() throws {
+        let csv = [
+            "Date (UTC-4:00),Token,Type,Price (USD),Amount,Total value (USD),Fee,Fee Currency,Notes",
+            "2026-08-01 01:25:00,KAS,buy,0.02729,\"1,054.59\",28.78,0,USD,$30 worth of card cash back for KAS"
+        ].joined(separator: "\r\n")
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: Data(csv.utf8),
+            fileName: "numbers-export.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: ISO8601DateFormatter().date(from: "2026-08-14T12:00:00Z")!
+        )
+
+        XCTAssertEqual(preview.transactions.count, 1)
+        XCTAssertEqual(preview.transactions[0].kasAmount, 1_054.59, accuracy: 0.000_001)
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
     private func transaction(
         _ type: PortfolioTransactionType,
         amount: Double,
         price: Double,
+        fee: Double = 0,
         offset: TimeInterval
     ) -> PortfolioTransaction {
         PortfolioTransaction(
@@ -240,7 +398,8 @@ final class PortfolioCalculationsTests: XCTestCase {
             kasPriceUSD: price,
             timestamp: baseDate.addingTimeInterval(offset),
             notes: "",
-            createdAt: baseDate.addingTimeInterval(offset)
+            createdAt: baseDate.addingTimeInterval(offset),
+            feeUSD: fee
         )
     }
 

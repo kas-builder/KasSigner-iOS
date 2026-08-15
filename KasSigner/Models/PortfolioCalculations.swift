@@ -24,6 +24,7 @@ enum PortfolioTransactionOrder {
 struct PortfolioHoldingSummary {
     let holdings: Double
     let costBasis: Double
+    let remainingCostBasis: Double
     let totalBought: Double
     let totalSold: Double
     let totalTransferredIn: Double
@@ -31,7 +32,8 @@ struct PortfolioHoldingSummary {
 
     init(transactions: [PortfolioTransaction]) {
         var holdings = 0.0
-        var costBasis = 0.0
+        var lifetimeBuyCost = 0.0
+        var remainingCostBasis = 0.0
         var totalBought = 0.0
         var totalSold = 0.0
         var totalTransferredIn = 0.0
@@ -41,20 +43,24 @@ struct PortfolioHoldingSummary {
             switch transaction.type {
             case PortfolioTransactionType.buy.rawValue:
                 holdings += transaction.kasAmount
-                costBasis += transaction.kasAmount * transaction.kasPriceUSD
+                let acquisitionCost = transaction.kasAmount * transaction.kasPriceUSD
+                lifetimeBuyCost += acquisitionCost
+                remainingCostBasis += acquisitionCost
                 totalBought += transaction.kasAmount
             case PortfolioTransactionType.sell.rawValue:
-                let averageCost = holdings > 0 ? costBasis / holdings : 0
+                let averageCost = holdings > 0 ? remainingCostBasis / holdings : 0
                 let disposedAmount = min(transaction.kasAmount, max(holdings, 0))
                 holdings -= disposedAmount
-                costBasis = max(0, costBasis - (disposedAmount * averageCost))
+                remainingCostBasis = max(0, remainingCostBasis - (disposedAmount * averageCost))
                 totalSold += transaction.kasAmount
             case PortfolioTransactionType.transferIn.rawValue:
                 holdings += transaction.kasAmount
                 totalTransferredIn += transaction.kasAmount
             case PortfolioTransactionType.transferOut.rawValue:
+                let averageCost = holdings > 0 ? remainingCostBasis / holdings : 0
                 let transferredAmount = min(transaction.kasAmount, max(holdings, 0))
                 holdings -= transferredAmount
+                remainingCostBasis = max(0, remainingCostBasis - (transferredAmount * averageCost))
                 totalTransferredOut += transaction.kasAmount
             default:
                 continue
@@ -62,7 +68,8 @@ struct PortfolioHoldingSummary {
         }
 
         self.holdings = max(0, holdings)
-        self.costBasis = costBasis
+        self.costBasis = lifetimeBuyCost
+        self.remainingCostBasis = remainingCostBasis
         self.totalBought = totalBought
         self.totalSold = totalSold
         self.totalTransferredIn = totalTransferredIn
@@ -70,8 +77,8 @@ struct PortfolioHoldingSummary {
     }
 
     var averageCost: Double? {
-        guard holdings > 0, costBasis > 0 else { return nil }
-        return costBasis / holdings
+        guard totalBought > 0, costBasis > 0 else { return nil }
+        return costBasis / totalBought
     }
 }
 
