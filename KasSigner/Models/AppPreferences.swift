@@ -72,6 +72,26 @@ enum ExplorerChoice: String, CaseIterable, Identifiable {
     }
 }
 
+enum AddressStatusDisplayMode: String, CaseIterable, Identifiable {
+    case off
+    case iconOnly
+    case iconAndText
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .iconOnly: "Icon Only"
+        case .iconAndText: "Icon and Text"
+        }
+    }
+
+    var isEnabled: Bool {
+        self != .off
+    }
+}
+
 enum NodeConnectionMode: String, CaseIterable, Identifiable {
     case automatic
     case custom
@@ -125,7 +145,7 @@ final class AppPreferences: ObservableObject {
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
     @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
-    @Published var addressStatusEnabled: Bool { didSet { save() } }
+    @Published var addressStatusDisplayMode: AddressStatusDisplayMode { didSet { save() } }
     @Published var nodeMode: NodeConnectionMode { didSet { save() } }
     @Published var customNodeURL: String { didSet { save() } }
     @Published var secondaryCurrency: SecondaryCurrency { didSet { save() } }
@@ -136,6 +156,7 @@ final class AppPreferences: ObservableObject {
         static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
         static let addressStatusEnabled = "kassigner.addressStatusEnabled.v1"
+        static let addressStatusDisplayMode = "kassigner.addressStatusDisplayMode.v2"
         static let nodeMode = "kassigner.nodeMode.v1"
         static let customNode = "kassigner.customNode.v1"
         static let secondaryCurrency = "kassigner.secondaryCurrency.v1"
@@ -151,7 +172,13 @@ final class AppPreferences: ObservableObject {
             rawValue: defaults.object(forKey: Key.kasBalanceDecimalPlaces) as? Int ?? 4
         ) ?? .four
         explorer = ExplorerChoice(rawValue: defaults.string(forKey: Key.explorer) ?? "") ?? .kaspaStream
-        addressStatusEnabled = defaults.object(forKey: Key.addressStatusEnabled) as? Bool ?? true
+        if let storedMode = defaults.string(forKey: Key.addressStatusDisplayMode),
+           let displayMode = AddressStatusDisplayMode(rawValue: storedMode) {
+            addressStatusDisplayMode = displayMode
+        } else {
+            let wasEnabled = defaults.object(forKey: Key.addressStatusEnabled) as? Bool ?? true
+            addressStatusDisplayMode = wasEnabled ? .iconAndText : .off
+        }
         nodeMode = NodeConnectionMode(rawValue: defaults.string(forKey: Key.nodeMode) ?? "") ?? .automatic
         customNodeURL = defaults.string(forKey: Key.customNode) ?? ""
         secondaryCurrency = SecondaryCurrency(
@@ -174,7 +201,7 @@ final class AppPreferences: ObservableObject {
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
         defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)
-        defaults.set(addressStatusEnabled, forKey: Key.addressStatusEnabled)
+        defaults.set(addressStatusDisplayMode.rawValue, forKey: Key.addressStatusDisplayMode)
         defaults.set(nodeMode.rawValue, forKey: Key.nodeMode)
         defaults.set(customNodeURL, forKey: Key.customNode)
         defaults.set(secondaryCurrency.rawValue, forKey: Key.secondaryCurrency)

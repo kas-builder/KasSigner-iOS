@@ -118,7 +118,11 @@ struct SettingsView: View {
                         }
                     }
 
-                    Toggle("Address Status", isOn: $preferences.addressStatusEnabled)
+                    Picker("Address Status", selection: $preferences.addressStatusDisplayMode) {
+                        ForEach(AddressStatusDisplayMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
                 } header: {
                     Text("Preferences")
                 } footer: {

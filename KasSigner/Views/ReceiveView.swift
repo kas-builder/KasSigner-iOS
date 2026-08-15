@@ -108,8 +108,10 @@ struct ReceiveView: View {
                         Text("Address #\(selectedAddressIndex + 1)")
                             .foregroundStyle(.secondary)
 
-                        if preferences.addressStatusEnabled {
-                            addressUsageLabel
+                        if preferences.addressStatusDisplayMode.isEnabled {
+                            addressUsageLabel(
+                                showsText: preferences.addressStatusDisplayMode == .iconAndText
+                            )
                         }
                     }
                         .font(.subheadline.weight(.semibold))
@@ -251,7 +253,7 @@ struct ReceiveView: View {
             engine.startIfNeeded()
         }
         .task(id: addressUsageTaskID) {
-            guard preferences.addressStatusEnabled else { return }
+            guard preferences.addressStatusDisplayMode.isEnabled else { return }
             await checkAddressUsage(receiveAddress)
         }
         .onAppear {
@@ -309,17 +311,19 @@ struct ReceiveView: View {
     }
 
     private var addressUsageTaskID: String {
-        "\(preferences.addressStatusEnabled):\(receiveAddress)"
+        "\(preferences.addressStatusDisplayMode.rawValue):\(receiveAddress)"
     }
 
     @ViewBuilder
-    private var addressUsageLabel: some View {
+    private func addressUsageLabel(showsText: Bool) -> some View {
         switch addressUsageStatus {
         case .checking:
             HStack(spacing: 5) {
                 ProgressView()
                     .controlSize(.mini)
-                Text("Checking…")
+                if showsText {
+                    Text("Checking…")
+                }
             }
             .foregroundStyle(.secondary)
             .accessibilityLabel("Checking address usage")
@@ -329,8 +333,13 @@ struct ReceiveView: View {
                     await checkAddressUsage(receiveAddress, forceRefresh: true)
                 }
             } label: {
-                Label("Fresh Address", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                if showsText {
+                    Label("Fresh Address", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Fresh address")
@@ -341,16 +350,27 @@ struct ReceiveView: View {
                     await checkAddressUsage(receiveAddress, forceRefresh: true)
                 }
             } label: {
-                Label("Used Address", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.yellow)
+                if showsText {
+                    Label("Used Address", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.yellow)
+                }
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Used address")
             .accessibilityHint("Checks this address again")
         case .unavailable:
-            Label("Status Unavailable", systemImage: "questionmark.circle.fill")
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Address usage status unavailable")
+            Group {
+                if showsText {
+                    Label("Status Unavailable", systemImage: "questionmark.circle.fill")
+                } else {
+                    Image(systemName: "questionmark.circle.fill")
+                }
+            }
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Address usage status unavailable")
         }
     }
 
@@ -431,7 +451,7 @@ struct ReceiveView: View {
         _ address: String,
         forceRefresh: Bool = false
     ) async {
-        guard preferences.addressStatusEnabled, !address.isEmpty else {
+        guard preferences.addressStatusDisplayMode.isEnabled, !address.isEmpty else {
             addressUsageStatus = .unavailable
             return
         }
