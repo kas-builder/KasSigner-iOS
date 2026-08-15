@@ -69,9 +69,11 @@ final class PriceService: ObservableObject {
 
     private let cacheKey = "kassigner.priceCache.v1"
     private let minimumRefreshInterval: TimeInterval = 60
+    private let historicalRefreshRetryInterval: TimeInterval = 5 * 60
     private let requestTimeout: TimeInterval = 8
     private var refreshTask: Task<Void, Never>?
     private var lastRefreshAttempt: Date?
+    private var lastHistoricalRefreshFailure: Date?
     private var isHistoricalPrepared = false
     private var historicalDiskCache: HistoricalPriceDiskCache?
     private let historicalCacheURL = HistoricalPriceCacheStore.defaultCacheURL()
@@ -92,11 +94,14 @@ final class PriceService: ObservableObject {
 
     func historicalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
         await prepareHistoricalPrices()
+        let requestedDays = max(1, Int(days) ?? 1)
+        if requestedDays <= 1 {
+            await refreshHistoricalPricesIfNeeded()
+        }
         guard let historicalDiskCache else {
             throw PriceError.invalidResponse
         }
 
-        let requestedDays = max(1, Int(days) ?? 1)
         let cutoff = Calendar(identifier: .gregorian).date(
             byAdding: .day,
             value: -requestedDays,
@@ -182,10 +187,14 @@ final class PriceService: ObservableObject {
         guard var cache = historicalDiskCache else { return }
 
         let todayUTC = utcDayString(Date())
-        guard cache.lastRefreshAttemptDayUTC != todayUTC else { return }
-        cache.lastRefreshAttemptDayUTC = todayUTC
-        historicalDiskCache = cache
-        try? saveHistoricalDiskCache()
+        if cache.lastRefreshAttemptDayUTC == todayUTC,
+           hasSufficientRecentIntradayPoints(cache.hourlyPoints) {
+            return
+        }
+        if let lastHistoricalRefreshFailure,
+           Date().timeIntervalSince(lastHistoricalRefreshFailure) < historicalRefreshRetryInterval {
+            return
+        }
 
         let requestedDays = historicalRefreshDays(for: cache)
         let fetched: [HistoricalPricePoint]
@@ -193,10 +202,14 @@ final class PriceService: ObservableObject {
             fetched = try await fetchCoinGeckoHistory(days: requestedDays)
         } catch {
             let fallbackDays = min(Int(requestedDays) ?? 2, 365)
-            guard let fallback = try? await fetchCoinPaprikaHistory(
-                    days: String(fallbackDays)
-                  ) else { return }
-            fetched = fallback
+            guard let dailyFallback = try? await fetchCoinPaprikaHistory(
+                days: String(fallbackDays)
+            ) else {
+                lastHistoricalRefreshFailure = Date()
+                return
+            }
+            let intradayFallback = (try? await fetchCoinPaprikaHistory(days: "1")) ?? []
+            fetched = normalizedHistoricalPoints(dailyFallback + intradayFallback)
         }
 
         let cutoff = Date().addingTimeInterval(-72 * 60 * 60)
@@ -204,9 +217,18 @@ final class PriceService: ObservableObject {
             cache.hourlyPoints.filter { $0.timestamp >= cutoff } + fetched
         )
         mergeCompletedDailyCandles(from: fetched, into: &cache)
+        cache.lastRefreshAttemptDayUTC = todayUTC
         historicalDiskCache = cache
         try? saveHistoricalDiskCache()
+        lastHistoricalRefreshFailure = hasSufficientRecentIntradayPoints(cache.hourlyPoints)
+            ? nil
+            : Date()
         historyRevision += 1
+    }
+
+    private func hasSufficientRecentIntradayPoints(_ points: [HistoricalPricePoint]) -> Bool {
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        return points.lazy.filter { $0.timestamp >= cutoff }.prefix(6).count == 6
     }
 
     private func fetchCoinGeckoHistory(days: String) async throws -> [HistoricalPricePoint] {

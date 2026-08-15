@@ -624,6 +624,14 @@ struct PortfolioView: View {
                     .font(.headline)
 
                 Spacer()
+
+                Button(action: presentNewTransactionEditor) {
+                    Image(systemName: "plus")
+                        .font(.headline)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(activePortfolioColor)
+                .accessibilityLabel("New Portfolio Transaction")
             }
 
             if displayedTransactions.isEmpty {
@@ -653,11 +661,7 @@ struct PortfolioView: View {
     }
 
     private var newTransactionButton: some View {
-        Button {
-            transactionBeingEdited = nil
-            transactionEditorDetent = .fraction(0.9)
-            showingTransactionEditor = true
-        } label: {
+        Button(action: presentNewTransactionEditor) {
             Label("New Transaction", systemImage: "plus")
                 .font(.headline)
                 .frame(maxWidth: .infinity)
@@ -666,6 +670,12 @@ struct PortfolioView: View {
         .buttonStyle(.borderedProminent)
         .tint(activePortfolioColor)
         .accessibilityLabel("New Portfolio Transaction")
+    }
+
+    private func presentNewTransactionEditor() {
+        transactionBeingEdited = nil
+        transactionEditorDetent = .fraction(0.9)
+        showingTransactionEditor = true
     }
 
     private func transactionRow(_ transaction: PortfolioTransaction) -> some View {
@@ -1110,7 +1120,7 @@ private struct PortfolioHoldingDetail: View {
                     LabeledContent("Transferred Out", value: kasAmount(summary.totalTransferredOut))
                 }
             }
-            .navigationTitle("Kaspa")
+            .navigationTitle("Summary")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
@@ -1190,18 +1200,25 @@ private struct PortfolioTransactionDetail: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
+                Section("Transaction") {
                     LabeledContent("Portfolio", value: portfolioName)
                     LabeledContent("Type", value: transaction.type)
-                    LabeledContent("KAS Amount", value: kasAmountText)
+                    LabeledContent("Amount", value: kasAmountText)
                     if transactionType == .buy || transactionType == .sell {
-                        LabeledContent("Price per KAS", value: kasPriceText)
+                        LabeledContent("Price", value: kasPriceText)
                     }
                     LabeledContent("Fee", value: feeText)
                     LabeledContent("Total Value", value: totalValueText)
+                }
+
+                Section("Date & Time") {
                     LabeledContent(
-                        "Date & Time",
-                        value: transaction.timestamp.formatted(date: .abbreviated, time: .shortened)
+                        "Date",
+                        value: transaction.timestamp.formatted(date: .abbreviated, time: .omitted)
+                    )
+                    LabeledContent(
+                        "Time",
+                        value: transaction.timestamp.formatted(date: .omitted, time: .shortened)
                     )
                 }
 
@@ -1239,7 +1256,7 @@ private struct PortfolioTransactionDetail: View {
 
     private var kasPriceText: String {
         transaction.kasPriceUSD.formatted(
-            .currency(code: "USD").precision(.fractionLength(0...8))
+            .currency(code: "USD").precision(.fractionLength(4))
         )
     }
 
@@ -1436,7 +1453,7 @@ private struct PortfolioTransactionEditor: View {
 
                 Section("Notes") {
                     TextField("Optional notes", text: $notes, axis: .vertical)
-                        .lineLimit(3...6)
+                        .lineLimit(1...6)
                 }
             }
             .navigationTitle(transaction == nil ? "New Transaction" : "Edit Transaction")
