@@ -1404,15 +1404,12 @@ private struct PortfolioTransactionEditor: View {
                         LabeledContent("Price") {
                             TextField(
                                 "$0.0000",
-                                value: $kasPriceUSD,
+                                value: editablePrice,
                                 format: .currency(code: "USD")
                                     .precision(.fractionLength(4))
                             )
                             .multilineTextAlignment(.trailing)
                             .keyboardType(.decimalPad)
-                            .onChange(of: kasPriceUSD) { _, _ in
-                                hasEditedPrice = true
-                            }
                         }
                     }
 
@@ -1486,13 +1483,22 @@ private struct PortfolioTransactionEditor: View {
             .tint(accentColor)
             .task {
                 await priceService.refresh(preferences: preferences)
-                populateLivePriceIfNeeded()
             }
             .onChange(of: priceService.prices) { _, _ in
-                populateLivePriceIfNeeded()
+                populateCurrentPriceIfNeeded()
             }
-            .task(id: transferPriceRequestID) {
-                await populateTransferPriceIfNeeded()
+            .onChange(of: timestamp) { oldValue, newValue in
+                if oldValue != newValue {
+                    hasEditedPrice = false
+                }
+            }
+            .onChange(of: transactionType) { oldValue, newValue in
+                if oldValue != newValue {
+                    hasEditedPrice = false
+                }
+            }
+            .task(id: automaticPriceRequestID) {
+                await populateAutomaticPriceIfNeeded()
             }
         }
     }
@@ -1524,32 +1530,61 @@ private struct PortfolioTransactionEditor: View {
         return (kasAmount * kasPriceUSD).formatted(.currency(code: "USD"))
     }
 
-    private func populateLivePriceIfNeeded() {
-        guard transactionType == .buy || transactionType == .sell else { return }
-        guard !hasEditedPrice,
-              let livePrice = priceService.price(for: .usd) else { return }
-        kasPriceUSD = livePrice
-        hasEditedPrice = false
+    private var editablePrice: Binding<Double?> {
+        Binding(
+            get: { kasPriceUSD },
+            set: { newValue in
+                kasPriceUSD = newValue
+                hasEditedPrice = true
+            }
+        )
     }
 
-    private var transferPriceRequestID: String {
-        guard transactionType == .transferIn || transactionType == .transferOut else {
-            return "purchase"
-        }
+    private func populateCurrentPriceIfNeeded() {
+        guard !hasEditedPrice,
+              Calendar.current.isDate(timestamp, inSameDayAs: Date()),
+              let livePrice = priceService.price(for: .usd) else { return }
+        kasPriceUSD = livePrice
+    }
+
+    private var automaticPriceRequestID: String {
         return "\(transactionType.rawValue):\(timestamp.timeIntervalSince1970)"
     }
 
-    private func populateTransferPriceIfNeeded() async {
-        guard transactionType == .transferIn || transactionType == .transferOut else { return }
-        let elapsedDays = Calendar.current.dateComponents([.day], from: timestamp, to: Date()).day ?? 1
-        guard let prices = try? await priceService.historicalUSDPrices(
-            days: String(max(1, elapsedDays + 1))
-        ),
-        let historicalPrice = PortfolioChartBuilder.interpolatedPrice(at: timestamp, in: prices) else {
-            kasPriceUSD = 0
+    private func populateAutomaticPriceIfNeeded() async {
+        guard !hasEditedPrice else { return }
+
+        let requestedTimestamp = timestamp
+        let now = Date()
+        if Calendar.current.isDate(requestedTimestamp, inSameDayAs: now) {
+            populateCurrentPriceIfNeeded()
             return
         }
-        kasPriceUSD = historicalPrice
+
+        let elapsedDays = Calendar.current.dateComponents(
+            [.day],
+            from: requestedTimestamp,
+            to: now
+        ).day ?? 1
+        let prices = try? await priceService.historicalUSDPrices(
+            days: String(max(1, elapsedDays + 1))
+        )
+
+        guard !Task.isCancelled,
+              !hasEditedPrice,
+              timestamp == requestedTimestamp else { return }
+
+        let historicalPrice = PortfolioTransactionPriceResolver.automaticPrice(
+            at: requestedTimestamp,
+            now: now,
+            livePrice: priceService.price(for: .usd),
+            historicalPrices: prices ?? []
+        )
+        if let historicalPrice {
+            kasPriceUSD = historicalPrice
+        } else {
+            kasPriceUSD = transactionType == .buy || transactionType == .sell ? nil : 0
+        }
     }
 }
 

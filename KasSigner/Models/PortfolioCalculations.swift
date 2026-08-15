@@ -89,6 +89,21 @@ struct PortfolioChartPoint: Identifiable, Equatable {
     var id: Date { timestamp }
 }
 
+enum PortfolioTransactionPriceResolver {
+    static func automaticPrice(
+        at timestamp: Date,
+        now: Date,
+        livePrice: Double?,
+        historicalPrices: [HistoricalPricePoint],
+        calendar: Calendar = .current
+    ) -> Double? {
+        if calendar.isDate(timestamp, inSameDayAs: now) {
+            return livePrice
+        }
+        return PortfolioChartBuilder.interpolatedPrice(at: timestamp, in: historicalPrices)
+    }
+}
+
 enum PortfolioChartBuilder {
     static func points(
         transactions: [PortfolioTransaction],

@@ -384,6 +384,42 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertTrue(preview.issues.isEmpty)
     }
 
+    func testOldDatedManualTransactionUsesHistoricalPriceInsteadOfLivePrice() {
+        let oldTransactionDate = baseDate.addingTimeInterval(30)
+        let now = baseDate.addingTimeInterval(86_400 * 30)
+        let resolvedPrice = PortfolioTransactionPriceResolver.automaticPrice(
+            at: oldTransactionDate,
+            now: now,
+            livePrice: 9.99,
+            historicalPrices: [
+                price(0.01, offset: 0),
+                price(0.03, offset: 60)
+            ],
+            calendar: utcCalendar
+        )
+
+        XCTAssertEqual(resolvedPrice!, 0.02, accuracy: 0.000_000_01)
+    }
+
+    func testCurrentDatedManualTransactionUsesLivePrice() {
+        let now = baseDate.addingTimeInterval(3_600)
+        let resolvedPrice = PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate,
+            now: now,
+            livePrice: 0.0255,
+            historicalPrices: [price(9.99, offset: 0)],
+            calendar: utcCalendar
+        )
+
+        XCTAssertEqual(resolvedPrice!, 0.0255, accuracy: 0.000_000_01)
+    }
+
+    private var utcCalendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar
+    }
+
     private func transaction(
         _ type: PortfolioTransactionType,
         amount: Double,
