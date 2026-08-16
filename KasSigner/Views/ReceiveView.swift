@@ -236,14 +236,6 @@ struct ReceiveView: View {
                 .buttonStyle(SubtlePressButtonStyle())
                 .disabled(isGeneratingAddress)
 
-                VStack(spacing: 10) {
-                    LabeledContent("UTXOs", value: "\(syncService.snapshot?.balance.utxoCount ?? 0)")
-                    TimelineView(.periodic(from: .now, by: 9)) { context in
-                        LabeledContent("Last refreshed", value: refreshAge(now: context.date))
-                    }
-                }
-                .padding()
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
             .padding()
         }
@@ -477,14 +469,6 @@ struct ReceiveView: View {
         }
     }
 
-    private func refreshAge(now: Date) -> String {
-        guard let timestamp = syncService.snapshot?.syncedAt else { return "Not yet" }
-        let elapsed = max(0, Int(now.timeIntervalSince1970 - timestamp))
-        if elapsed < 60 { return "\(elapsed) sec ago" }
-        let minutes = elapsed / 60
-        if minutes < 60 { return "\(minutes) min ago" }
-        return "\(minutes / 60) hr ago"
-    }
 }
 
 struct SharedQRCodeView: View {
