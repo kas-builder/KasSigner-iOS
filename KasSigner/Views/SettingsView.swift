@@ -529,24 +529,40 @@ private struct DonateView: View {
                 .accessibilityLabel("Donation address QR code")
                 .accessibilityHint("Copies the full donation address")
 
-                Button {
-                    copyDonationAddress()
-                } label: {
-                    VStack {
+                HStack(spacing: 12) {
+                    Button {
+                        copyDonationAddress()
+                    } label: {
                         Text(twoLineDonationAddress)
-                            .font(.system(size: 14.5, weight: .regular, design: .monospaced))
+                            .font(.system(size: 14, weight: .regular, design: .monospaced))
                             .foregroundStyle(.primary)
                             .multilineTextAlignment(.center)
                             .lineLimit(2)
-                            .minimumScaleFactor(0.8)
                             .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
                     }
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityLabel(donationAddress)
+                    .accessibilityHint("Copies the full donation address")
+
+                    Button {
+                        copyDonationAddress()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.title3.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityLabel("Copy donation address")
                 }
-                .buttonStyle(SubtlePressButtonStyle())
-                .accessibilityLabel(donationAddress)
-                .accessibilityHint("Copies the full donation address")
+                .padding(.leading, 16)
+                .padding(.trailing, 8)
+                .padding(.vertical, 10)
+                .background(
+                    .thinMaterial,
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
             }
             .padding()
         }
