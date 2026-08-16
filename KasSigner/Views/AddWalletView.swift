@@ -20,7 +20,7 @@ struct AddWalletView: View {
                 Section("Account") {
                     TextField("Account name", text: $walletName)
 
-                    TextField("KasSigner kpub", text: $kpub, axis: .vertical)
+                    TextField("Paste kpub", text: $kpub, axis: .vertical)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .lineLimit(4...8)
@@ -28,7 +28,7 @@ struct AddWalletView: View {
                     Button {
                         isShowingScanner = true
                     } label: {
-                        Label("Scan kpub from M5 Stack", systemImage: "qrcode.viewfinder")
+                        Label("Scan kpub", systemImage: "qrcode.viewfinder")
                     }
                 }
 

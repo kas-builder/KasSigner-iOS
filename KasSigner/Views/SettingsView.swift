@@ -126,7 +126,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Preferences")
                 } footer: {
-                    Text("Checks displayed receive addresses using the public Kaspa API.")
+                    Text("Checks each displayed receive address using the public Kaspa API to determine whether it is fresh or has been used.")
                 }
 
                 Section {
@@ -190,7 +190,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Address Derivation")
                     } footer: {
-                        Text("Extends the watch-only receive and change address pools from the imported kpub. Private keys remain on the M5 KasSigner.")
+                        Text("Extends the watch-only receive and change address pools from the imported kpub. Private keys remain on the signing device.")
                     }
                 }
 
