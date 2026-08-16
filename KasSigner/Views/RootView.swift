@@ -73,7 +73,7 @@ struct RootView: View {
 
             ActivityView()
                 .tag(Tab.activity)
-                .tabItem { Label("Activity", systemImage: "clock.arrow.circlepath") }
+                .tabItem { Label("Transactions", systemImage: "clock.arrow.circlepath") }
 
             PortfolioView()
                 .tag(Tab.portfolio)
@@ -434,8 +434,7 @@ struct UTXOsView: View {
                 } else if utxos.isEmpty {
                     ContentUnavailableView(
                         "No UTXOs",
-                        systemImage: "square.stack.3d.up",
-                        description: Text("This account currently has no spendable outputs.")
+                        systemImage: "square.stack.3d.up"
                     )
                 } else {
                     VStack(spacing: 0) {

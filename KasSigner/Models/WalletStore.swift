@@ -1,11 +1,23 @@
 import Foundation
 
+struct WalletTransaction: Identifiable, Codable, Equatable {
+    let id: UUID
+    let profileID: UUID
+    let transactionID: String
+    let destination: String
+    let amountSompi: UInt64
+    let feeSompi: UInt64
+    let broadcastAt: Date
+}
+
 @MainActor
 final class WalletStore: ObservableObject {
     @Published private(set) var profiles: [WalletProfile] = []
+    @Published private(set) var transactions: [WalletTransaction] = []
     @Published var selectedProfileID: UUID? { didSet { save() } }
 
     private let storageKey = "kassigner.walletProfiles.v1"
+    private let transactionsStorageKey = "kassigner.walletTransactions.v1"
     private let selectionKey = "kassigner.selectedWalletProfile.v1"
     private let receiveIndexKeyPrefix = "kassigner.lastViewedReceiveIndex.v1."
 
@@ -60,6 +72,39 @@ final class WalletStore: ObservableObject {
         )
     }
 
+    func recordBroadcastedTransaction(
+        profileID: UUID,
+        transactionID: String,
+        destination: String,
+        amountSompi: UInt64,
+        feeSompi: UInt64
+    ) {
+        let normalizedTransactionID = transactionID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalizedTransactionID.isEmpty,
+              !transactions.contains(where: {
+                  $0.transactionID.caseInsensitiveCompare(normalizedTransactionID) == .orderedSame
+              })
+        else {
+            return
+        }
+
+        transactions.append(
+            WalletTransaction(
+                id: UUID(),
+                profileID: profileID,
+                transactionID: normalizedTransactionID,
+                destination: destination,
+                amountSompi: amountSompi,
+                feeSompi: feeSompi,
+                broadcastAt: Date()
+            )
+        )
+        save()
+    }
+
     func remove(at offsets: IndexSet) {
         let removedProfileIDs = offsets.compactMap { index in
             profiles.indices.contains(index) ? profiles[index].id : nil
@@ -71,6 +116,8 @@ final class WalletStore: ObservableObject {
             )
         }
 
+        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
+
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
             self.selectedProfileID = profiles.first?.id
@@ -79,22 +126,31 @@ final class WalletStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data)
-        else { return }
-        profiles = decoded
-        if let raw = UserDefaults.standard.string(forKey: selectionKey),
-           let id = UUID(uuidString: raw),
-           decoded.contains(where: { $0.id == id }) {
-            selectedProfileID = id
-        } else {
-            selectedProfileID = decoded.first?.id
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data) {
+            profiles = decoded
+            if let raw = UserDefaults.standard.string(forKey: selectionKey),
+               let id = UUID(uuidString: raw),
+               decoded.contains(where: { $0.id == id }) {
+                selectedProfileID = id
+            } else {
+                selectedProfileID = decoded.first?.id
+            }
+        }
+
+        if let data = UserDefaults.standard.data(forKey: transactionsStorageKey),
+           let decoded = try? JSONDecoder().decode([WalletTransaction].self, from: data) {
+            transactions = decoded
         }
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+        if let data = try? JSONEncoder().encode(profiles) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
+        if let data = try? JSONEncoder().encode(transactions) {
+            UserDefaults.standard.set(data, forKey: transactionsStorageKey)
+        }
         UserDefaults.standard.set(selectedProfileID?.uuidString, forKey: selectionKey)
     }
 }

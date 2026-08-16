@@ -1637,6 +1637,13 @@ private struct VerifiedSigningPreparationView: View {
             )
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
+            walletStore.recordBroadcastedTransaction(
+                profileID: review.profileID,
+                transactionID: transactionID,
+                destination: review.destination,
+                amountSompi: review.amountSompi,
+                feeSompi: review.feeSompi
+            )
             broadcastTransactionID = transactionID
             showingBroadcastSuccess = true
 
