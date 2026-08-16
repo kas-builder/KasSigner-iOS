@@ -85,6 +85,7 @@ struct ReceiveView: View {
     @State private var generationError: String?
     @State private var selectedAddressIndex = 0
     @State private var addressUsageStatus: AddressUsageStatus = .checking
+    @State private var addressWasManuallySelected = false
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -119,6 +120,7 @@ struct ReceiveView: View {
 
                     HStack(spacing: 8) {
                         Button {
+                            addressWasManuallySelected = true
                             withAnimation(.easeInOut(duration: 0.22)) {
                                 selectedAddressIndex = max(0, selectedAddressIndex - 1)
                             }
@@ -178,6 +180,7 @@ struct ReceiveView: View {
                         }
 
                         Button {
+                            addressWasManuallySelected = true
                             withAnimation(.easeInOut(duration: 0.22)) {
                                 selectedAddressIndex = min(
                                     activeProfile.receiveAddresses.count - 1,
@@ -236,21 +239,23 @@ struct ReceiveView: View {
                 )
 
                 Button {
+                    addressWasManuallySelected = true
                     Task {
                         await generateNextReceiveAddress()
                     }
                 } label: {
-                    Text(isGeneratingAddress ? "Generating Address…" : "Generate New Address")
+                    Label(
+                        isGeneratingAddress ? "Generating Address…" : "Generate New Address",
+                        systemImage: isGeneratingAddress
+                            ? "arrow.triangle.2.circlepath"
+                            : "plus.circle"
+                    )
                         .font(.headline)
                         .lineLimit(1)
                         .minimumScaleFactor(0.85)
-                        .frame(maxWidth: .infinity)
+                        .foregroundStyle(.tint)
+                        .frame(minHeight: 44)
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 13)
-                        .background(
-                            .thinMaterial,
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
                 }
                 .buttonStyle(SubtlePressButtonStyle())
                 .disabled(isGeneratingAddress)
@@ -267,7 +272,11 @@ struct ReceiveView: View {
             guard preferences.addressStatusDisplayMode.isEnabled else { return }
             await checkAddressUsage(receiveAddress)
         }
+        .task(id: oldestFreshAddressTaskID) {
+            await selectOldestFreshAddress()
+        }
         .onAppear {
+            addressWasManuallySelected = false
             selectedAddressIndex = min(
                 max(
                     activeProfile.nextReceiveIndex,
@@ -323,6 +332,10 @@ struct ReceiveView: View {
 
     private var addressUsageTaskID: String {
         "\(preferences.addressStatusDisplayMode.rawValue):\(receiveAddress)"
+    }
+
+    private var oldestFreshAddressTaskID: String {
+        "\(profile.id.uuidString):\(activeProfile.receiveAddresses.count)"
     }
 
     @ViewBuilder
@@ -455,6 +468,37 @@ struct ReceiveView: View {
         guard !receiveAddress.isEmpty else { return }
         UIPasteboard.general.string = receiveAddress
         copyFeedbackCenter.show("Address copied")
+    }
+
+    @MainActor
+    private func selectOldestFreshAddress() async {
+        let addresses = activeProfile.receiveAddresses
+        guard !addresses.isEmpty else { return }
+
+        for (index, address) in addresses.enumerated() {
+            guard !addressWasManuallySelected else { return }
+
+            do {
+                let status = try await AddressUsageChecker.shared.status(for: address)
+                try Task.checkCancellation()
+
+                guard !addressWasManuallySelected else { return }
+                guard status == .fresh else { continue }
+
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    selectedAddressIndex = index
+                }
+                addressUsageStatus = .fresh
+                persistSelectedAddressIndex(addressCount: addresses.count)
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                // Without a result for an earlier address, a later address
+                // cannot be identified as the oldest fresh address safely.
+                return
+            }
+        }
     }
 
     @MainActor
