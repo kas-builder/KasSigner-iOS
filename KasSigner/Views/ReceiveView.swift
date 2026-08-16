@@ -467,7 +467,7 @@ struct ReceiveView: View {
     private func copyReceiveAddress() {
         guard !receiveAddress.isEmpty else { return }
         UIPasteboard.general.string = receiveAddress
-        copyFeedbackCenter.show("Address copied")
+        copyFeedbackCenter.showCopied(receiveAddress)
     }
 
     @MainActor

@@ -228,7 +228,7 @@ struct WalletHomeView: View {
         guard !profile.receiveAddresses.isEmpty else { return }
         let address = walletHomeReceiveAddress(for: profile)
         UIPasteboard.general.string = address
-        copyFeedbackCenter.show("Address copied")
+        copyFeedbackCenter.showCopied(address)
     }
 
     private var balanceAmountText: String {

@@ -371,7 +371,7 @@ struct SettingsView: View {
 
     private func copyKpub(_ profile: WalletProfile) {
         UIPasteboard.general.string = profile.kpub
-        copyFeedbackCenter.show("kpub copied")
+        copyFeedbackCenter.showCopied(profile.kpub, label: "kpub")
     }
 
     private func deleteProfile(_ profile: WalletProfile) {
@@ -583,6 +583,6 @@ private struct DonateView: View {
 
     private func copyDonationAddress() {
         UIPasteboard.general.string = donationAddress
-        copyFeedbackCenter.show("Address copied")
+        copyFeedbackCenter.showCopied(donationAddress)
     }
 }

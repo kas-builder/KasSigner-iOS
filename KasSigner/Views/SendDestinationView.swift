@@ -1148,7 +1148,7 @@ private struct VerifiedTransactionSummaryCards: View {
 
                 Button {
                     UIPasteboard.general.string = review.destination
-                    copyFeedbackCenter.show("Destination copied")
+                    copyFeedbackCenter.showCopied(review.destination)
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.subheadline.weight(.semibold))
