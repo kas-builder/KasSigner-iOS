@@ -164,10 +164,6 @@ struct SettingsView: View {
                     }
 
                     statusRow
-
-                    if let snapshot = syncService.snapshot {
-                        LabeledContent("Active Node", value: nodeHost(snapshot.nodeURL))
-                    }
                 } header: {
                     Text("Network & Node")
                 } footer: {
@@ -333,10 +329,6 @@ struct SettingsView: View {
             preferences: preferences,
             force: true
         )
-    }
-
-    private func nodeHost(_ nodeURL: String) -> String {
-        URL(string: nodeURL)?.host ?? nodeURL
     }
 
     private func primaryMenuIcon(_ systemName: String) -> UIImage {
