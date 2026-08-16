@@ -201,20 +201,39 @@ struct ReceiveView: View {
                     }
                 }
 
-                Button {
-                    copyReceiveAddress()
-                } label: {
-                    Text(twoLineReceiveAddress)
-                        .font(.system(size: 12.35, weight: .regular, design: .monospaced))
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.center)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity)
-                        .contentShape(Rectangle())
+                HStack(spacing: 12) {
+                    Button {
+                        copyReceiveAddress()
+                    } label: {
+                        Text(twoLineReceiveAddress)
+                            .font(.system(size: 14, weight: .regular, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityHint("Copies the full receive address")
+
+                    Button {
+                        copyReceiveAddress()
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.title3.weight(.semibold))
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityLabel("Copy receive address")
                 }
-                .buttonStyle(SubtlePressButtonStyle())
-                .accessibilityHint("Copies the full receive address")
+                .padding(.leading, 16)
+                .padding(.trailing, 8)
+                .padding(.vertical, 10)
+                .background(
+                    .thinMaterial,
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
 
                 Button {
                     Task {
