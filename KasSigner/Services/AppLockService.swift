@@ -115,6 +115,10 @@ final class AppLockService: ObservableObject {
         await authenticate(reason: "Change Privacy Cover settings")
     }
 
+    func authorizeProtectedVaultCreation() async -> Bool {
+        await authenticate(reason: "Confirm creation of this Protected Vault")
+    }
+
     func suspendPrivacyCoverForCurrentSession() {
         isPrivacyCoverSuspendedForSession = true
     }

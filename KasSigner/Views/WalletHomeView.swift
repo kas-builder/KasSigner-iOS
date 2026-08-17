@@ -4,6 +4,9 @@ import UIKit
 struct WalletHomeView: View {
     private enum WalletRoute: Hashable {
         case receive(UUID)
+        case programmableUTXOTypes(UUID)
+        case createTimeLockedUTXO(UUID)
+        case createProtectedVault(UUID)
     }
 
     @State private var navigationPath = NavigationPath()
@@ -63,6 +66,26 @@ struct WalletHomeView: View {
                             systemImage: "wallet.pass",
                             description: Text("Return to the Wallet screen and select an account.")
                         )
+                    }
+                case .programmableUTXOTypes(let profileID):
+                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
+                        programmableUTXOTypeSelection(profile)
+                    } else {
+                        unavailableAccountView
+                    }
+                case .createTimeLockedUTXO(let profileID):
+                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
+                        CreateTimeLockedUTXOView(
+                            returnAddress: walletHomeReceiveAddress(for: profile)
+                        )
+                    } else {
+                        unavailableAccountView
+                    }
+                case .createProtectedVault(let profileID):
+                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
+                        CreateProtectedVaultView(profile: profile)
+                    } else {
+                        unavailableAccountView
                     }
                 }
             }
@@ -168,6 +191,16 @@ struct WalletHomeView: View {
                     .buttonStyle(.bordered)
                 }
 
+                Button {
+                    navigationPath.append(WalletRoute.programmableUTXOTypes(profile.id))
+                } label: {
+                    Text("Create Programmable UTXO")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                }
+                .buttonStyle(.bordered)
+
                 if let snapshot = syncService.snapshot {
                     VStack(alignment: .leading, spacing: 12) {
                         LabeledContent("UTXOs", value: "\(snapshot.balance.utxoCount)")
@@ -209,6 +242,30 @@ struct WalletHomeView: View {
                 showingSendFlow: $showingSendFlow
             )
         }
+    }
+
+    private func programmableUTXOTypeSelection(_ profile: WalletProfile) -> some View {
+        List {
+            Section("Types") {
+                NavigationLink(value: WalletRoute.createTimeLockedUTXO(profile.id)) {
+                    Label("Time-Locked UTXO", systemImage: "clock.badge.checkmark")
+                }
+
+                NavigationLink(value: WalletRoute.createProtectedVault(profile.id)) {
+                    Label("Protected Vault", systemImage: "lock.shield")
+                }
+            }
+        }
+        .navigationTitle("Programmable UTXO")
+        .navigationBarTitleDisplayMode(.large)
+    }
+
+    private var unavailableAccountView: some View {
+        ContentUnavailableView(
+            "Account Unavailable",
+            systemImage: "wallet.pass",
+            description: Text("Return to the Wallet screen and select an account.")
+        )
     }
 
     private func walletHomeReceiveAddress(for profile: WalletProfile) -> String {
@@ -295,6 +352,445 @@ struct WalletHomeView: View {
         if minutes < 60 { return "\(minutes) min ago" }
         let hours = minutes / 60
         return "\(hours) hr ago"
+    }
+}
+
+private struct CreateTimeLockedUTXOView: View {
+    let returnAddress: String
+
+    @State private var amountText = ""
+    @State private var unlockDate = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
+
+    private var amountIsValid: Bool {
+        guard let amount = Decimal(string: amountText), amount > 0 else { return false }
+        return true
+    }
+
+    var body: some View {
+        Form {
+            Section("Amount") {
+                HStack {
+                    TextField("0", text: $amountText)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+
+                    Text("KAS")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Unlock Date & Time") {
+                DatePicker(
+                    "Unlock",
+                    selection: $unlockDate,
+                    in: Date.now...,
+                    displayedComponents: [.date, .hourAndMinute]
+                )
+            }
+
+            Section("Return Address") {
+                Text(returnAddress)
+                    .font(.footnote.monospaced())
+                    .textSelection(.enabled)
+            }
+
+            Section("Summary") {
+                LabeledContent("Amount", value: amountSummary)
+                LabeledContent(
+                    "Unlocks",
+                    value: unlockDate.formatted(date: .abbreviated, time: .shortened)
+                )
+                LabeledContent("Estimated Fee", value: "—")
+            }
+
+            Section {
+                Button("Review Time Lock") {
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(!amountIsValid || unlockDate <= .now)
+            }
+        }
+        .navigationTitle("Create Time-Locked UTXO")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var amountSummary: String {
+        amountIsValid ? "\(amountText) KAS" : "—"
+    }
+}
+
+private struct CreateProtectedVaultView: View {
+    let profile: WalletProfile
+
+    @State private var amountText = ""
+    @State private var addressDraft = ""
+    @State private var approvedAddresses: [String] = []
+    @State private var delayDays = 30
+    @State private var delayHours = 0
+    @State private var delayMinutes = 0
+    @State private var showingScanner = false
+    @State private var showingReview = false
+
+    private var amountIsValid: Bool {
+        guard let amount = Decimal(string: amountText), amount > 0 else { return false }
+        return true
+    }
+
+    private var delayIsValid: Bool {
+        delayDays > 0 || delayHours > 0 || delayMinutes > 0
+    }
+
+    private var normalizedDraft: String {
+        normalizeAddress(addressDraft)
+    }
+
+    private var draftCanBeAdded: Bool {
+        normalizedDraft.hasPrefix("kaspa:")
+            && normalizedDraft.count > "kaspa:".count
+            && !approvedAddresses.contains(normalizedDraft)
+    }
+
+    var body: some View {
+        Form {
+            Section("Deposit") {
+                LabeledContent("Amount") {
+                    HStack(spacing: 6) {
+                        TextField("0", text: $amountText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+
+                        Text("KAS")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Section("Approved Addresses") {
+                ForEach(approvedAddresses, id: \.self) { address in
+                    HStack(spacing: 12) {
+                        Text(address)
+                            .font(.footnote.monospaced())
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Spacer()
+
+                        Button(role: .destructive) {
+                            approvedAddresses.removeAll { $0 == address }
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                TextField("kaspa:...", text: $addressDraft, axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.subheadline, design: .monospaced))
+                    .lineLimit(2...4)
+
+                HStack(spacing: 10) {
+                    Button {
+                        addressDraft = normalizeAddress(UIPasteboard.general.string ?? "")
+                    } label: {
+                        Label("Paste", systemImage: "doc.on.clipboard")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        showingScanner = true
+                    } label: {
+                        Label("Scan QR", systemImage: "qrcode.viewfinder")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Button("Add Approved Address") {
+                    approvedAddresses.append(normalizedDraft)
+                    addressDraft = ""
+                }
+                .frame(maxWidth: .infinity)
+                .disabled(!draftCanBeAdded)
+            }
+
+            Section {
+                delayPicker("Days", selection: $delayDays, range: 0...365)
+                delayPicker("Hours", selection: $delayHours, range: 0...23)
+                delayPicker("Minutes", selection: $delayMinutes, range: 0...59)
+            } header: {
+                Text("Security Delay")
+            } footer: {
+                Text("Unapproved withdrawals and changes to approved addresses remain cancellable for this delay.")
+            }
+
+            Section("How It Works") {
+                vaultBehaviorRow(
+                    title: "Approved destinations",
+                    detail: "Withdrawals can be sent immediately.",
+                    systemImage: "checkmark.shield"
+                )
+
+                vaultBehaviorRow(
+                    title: "Other destinations",
+                    detail: "Withdrawals must wait for the full security delay.",
+                    systemImage: "clock.badge.exclamationmark"
+                )
+
+                vaultBehaviorRow(
+                    title: "Cancellation window",
+                    detail: "Delayed withdrawals and approved-address changes can be cancelled during the delay.",
+                    systemImage: "arrow.uturn.backward.circle"
+                )
+            }
+
+            Section {
+                Button {
+                    showingReview = true
+                } label: {
+                    Text("Review Protected Vault")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(!amountIsValid || approvedAddresses.isEmpty || !delayIsValid)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        }
+        .navigationTitle("Create Protected Vault")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(isPresented: $showingReview) {
+            ReviewProtectedVaultView(
+                amountText: amountText,
+                approvedAddresses: approvedAddresses,
+                delayDays: delayDays,
+                delayHours: delayHours,
+                delayMinutes: delayMinutes
+            )
+        }
+        .sheet(isPresented: $showingScanner) {
+            QRScannerView { scannedValue in
+                addressDraft = normalizeAddress(scannedValue)
+                showingScanner = false
+            }
+        }
+    }
+
+    private func delayPicker(
+        _ title: String,
+        selection: Binding<Int>,
+        range: ClosedRange<Int>
+    ) -> some View {
+        LabeledContent(title) {
+            Picker(title, selection: selection) {
+                ForEach(range, id: \.self) { value in
+                    Text("\(value)").tag(value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+        }
+    }
+
+    private func normalizeAddress(_ rawValue: String) -> String {
+        rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: "kaspa://",
+                with: "kaspa:",
+                options: [.caseInsensitive]
+            )
+    }
+
+    private func vaultBehaviorRow(
+        title: String,
+        detail: String,
+        systemImage: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: systemImage)
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.medium))
+
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 3)
+    }
+}
+
+private struct ReviewProtectedVaultView: View {
+    let amountText: String
+    let approvedAddresses: [String]
+    let delayDays: Int
+    let delayHours: Int
+    let delayMinutes: Int
+
+    @State private var showingFinalConfirmation = false
+
+    var body: some View {
+        Form {
+            Section("Vault Summary") {
+                LabeledContent("Deposit", value: "\(amountText) KAS")
+                LabeledContent("Approved Addresses", value: "\(approvedAddresses.count)")
+                LabeledContent("Security Delay", value: delaySummary)
+                LabeledContent("Estimated Fee", value: "—")
+            }
+
+            Section("Approved Destinations") {
+                ForEach(Array(approvedAddresses.enumerated()), id: \.offset) { index, address in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Address #\(index + 1)")
+                            .font(.subheadline.weight(.medium))
+
+                        Text(address)
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+
+            Section {
+                Label {
+                    Text("Review every address and the security delay carefully. These settings define how the vault can be spent.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                .font(.footnote)
+            }
+
+            Section {
+                Button {
+                    showingFinalConfirmation = true
+                } label: {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        }
+        .navigationTitle("Review Protected Vault")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationDestination(isPresented: $showingFinalConfirmation) {
+            ConfirmProtectedVaultView(
+                amountText: amountText,
+                approvedAddresses: approvedAddresses,
+                delaySummary: delaySummary
+            )
+        }
+    }
+
+    private var delaySummary: String {
+        var components: [String] = []
+        if delayDays > 0 {
+            components.append("\(delayDays) \(delayDays == 1 ? "day" : "days")")
+        }
+        if delayHours > 0 {
+            components.append("\(delayHours) \(delayHours == 1 ? "hour" : "hours")")
+        }
+        if delayMinutes > 0 {
+            components.append("\(delayMinutes) \(delayMinutes == 1 ? "minute" : "minutes")")
+        }
+        return components.joined(separator: ", ")
+    }
+}
+
+private struct ConfirmProtectedVaultView: View {
+    let amountText: String
+    let approvedAddresses: [String]
+    let delaySummary: String
+
+    @EnvironmentObject private var appLockService: AppLockService
+    @State private var identityConfirmed = false
+
+    var body: some View {
+        Form {
+            Section("Final Confirmation") {
+                LabeledContent("Deposit", value: "\(amountText) KAS")
+                LabeledContent("Approved Addresses", value: "\(approvedAddresses.count)")
+                LabeledContent("Security Delay", value: delaySummary)
+                LabeledContent("Estimated Fee", value: "—")
+            }
+
+            Section("Approved Destinations") {
+                ForEach(Array(approvedAddresses.enumerated()), id: \.offset) { index, address in
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Address #\(index + 1)")
+                            .font(.subheadline.weight(.medium))
+
+                        Text(address)
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+
+            Section {
+                Label {
+                    Text("Confirm the deposit, approved destinations, and security delay before continuing.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+                .font(.footnote)
+            }
+
+            if identityConfirmed {
+                Section {
+                    Label("Identity Confirmed", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .frame(maxWidth: .infinity)
+                }
+            } else {
+                Section {
+                    Button {
+                        Task {
+                            if await appLockService.authorizeProtectedVaultCreation() {
+                                identityConfirmed = true
+                            }
+                        }
+                    } label: {
+                        Label(
+                            "Confirm with \(appLockService.biometricName)",
+                            systemImage: "faceid"
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .disabled(appLockService.isAuthenticating)
+                }
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+            }
+
+            if let authenticationError = appLockService.authenticationError {
+                Section {
+                    Text(authenticationError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+        .navigationTitle("Confirm Protected Vault")
+        .navigationBarTitleDisplayMode(.inline)
     }
 }
 
