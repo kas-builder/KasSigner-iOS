@@ -920,7 +920,7 @@ struct SendDestinationView: View {
     }
 }
 
-private struct VerifiedTransactionReview: Identifiable, Hashable {
+struct VerifiedTransactionReview: Identifiable, Hashable {
     let id = UUID()
     let profileID: UUID
     let destination: String
@@ -1238,7 +1238,7 @@ private struct VerifiedTransactionSummaryCards: View {
 }
 
 
-private struct VerifiedSigningPreparationView: View {
+struct VerifiedSigningPreparationView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
@@ -1246,6 +1246,23 @@ private struct VerifiedSigningPreparationView: View {
 
     let review: VerifiedTransactionReview
     let onComplete: () -> Void
+    let onBroadcastComplete: ((String) -> Void)?
+    let protectedVaultMode: Bool
+    let protectedVaultApprovedSpend: Bool
+
+    init(
+        review: VerifiedTransactionReview,
+        protectedVaultMode: Bool = false,
+        protectedVaultApprovedSpend: Bool = false,
+        onBroadcastComplete: ((String) -> Void)? = nil,
+        onComplete: @escaping () -> Void
+    ) {
+        self.review = review
+        self.protectedVaultMode = protectedVaultMode
+        self.protectedVaultApprovedSpend = protectedVaultApprovedSpend
+        self.onBroadcastComplete = onBroadcastComplete
+        self.onComplete = onComplete
+    }
 
     @State private var qrFrames: [KasSeeQRFrame] = []
     @State private var frameIndex = 0
@@ -1312,6 +1329,8 @@ private struct VerifiedSigningPreparationView: View {
                 BroadcastSuccessView(
                     transactionID: transactionID,
                     onDone: {
+                        showingBroadcastSuccess = false
+                        onBroadcastComplete?(transactionID)
                         onComplete()
                     }
                 )
@@ -1351,8 +1370,26 @@ private struct VerifiedSigningPreparationView: View {
             } else if showingBroadcastReview {
                 VStack(spacing: 20) {
                     VerifiedTransactionSummaryCards(review: review)
+                    if protectedVaultMode {
+                        Label(
+                            "M5 signatures present and transaction contents verified",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
 
+                        Text("Broadcast only after confirming the M5 review matched this funding transaction.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                     broadcastButton
+
+                    if let scanErrorMessage {
+                        Text(scanErrorMessage)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .multilineTextAlignment(.center)
+                    }
                 }
             } else if let currentFrame {
                 Text("Scan with KasSigner M5")
@@ -1608,21 +1645,6 @@ private struct VerifiedSigningPreparationView: View {
             return
         }
 
-        guard let snapshot = syncService.snapshot else {
-            scanErrorMessage =
-                "No active Kaspa node is available for broadcasting."
-            return
-        }
-
-        let wsURL = snapshot.nodeURL
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-
-        guard !wsURL.isEmpty else {
-            scanErrorMessage =
-                "No active Kaspa node is available for broadcasting."
-            return
-        }
-
         isBroadcastingSignedTransaction = true
         scanErrorMessage = nil
 
@@ -1631,11 +1653,45 @@ private struct VerifiedSigningPreparationView: View {
         }
 
         do {
-            let transactionID = try await engine.broadcastSignedKSPT(
-                signedKSPTHex: signedKSPTForBroadcast,
-                wsURL: wsURL
+            if protectedVaultMode {
+                guard let signedPayload else {
+                    throw KasSignerEngine.EngineError.javascript(
+                        "The verified signed transaction is no longer available."
+                    )
+                }
+
+                let unsignedSummary = try await engine.summarizePSKB(
+                    review.unsignedPSKB
+                )
+                let signedSummary = try await engine.summarizePSKB(
+                    signedPayload
+                )
+                try SignedProtectedVaultFundingVerifier.verify(
+                    unsigned: unsignedSummary,
+                    signed: signedSummary
+                )
+                if protectedVaultApprovedSpend {
+                    try await engine.verifyProtectedVaultApprovedSignature(signedPayload)
+                } else {
+                    try await engine.verifyStandardPSKBSignatures(signedPayload)
+                }
+            }
+
+            let rawTransactionID: String
+            if protectedVaultMode, let signedPayload {
+                rawTransactionID = try await engine.broadcastSignedPSKB(
+                    signedPayload,
+                    nodeConfiguration: preferences.nodeConfiguration
+                )
+            } else {
+                rawTransactionID = try await engine.broadcastSignedKSPT(
+                    signedKSPTHex: signedKSPTForBroadcast,
+                    nodeConfiguration: preferences.nodeConfiguration
+                )
+            }
+            let transactionID = rawTransactionID.trimmingCharacters(
+                in: CharacterSet.whitespacesAndNewlines
             )
-            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
             broadcastTransactionID = transactionID
             showingBroadcastSuccess = true
@@ -1684,19 +1740,11 @@ private struct VerifiedSigningPreparationView: View {
                 let signedKSPT = completedPayload
                     .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
-
-                let mergedPSKB = try await engine.mergeSignedKSPTIntoPSKB(
-                    signedKSPTHex: signedKSPT,
-                    originalPSKBHex: review.unsignedPSKB
-                )
-
-                signedKSPTForBroadcast = signedKSPT
-                signedPayload = mergedPSKB
-                signedScanFeedback = .accepted
-
-
+                // A complete decoder result is terminal for this scan. Close
+                // the camera before doing any post-scan validation so later
+                // camera callbacks cannot turn a completed scan red.
                 showingSignedQRScanner = false
-                showingBroadcastReview = true
+                signedScanFeedback = .accepted
                 decoderProgressCount = max(
                     decoderProgressTotal,
                     lastProgressCount
@@ -1708,6 +1756,36 @@ private struct VerifiedSigningPreparationView: View {
                         decoderBits.count
                     )
                 )
+
+                let mergedPSKB = try await engine.mergeSignedKSPTIntoPSKB(
+                    signedKSPTHex: signedKSPT,
+                    originalPSKBHex: review.unsignedPSKB
+                )
+
+                if protectedVaultMode {
+                    let unsignedSummary = try await engine.summarizePSKB(
+                        review.unsignedPSKB
+                    )
+                    let signedSummary = try await engine.summarizePSKB(
+                        mergedPSKB
+                    )
+                    try SignedProtectedVaultFundingVerifier.verify(
+                        unsigned: unsignedSummary,
+                        signed: signedSummary
+                    )
+                    if protectedVaultApprovedSpend {
+                        try await engine.verifyProtectedVaultApprovedSignature(mergedPSKB)
+                    } else {
+                        try await engine.verifyStandardPSKBSignatures(mergedPSKB)
+                    }
+                }
+
+                // Protected Vault transactions must stay in canonical PSKB form
+                // through submission so version-1 compute budgets and covenant
+                // output bindings cannot be discarded by the legacy KSPT path.
+                signedKSPTForBroadcast = signedKSPT
+                signedPayload = mergedPSKB
+                showingBroadcastReview = true
                 return
             }
 
@@ -1745,12 +1823,17 @@ private struct VerifiedSigningPreparationView: View {
             }
 
         } catch {
-            signedScanFeedback = .rejected
+            if showingSignedQRScanner {
+                signedScanFeedback = .rejected
+            }
             scanErrorMessage = error.localizedDescription
 
-
-            // Permit the same displayed M5 frame to be retried after an error.
-            lastScannedFrame = nil
+            if showingSignedQRScanner {
+                // Permit the same displayed M5 frame to be retried after a
+                // frame-level decode error. Completed payload failures stay
+                // closed and are reported on the signing screen.
+                lastScannedFrame = nil
+            }
         }
     }
 

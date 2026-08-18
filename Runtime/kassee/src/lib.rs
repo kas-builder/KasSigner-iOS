@@ -51,6 +51,9 @@ mod vault_api;
 mod zk_api;
 mod zkproof;
 
+#[cfg(feature = "protected-vault-verification")]
+pub use kspt::{build_protected_vault_pending_script, build_protected_vault_script};
+
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -452,6 +455,188 @@ pub async fn create_send_pskb_with_utxos(
     .map_err(|e| JsValue::from_str(&e))
 }
 
+/// Build an unsigned Protected Vault genesis PSKB from an exact wallet-input set.
+/// Output 0 is covenant-tagged and output 1, when present, is ordinary wallet change.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub async fn create_protected_vault_funding_pskb_with_utxos(
+    wallet_json: &str,
+    vault_address: &str,
+    amount_sompi: u64,
+    fee_sompi: u64,
+    utxos_json: &str,
+) -> Result<String, JsValue> {
+    let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let selected: Vec<rpc::UtxoEntry> = serde_json::from_str::<Vec<serde_json::Value>>(utxos_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad UTXOs JSON: {}", e)))?
+        .iter()
+        .map(|v| {
+            let script_public_key = if let Some(bytes) = v["script_public_key"].as_array() {
+                bytes
+                    .iter()
+                    .filter_map(|b| b.as_u64().map(|n| n as u8))
+                    .collect()
+            } else {
+                v["script_public_key"]
+                    .as_str()
+                    .and_then(|s| hex::decode(s).ok())
+                    .unwrap_or_default()
+            };
+            rpc::UtxoEntry {
+                tx_id: v["tx_id"].as_str().unwrap_or_default().to_string(),
+                index: v["index"].as_u64().unwrap_or_default() as u32,
+                amount: v["amount"].as_u64().unwrap_or_default(),
+                script_public_key,
+                block_daa_score: v["block_daa_score"].as_u64().unwrap_or_default(),
+                covenant_id: None,
+            }
+        })
+        .collect();
+
+    if selected.is_empty() {
+        return Err(JsValue::from_str(
+            "Protected Vault funding requires at least one input",
+        ));
+    }
+    if selected.len() > kspt::MAX_STANDARD_INPUTS {
+        return Err(JsValue::from_str(
+            "Protected Vault funding has too many inputs",
+        ));
+    }
+    let total = selected
+        .iter()
+        .try_fold(0u64, |sum, u| sum.checked_add(u.amount))
+        .ok_or_else(|| JsValue::from_str("Protected Vault funding input total overflow"))?;
+    let required = amount_sompi
+        .checked_add(fee_sompi)
+        .ok_or_else(|| JsValue::from_str("Protected Vault funding amount overflow"))?;
+    if total < required {
+        return Err(JsValue::from_str(
+            "Protected Vault funding inputs do not cover deposit and fee",
+        ));
+    }
+
+    let vault_spk =
+        address::address_to_script_pubkey(vault_address).map_err(|e| JsValue::from_str(&e))?;
+    if vault_spk.len() != 35
+        || vault_spk[0] != 0xaa
+        || vault_spk[1] != 0x20
+        || vault_spk[34] != 0x87
+    {
+        return Err(JsValue::from_str(
+            "Protected Vault funding destination is not P2SH",
+        ));
+    }
+
+    let first_txid: [u8; 32] = hex::decode(&selected[0].tx_id)
+        .map_err(|e| JsValue::from_str(&format!("Bad funding outpoint: {}", e)))?
+        .try_into()
+        .map_err(|_| JsValue::from_str("Funding transaction id is not 32 bytes"))?;
+    let covenant_id = kspt::compute_covenant_id(
+        &first_txid,
+        selected[0].index,
+        &[(0u32, amount_sompi, 0u16, vault_spk.as_slice())],
+    );
+
+    let mut outputs = vec![kspt::PskbOutput {
+        amount: amount_sompi,
+        script: vault_spk,
+        covenant: Some((0, covenant_id)),
+    }];
+    let change = total - required;
+    if change > 0 {
+        let change_address = wallet
+            .change_addresses
+            .get(wallet.next_change_index)
+            .ok_or_else(|| JsValue::from_str("No unused wallet change address is available"))?;
+        outputs.push(kspt::PskbOutput {
+            amount: change,
+            script: address::address_to_script_pubkey(change_address)
+                .map_err(|e| JsValue::from_str(&e))?,
+            covenant: None,
+        });
+    }
+
+    kspt::serialize_pskb_with_covenants(&selected, &outputs).map_err(|e| JsValue::from_str(&e))
+}
+
+/// Build the one-input/one-output approved-destination spend for a funded
+/// Protected Vault. The destination output remains authorized by the input's
+/// covenant id, as required by OP_AUTH_OUTPUT_* in the redeem script.
+#[wasm_bindgen]
+pub fn create_protected_vault_approved_spend_pskb(
+    utxo_json: &str,
+    redeem_script_hex: &str,
+    approved_address: &str,
+    fee_sompi: u64,
+) -> Result<String, JsValue> {
+    let utxo: rpc::UtxoEntry = serde_json::from_str(utxo_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad vault UTXO: {}", e)))?;
+    let covenant_id_hex = utxo
+        .covenant_id
+        .as_deref()
+        .ok_or_else(|| JsValue::from_str("Vault UTXO is missing its covenant id"))?;
+    let covenant_id = hex_to_32(covenant_id_hex, "covenant id")?;
+    let normalized_covenant_id = hex::encode(covenant_id);
+    if utxo.amount <= fee_sompi {
+        return Err(JsValue::from_str("Vault balance does not cover the fee"));
+    }
+    let redeem = hex::decode(redeem_script_hex)
+        .map_err(|e| JsValue::from_str(&format!("Bad vault redeem script: {}", e)))?;
+    if redeem.is_empty() || redeem.len() > 1024 {
+        return Err(JsValue::from_str("Vault redeem script has an invalid size"));
+    }
+    if kspt::protected_vault_p2sh_script(&redeem) != utxo.script_public_key {
+        return Err(JsValue::from_str(
+            "Vault redeem script does not match the funded output",
+        ));
+    }
+    let approved_spk =
+        address::address_to_script_pubkey(approved_address).map_err(|e| JsValue::from_str(&e))?;
+    let output_amount = utxo.amount - fee_sompi;
+    let owner_pubkey = redeem
+        .get(1..33)
+        .filter(|_| redeem.first() == Some(&0x20) && redeem.get(33) == Some(&0xad))
+        .ok_or_else(|| {
+            JsValue::from_str("Vault redeem script has an unsupported owner key layout")
+        })?;
+    let owner_key_hex = format!("02{}", hex::encode(owner_pubkey));
+
+    let pskt = serde_json::json!({
+        "global": {
+            "version": 0u8, "txVersion": 1u16, "fallbackLockTime": serde_json::Value::Null,
+            "inputsModifiable": false, "outputsModifiable": false,
+            "inputCount": 1u16, "outputCount": 1u16, "xpubs": {}, "id": serde_json::Value::Null,
+            "proprietaries": { "protectedVaultPath": "approved" }
+        },
+        "inputs": [{
+            "utxoEntry": {
+                "amount": utxo.amount,
+                "scriptPublicKey": format!("0000{}", hex::encode(&utxo.script_public_key)),
+                "blockDaaScore": utxo.block_daa_score, "isCoinbase": false
+            },
+            "previousOutpoint": { "transactionId": utxo.tx_id, "index": utxo.index },
+            "sequence": 0u64, "minTime": serde_json::Value::Null, "partialSigs": {},
+            "sighashType": 1u8, "redeemScript": hex::encode(&redeem), "sigOpCount": 1u8,
+            "bip32Derivations": { owner_key_hex: { "masterFingerprint": "00000000", "path": [] } },
+            "finalScriptSig": serde_json::Value::Null,
+            "proprietaries": { "protectedVaultApproved": true }
+        }],
+        "outputs": [{
+            "amount": output_amount,
+            "scriptPublicKey": format!("0000{}", hex::encode(&approved_spk)),
+            "covenantBinding": { "authorizingInput": 0u16, "covenantId": normalized_covenant_id },
+            "redeemScript": serde_json::Value::Null, "bip32Derivations": {}, "proprietaries": {}
+        }]
+    });
+    let json = serde_json::to_vec(&serde_json::Value::Array(vec![pskt]))
+        .map_err(|e| JsValue::from_str(&format!("Serialize vault spend: {}", e)))?;
+    let mut wire = b"PSKB".to_vec();
+    wire.extend_from_slice(hex::encode(json).as_bytes());
+    Ok(hex::encode(wire))
+}
+
 /// Create compound unsigned PSKB: multiple recipients.
 #[wasm_bindgen]
 pub async fn create_compound_pskb(
@@ -560,6 +745,27 @@ pub fn pskt_summary(wire_hex: &str, network: &str) -> Result<String, JsValue> {
     serde_json::to_string(&summary).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Verify every standard P2PK input signature in a signed PSKB against the
+/// exact Kaspa SIGHASH_ALL digest committed by that transaction.
+#[wasm_bindgen]
+pub fn pskt_verify_standard_signatures(wire_hex: &str) -> Result<bool, JsValue> {
+    pskt::verify_standard_p2pk_signatures(wire_hex)
+        .map(|_| true)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[wasm_bindgen]
+pub fn pskt_verify_protected_vault_approved_signature(wire_hex: &str) -> Result<bool, JsValue> {
+    pskt::verify_protected_vault_approved_signature(wire_hex)
+        .map(|_| true)
+        .map_err(|e| JsValue::from_str(&e))
+}
+
+#[doc(hidden)]
+pub fn verify_standard_p2pk_signatures_native(wire_hex: &str) -> Result<(), String> {
+    pskt::verify_standard_p2pk_signatures(wire_hex)
+}
+
 /// Finalize a fully-signed PSKT/PSKB into a signed KSPT v2 hex blob
 /// that the existing `broadcast_signed` RPC path can consume directly.
 ///
@@ -641,6 +847,59 @@ pub fn encode_p2sh_address(
     arr.copy_from_slice(&bytes);
     let prefix = network_to_prefix(network.as_deref().unwrap_or("mainnet"));
     Ok(address::encode_p2sh_address(&arr, prefix))
+}
+
+/// Derive the deterministic Protected Vault V1 descriptor for an M5-signable
+/// receive key at account path /0/index. This is derivation only: no transaction
+/// is created, signed, or broadcast.
+#[wasm_bindgen]
+pub fn derive_protected_vault_v1(
+    kpub_str: &str,
+    receive_index: u32,
+    approved_address: &str,
+    delay_daa: u64,
+) -> Result<String, JsValue> {
+    let account = bip32::ExtPubKey::from_kpub(kpub_str).map_err(|e| JsValue::from_str(&e))?;
+    let owner = account
+        .derive_child(0)
+        .and_then(|chain| chain.derive_child(receive_index))
+        .map_err(|e| JsValue::from_str(&e))?;
+    let owner_pubkey = owner.x_only_bytes();
+
+    let (version, approved_payload) =
+        address::decode_address(approved_address).map_err(|e| JsValue::from_str(&e))?;
+    if version != 0 {
+        return Err(JsValue::from_str(
+            "Protected Vault V1 supports only a P2PK approved destination",
+        ));
+    }
+
+    let mut approved_spk = vec![0x00, 0x00, 0x20];
+    approved_spk.extend_from_slice(&approved_payload);
+    approved_spk.push(0xac);
+
+    let redeem_script = kspt::build_protected_vault_script(
+        &owner_pubkey,
+        &approved_spk,
+        delay_daa,
+        kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    let vault_spk = kspt::protected_vault_p2sh_spk(&redeem_script);
+    let mut script_hash = [0u8; 32];
+    script_hash.copy_from_slice(&vault_spk[4..36]);
+    let vault_address = address::encode_p2sh_address(&script_hash, "kaspa");
+
+    serde_json::to_string(&serde_json::json!({
+        "owner_derivation_index": receive_index,
+        "owner_derivation_path": format!("/0/{}", receive_index),
+        "owner_public_key": hex::encode(owner_pubkey),
+        "redeem_script_hex": hex::encode(&redeem_script),
+        "script_hash_hex": hex::encode(script_hash),
+        "vault_address": vault_address,
+        "delay_daa": delay_daa,
+    }))
+    .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Decode a Kaspa address → JSON { version, payload_hex }

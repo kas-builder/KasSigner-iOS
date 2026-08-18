@@ -130,7 +130,7 @@ impl ExtPubKey {
     }
 
     /// Get the x-only (Schnorr) public key bytes (32 bytes)
-    fn x_only_bytes(&self) -> [u8; 32] {
+    pub(crate) fn x_only_bytes(&self) -> [u8; 32] {
         let point = self.key.to_encoded_point(true);
         let compressed = point.as_bytes(); // 33 bytes: [prefix][x]
         let mut x = [0u8; 32];

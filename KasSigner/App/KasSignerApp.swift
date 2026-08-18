@@ -12,6 +12,7 @@ struct KasSignerApp: App {
     @StateObject private var priceService = PriceService.shared
     @StateObject private var appLockService = AppLockService()
     @StateObject private var copyFeedbackCenter = CopyFeedbackCenter()
+    @StateObject private var protectedVaultStore = ProtectedVaultStore()
 
     var body: some Scene {
         WindowGroup {
@@ -39,6 +40,7 @@ struct KasSignerApp: App {
             .environmentObject(priceService)
             .environmentObject(appLockService)
             .environmentObject(copyFeedbackCenter)
+            .environmentObject(protectedVaultStore)
             .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
             .task {
                 await priceService.prepareHistoricalPrices()

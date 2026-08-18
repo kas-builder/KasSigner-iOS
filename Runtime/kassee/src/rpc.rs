@@ -648,6 +648,87 @@ fn rd_u64(b: &[u8], pos: &mut usize) -> Result<u64, String> {
     ))
 }
 
+fn rd_kspt_script_len(b: &[u8], pos: &mut usize) -> Result<usize, String> {
+    let first = rd_u8(b, pos)?;
+    if first == 0xff {
+        Ok(rd_u16(b, pos)? as usize)
+    } else {
+        Ok(first as usize)
+    }
+}
+
+fn rd_kspt_redeem_len(b: &[u8], pos: &mut usize, version: u8) -> Result<usize, String> {
+    if version == 0x03 {
+        Ok(rd_u16(b, pos)? as usize)
+    } else {
+        Ok(rd_u8(b, pos)? as usize)
+    }
+}
+
+#[cfg(test)]
+mod kspt_length_tests {
+    use super::{
+        rd_kspt_redeem_len, rd_kspt_script_len, serialize_rpc_transaction_input, ConsensusInput,
+    };
+
+    #[test]
+    fn v3_zero_redeem_length_consumes_both_bytes_before_outputs() {
+        let bytes = [0x00, 0x00, 0x22];
+        let mut position = 0;
+        assert_eq!(rd_kspt_redeem_len(&bytes, &mut position, 0x03), Ok(0));
+        assert_eq!(position, 2);
+        assert_eq!(bytes[position], 0x22);
+    }
+
+    #[test]
+    fn extended_script_length_consumes_marker_and_u16() {
+        let bytes = [0xff, 0x23, 0x01];
+        let mut position = 0;
+        assert_eq!(rd_kspt_script_len(&bytes, &mut position), Ok(0x0123));
+        assert_eq!(position, 3);
+    }
+
+    #[test]
+    fn version_one_rpc_input_zeros_sigop_and_serializes_compute_budget() {
+        let input = ConsensusInput {
+            prev_tx_id: [7; 32],
+            prev_index: 3,
+            sig_script: vec![1, 2, 3],
+            sequence: 0,
+            sig_op_count: 1,
+        };
+        let encoded = serialize_rpc_transaction_input(1, &input).unwrap();
+
+        assert_eq!(encoded[0], 2); // RpcTransactionInput serializer version
+        assert_eq!(u32::from_le_bytes(encoded[1..5].try_into().unwrap()), 37);
+        let signature_length_offset = 5 + 37;
+        let signature_length = u32::from_le_bytes(
+            encoded[signature_length_offset..signature_length_offset + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let sigop_offset = signature_length_offset + 4 + signature_length + 8;
+        assert_eq!(encoded[sigop_offset], 0);
+        assert_eq!(
+            u32::from_le_bytes(
+                encoded[sigop_offset + 1..sigop_offset + 5]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
+        assert_eq!(encoded[sigop_offset + 5], 0); // verbose_data = None
+        assert_eq!(
+            u16::from_le_bytes(
+                encoded[sigop_offset + 6..sigop_offset + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            10
+        );
+    }
+}
+
 pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, String> {
     let bytes = hex::decode(signed_hex).map_err(|e| format!("Invalid hex: {}", e))?;
 
@@ -657,10 +738,14 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
     let version = bytes[4];
     let flags = bytes[5];
 
+    if !matches!(version, 0x01 | 0x02 | 0x03) {
+        return Err(format!("Unsupported KSPT version: 0x{:02x}", version));
+    }
+
     if version == 0x01 && flags != 0x01 {
         return Err(format!("Not signed (flags={:#x}, expected 0x01)", flags));
     }
-    if version == 0x02 && flags == 0x00 {
+    if matches!(version, 0x02 | 0x03) && flags == 0x00 {
         return Err("Partially signed KSPT — needs more signatures".into());
     }
 
@@ -712,7 +797,7 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
         let sequence = rd_u64(&bytes, &mut pos)?;
         let sig_op_count = rd_u8(&bytes, &mut pos)?;
         let _spk_version = rd_u16(&bytes, &mut pos)?;
-        let spk_len = rd_u8(&bytes, &mut pos)? as usize;
+        let spk_len = rd_kspt_script_len(&bytes, &mut pos)?;
         let spk_script = rd_take(&bytes, &mut pos, spk_len)
             .map_err(|_| "KSPT truncated at spk".to_string())?
             .to_vec();
@@ -769,9 +854,8 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
                 sigs.sort_by_key(|s| s.0);
 
                 // Redeem script — read it first to get M
-                let rs_len = rd_u8(&bytes, &mut pos)
-                    .map_err(|_| "KSPT truncated at redeem script".to_string())?
-                    as usize;
+                let rs_len = rd_kspt_redeem_len(&bytes, &mut pos, version)
+                    .map_err(|_| "KSPT truncated at redeem script".to_string())?;
                 let redeem_script = if rs_len > 0 {
                     let rs = rd_take(&bytes, &mut pos, rs_len)
                         .map_err(|_| "KSPT truncated at redeem data".to_string())?;
@@ -803,9 +887,14 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
                     if is_p2sh {
                         if rs.len() <= 75 {
                             sig_script.push(rs.len() as u8);
-                        } else {
+                        } else if rs.len() <= u8::MAX as usize {
                             sig_script.push(0x4C); // OP_PUSHDATA1
                             sig_script.push(rs.len() as u8);
+                        } else if rs.len() <= u16::MAX as usize {
+                            sig_script.push(0x4D); // OP_PUSHDATA2
+                            sig_script.extend_from_slice(&(rs.len() as u16).to_le_bytes());
+                        } else {
+                            return Err("Redeem script is too large".into());
                         }
                         sig_script.extend_from_slice(rs);
                     }
@@ -826,9 +915,10 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
                 // input's byte stream, later reads are bounds-checked)
                 pos = pos.saturating_add(66 * (sig_count - 1));
                 // Skip redeem script
-                if let Ok(rs_len) = rd_u8(&bytes, &mut pos) {
-                    pos = pos.saturating_add(rs_len as usize);
-                }
+                let rs_len = rd_kspt_redeem_len(&bytes, &mut pos, version)
+                    .map_err(|_| "KSPT truncated at redeem script".to_string())?;
+                rd_take(&bytes, &mut pos, rs_len)
+                    .map_err(|_| "KSPT truncated at redeem data".to_string())?;
             }
         }
 
@@ -853,8 +943,8 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
         let value = rd_u64(&bytes, &mut pos).map_err(|_| "KSPT truncated at output".to_string())?;
         let spk_version =
             rd_u16(&bytes, &mut pos).map_err(|_| "KSPT truncated at output".to_string())?;
-        let spk_len =
-            rd_u8(&bytes, &mut pos).map_err(|_| "KSPT truncated at output".to_string())? as usize;
+        let spk_len = rd_kspt_script_len(&bytes, &mut pos)
+            .map_err(|_| "KSPT truncated at output".to_string())?;
         let spk_script = rd_take(&bytes, &mut pos, spk_len)
             .map_err(|_| "KSPT truncated at output spk".to_string())?
             .to_vec();
@@ -879,20 +969,14 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
         let mut inputs_buf = Vec::new();
         bw_u32(&mut inputs_buf, num_inputs as u32).unwrap();
         for inp in &inputs {
-            let mut inp_buf = Vec::new();
-            bw_u8(&mut inp_buf, 1).unwrap(); // input version
-
-            let mut op_buf = Vec::new();
-            bw_u8(&mut op_buf, 1).unwrap(); // outpoint version
-            op_buf.extend_from_slice(&inp.prev_tx_id);
-            bw_u32(&mut op_buf, inp.prev_index).unwrap();
-            bw_bytes(&mut inp_buf, &op_buf).unwrap();
-
-            bw_bytes(&mut inp_buf, &inp.sig_script).unwrap();
-            bw_u64(&mut inp_buf, inp.sequence).unwrap();
-            bw_u8(&mut inp_buf, inp.sig_op_count).unwrap();
-
-            bw_bytes(&mut inp_buf, &[0u8]).unwrap(); // None verbose data
+            let consensus_input = ConsensusInput {
+                prev_tx_id: inp.prev_tx_id,
+                prev_index: inp.prev_index,
+                sig_script: inp.sig_script.clone(),
+                sequence: inp.sequence,
+                sig_op_count: inp.sig_op_count,
+            };
+            let inp_buf = serialize_rpc_transaction_input(tx_version, &consensus_input)?;
 
             bw_bytes(&mut inputs_buf, &inp_buf).unwrap();
         }
@@ -1030,6 +1114,35 @@ pub struct ConsensusInput {
     pub sig_op_count: u8,
 }
 
+fn serialize_rpc_transaction_input(
+    tx_version: u16,
+    input: &ConsensusInput,
+) -> Result<Vec<u8>, String> {
+    let mut encoded = Vec::new();
+    let input_struct_version = if tx_version >= 1 { 2 } else { 1 };
+    bw_u8(&mut encoded, input_struct_version).map_err(|e| e.to_string())?;
+
+    let mut outpoint = Vec::new();
+    bw_u8(&mut outpoint, 1).map_err(|e| e.to_string())?;
+    outpoint.extend_from_slice(&input.prev_tx_id);
+    bw_u32(&mut outpoint, input.prev_index).map_err(|e| e.to_string())?;
+    bw_bytes(&mut encoded, &outpoint).map_err(|e| e.to_string())?;
+    bw_bytes(&mut encoded, &input.sig_script).map_err(|e| e.to_string())?;
+    bw_u64(&mut encoded, input.sequence).map_err(|e| e.to_string())?;
+
+    let (sig_op_count, compute_budget) = if tx_version >= 1 {
+        (0, (input.sig_op_count as u16) * 10)
+    } else {
+        (input.sig_op_count, 0)
+    };
+    bw_u8(&mut encoded, sig_op_count).map_err(|e| e.to_string())?;
+    bw_bytes(&mut encoded, &[0u8]).map_err(|e| e.to_string())?;
+    if input_struct_version >= 2 {
+        bw_u16(&mut encoded, compute_budget).map_err(|e| e.to_string())?;
+    }
+    Ok(encoded)
+}
+
 /// One consensus-layer output, ready for Borsh serialization.
 #[derive(Clone)]
 pub struct ConsensusOutput {
@@ -1068,18 +1181,6 @@ pub async fn submit_consensus_tx(
         let mut inputs_buf = Vec::new();
         bw_u32(&mut inputs_buf, inputs.len() as u32).unwrap();
         for (idx, inp) in inputs.iter().enumerate() {
-            let mut inp_buf = Vec::new();
-            bw_u8(&mut inp_buf, 2).unwrap(); // input version 2 (with compute_budget)
-
-            let mut op_buf = Vec::new();
-            bw_u8(&mut op_buf, 1).unwrap(); // outpoint version
-            op_buf.extend_from_slice(&inp.prev_tx_id);
-            bw_u32(&mut op_buf, inp.prev_index).unwrap();
-            bw_bytes(&mut inp_buf, &op_buf).unwrap();
-
-            bw_bytes(&mut inp_buf, &inp.sig_script).unwrap();
-            bw_u64(&mut inp_buf, inp.sequence).unwrap();
-
             // TX version >= 1 uses compute_budget (sig_op_count must be 0).
             // TX version 0 uses sig_op_count (compute_budget must be 0).
             //
@@ -1111,10 +1212,7 @@ pub async fn submit_consensus_tx(
             )
                 .into(),
             );
-            bw_u8(&mut inp_buf, soc).unwrap();
-
-            bw_bytes(&mut inp_buf, &[0u8]).unwrap(); // None verbose data
-            bw_u16(&mut inp_buf, cb).unwrap(); // compute_budget (version 2 field)
+            let inp_buf = serialize_rpc_transaction_input(tx_version, inp)?;
             bw_bytes(&mut inputs_buf, &inp_buf).unwrap();
         }
         bw_bytes(&mut tx_buf, &inputs_buf).unwrap();

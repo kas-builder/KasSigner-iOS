@@ -50,6 +50,27 @@ cp "$STAGING_DIR/generated/kassee_web_bg.wasm" \
 
 node --check "$STAGING_DIR/kassee_tx.js"
 
+for REQUIRED_EXPORT in \
+    create_send_pskb_with_utxos \
+    create_protected_vault_funding_pskb_with_utxos \
+    create_protected_vault_approved_spend_pskb \
+    pskt_summary \
+    pskt_relay_to_kspt_v2 \
+    pskt_merge_signed_kspt_v2 \
+    pskt_verify_standard_signatures \
+    pskt_verify_protected_vault_approved_signature \
+    pskt_finalize_to_kspt \
+    pskt_finalize_and_broadcast \
+    broadcast_signed
+do
+    if ! grep -Fq "export function $REQUIRED_EXPORT" \
+        "$STAGING_DIR/kassee_tx.js"
+    then
+        echo "Missing required transaction export: $REQUIRED_EXPORT" >&2
+        exit 1
+    fi
+done
+
 TRANSACTION_VERSION=$(shasum -a 256 "$STAGING_DIR/kassee_tx_bg.wasm" | awk '{print substr($1, 1, 16)}')
 VERSION_LINE_COUNT=$(grep -Ec 'const transactionRuntimeVersion = "[0-9a-f]+";' "$BRIDGE_FILE")
 

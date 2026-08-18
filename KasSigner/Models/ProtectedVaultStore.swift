@@ -1,0 +1,591 @@
+import Foundation
+
+struct ProtectedVault: Identifiable, Codable, Equatable {
+    enum Status: String, Codable {
+        case localDraft
+        case fundingBroadcast
+        case active
+        case incompatibleFunding
+        case spent
+
+        var title: String {
+            switch self {
+            case .localDraft: "Local Draft"
+            case .fundingBroadcast: "Funding Broadcast"
+            case .active: "Active Vault"
+            case .incompatibleFunding: "Untagged Funding"
+            case .spent: "Spent"
+            }
+        }
+    }
+
+    let id: UUID
+    let profileID: UUID
+    let amount: Decimal
+    let approvedAddress: String
+    let delayDays: Int
+    let delayHours: Int
+    let delayMinutes: Int
+    let ownerDerivationIndex: Int?
+    let ownerPublicKey: String?
+    let redeemScriptHex: String?
+    let vaultAddress: String?
+    let createdAt: Date
+    let status: Status
+    let fundingTransactionID: String?
+    let fundedAt: Date?
+    let lockedSompi: UInt64?
+    let fundingOutpoints: [String]
+    let covenantIDs: [String]
+
+    init(
+        id: UUID = UUID(),
+        profileID: UUID,
+        amount: Decimal,
+        approvedAddress: String,
+        delayDays: Int,
+        delayHours: Int,
+        delayMinutes: Int,
+        ownerDerivationIndex: Int? = nil,
+        ownerPublicKey: String? = nil,
+        redeemScriptHex: String? = nil,
+        vaultAddress: String? = nil,
+        createdAt: Date = .now,
+        status: Status = .localDraft,
+        fundingTransactionID: String? = nil,
+        fundedAt: Date? = nil,
+        lockedSompi: UInt64? = nil,
+        fundingOutpoints: [String] = [],
+        covenantIDs: [String] = []
+    ) {
+        self.id = id
+        self.profileID = profileID
+        self.amount = amount
+        self.approvedAddress = approvedAddress
+        self.delayDays = delayDays
+        self.delayHours = delayHours
+        self.delayMinutes = delayMinutes
+        self.ownerDerivationIndex = ownerDerivationIndex
+        self.ownerPublicKey = ownerPublicKey
+        self.redeemScriptHex = redeemScriptHex
+        self.vaultAddress = vaultAddress
+        self.createdAt = createdAt
+        self.status = status
+        self.fundingTransactionID = fundingTransactionID
+        self.fundedAt = fundedAt
+        self.lockedSompi = lockedSompi
+        self.fundingOutpoints = fundingOutpoints
+        self.covenantIDs = covenantIDs
+    }
+
+    var delaySummary: String {
+        var components: [String] = []
+        if delayDays > 0 {
+            components.append("\(delayDays) \(delayDays == 1 ? "day" : "days")")
+        }
+        if delayHours > 0 {
+            components.append("\(delayHours) \(delayHours == 1 ? "hour" : "hours")")
+        }
+        if delayMinutes > 0 {
+            components.append("\(delayMinutes) \(delayMinutes == 1 ? "minute" : "minutes")")
+        }
+        return components.joined(separator: ", ")
+    }
+
+    var lockedAmount: Decimal? {
+        lockedSompi.map { Decimal($0) / Decimal(100_000_000) }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, profileID, amount, approvedAddress, delayDays, delayHours
+        case delayMinutes, ownerDerivationIndex, ownerPublicKey, redeemScriptHex
+        case vaultAddress, createdAt, status, fundingTransactionID, fundedAt
+        case lockedSompi, fundingOutpoints, covenantIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        profileID = try values.decode(UUID.self, forKey: .profileID)
+        amount = try values.decode(Decimal.self, forKey: .amount)
+        approvedAddress = try values.decode(String.self, forKey: .approvedAddress)
+        delayDays = try values.decode(Int.self, forKey: .delayDays)
+        delayHours = try values.decode(Int.self, forKey: .delayHours)
+        delayMinutes = try values.decode(Int.self, forKey: .delayMinutes)
+        ownerDerivationIndex = try values.decodeIfPresent(Int.self, forKey: .ownerDerivationIndex)
+        ownerPublicKey = try values.decodeIfPresent(String.self, forKey: .ownerPublicKey)
+        redeemScriptHex = try values.decodeIfPresent(String.self, forKey: .redeemScriptHex)
+        vaultAddress = try values.decodeIfPresent(String.self, forKey: .vaultAddress)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        status = try values.decodeIfPresent(Status.self, forKey: .status) ?? .localDraft
+        fundingTransactionID = try values.decodeIfPresent(String.self, forKey: .fundingTransactionID)
+        fundedAt = try values.decodeIfPresent(Date.self, forKey: .fundedAt)
+        lockedSompi = try values.decodeIfPresent(UInt64.self, forKey: .lockedSompi)
+        fundingOutpoints = try values.decodeIfPresent([String].self, forKey: .fundingOutpoints) ?? []
+        covenantIDs = try values.decodeIfPresent([String].self, forKey: .covenantIDs) ?? []
+    }
+}
+
+struct ProtectedVaultDescriptor: Decodable, Equatable {
+    let ownerDerivationIndex: Int
+    let ownerDerivationPath: String
+    let ownerPublicKey: String
+    let redeemScriptHex: String
+    let scriptHashHex: String
+    let vaultAddress: String
+    let delayDAA: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case ownerDerivationIndex = "owner_derivation_index"
+        case ownerDerivationPath = "owner_derivation_path"
+        case ownerPublicKey = "owner_public_key"
+        case redeemScriptHex = "redeem_script_hex"
+        case scriptHashHex = "script_hash_hex"
+        case vaultAddress = "vault_address"
+        case delayDAA = "delay_daa"
+    }
+}
+
+struct ProtectedVaultFundingPlan: Equatable {
+    let inputs: [WalletUTXO]
+    let depositSompi: UInt64
+    let feeSompi: UInt64
+    let inputTotalSompi: UInt64
+    let changeSompi: UInt64
+
+    init(vault: ProtectedVault, inputs: [WalletUTXO], feeSompi: UInt64) throws {
+        guard !inputs.isEmpty else {
+            throw ProtectedVaultFundingPlanError.noInputs
+        }
+        guard inputs.count <= UTXOCoinControlStore.maximumSelectedUTXOs else {
+            throw ProtectedVaultFundingPlanError.tooManyInputs
+        }
+        guard Set(inputs.map(\.id)).count == inputs.count else {
+            throw ProtectedVaultFundingPlanError.duplicateInput
+        }
+        guard feeSompi > 0 else {
+            throw ProtectedVaultFundingPlanError.invalidFee
+        }
+
+        var sourceAmount = vault.amount
+        var scaledAmount = Decimal()
+        var roundedAmount = Decimal()
+        NSDecimalMultiplyByPowerOf10(&scaledAmount, &sourceAmount, 8, .plain)
+        NSDecimalRound(&roundedAmount, &scaledAmount, 0, .plain)
+
+        guard scaledAmount == roundedAmount,
+              roundedAmount > 0,
+              roundedAmount <= Decimal(UInt64.max)
+        else {
+            throw ProtectedVaultFundingPlanError.invalidDepositAmount
+        }
+
+        let depositSompi = NSDecimalNumber(decimal: roundedAmount).uint64Value
+        var inputTotalSompi: UInt64 = 0
+        for input in inputs {
+            let addition = inputTotalSompi.addingReportingOverflow(input.amount)
+            guard !addition.overflow else {
+                throw ProtectedVaultFundingPlanError.inputTotalOverflow
+            }
+            inputTotalSompi = addition.partialValue
+        }
+
+        let required = depositSompi.addingReportingOverflow(feeSompi)
+        guard !required.overflow, inputTotalSompi >= required.partialValue else {
+            throw ProtectedVaultFundingPlanError.insufficientInput
+        }
+
+        self.inputs = inputs
+        self.depositSompi = depositSompi
+        self.feeSompi = feeSompi
+        self.inputTotalSompi = inputTotalSompi
+        self.changeSompi = inputTotalSompi - required.partialValue
+    }
+}
+
+enum ProtectedVaultFundingPlanError: LocalizedError, Equatable {
+    case noInputs
+    case tooManyInputs
+    case duplicateInput
+    case invalidFee
+    case invalidDepositAmount
+    case inputTotalOverflow
+    case insufficientInput
+
+    var errorDescription: String? {
+        switch self {
+        case .noInputs:
+            return "Select at least one funding UTXO."
+        case .tooManyInputs:
+            return "A funding transaction can use at most 8 selected UTXOs."
+        case .duplicateInput:
+            return "The funding selection contains a duplicate UTXO."
+        case .invalidFee:
+            return "The funding fee must be greater than zero."
+        case .invalidDepositAmount:
+            return "The vault deposit must be a positive amount with no more than 8 decimal places."
+        case .inputTotalOverflow:
+            return "The selected UTXO total is too large."
+        case .insufficientInput:
+            return "The selected UTXOs cannot cover the vault deposit and fee."
+        }
+    }
+}
+
+struct ProtectedVaultFundingSelectionSession: Equatable {
+    private(set) var profileID: UUID?
+
+    mutating func begin(profileID: UUID) -> Bool {
+        guard self.profileID != profileID else { return false }
+        self.profileID = profileID
+        return true
+    }
+}
+
+struct VerifiedProtectedVaultFunding: Equatable {
+    let depositSompi: UInt64
+    let feeSompi: UInt64
+    let changeSompi: UInt64
+    let inputCount: Int
+    let selectedOutpoints: [String]
+}
+
+enum ProtectedVaultFundingVerificationError: LocalizedError, Equatable {
+    case inputCountMismatch
+    case missingInputOutpoint
+    case inputOutpointMismatch
+    case missingOutputs
+    case invalidOutput
+    case depositMismatch
+    case unknownOutput
+    case invalidFeeArithmetic
+    case exactFeeMismatch
+    case changeAddressUnavailable
+    case changeMismatch
+    case missingCovenantBinding
+
+    var errorDescription: String? {
+        switch self {
+        case .inputCountMismatch:
+            return "The built transaction input count does not match the selected UTXOs."
+        case .missingInputOutpoint:
+            return "The built transaction contains an input without a valid outpoint."
+        case .inputOutpointMismatch:
+            return "The built transaction inputs do not exactly match the selected UTXOs."
+        case .missingOutputs:
+            return "The built transaction contains no outputs."
+        case .invalidOutput:
+            return "The built transaction contains an invalid output."
+        case .depositMismatch:
+            return "The built transaction does not contain exactly one matching vault deposit."
+        case .unknownOutput:
+            return "The built transaction contains an unknown output."
+        case .invalidFeeArithmetic:
+            return "The built transaction fee arithmetic is invalid."
+        case .exactFeeMismatch:
+            return "The fee encoded in the transaction does not match the custom fee you entered."
+        case .changeAddressUnavailable:
+            return "No unused wallet change address is available."
+        case .changeMismatch:
+            return "The built transaction change does not match the expected unused wallet change address."
+        case .missingCovenantBinding:
+            return "The vault deposit is missing its required consensus covenant binding."
+        }
+    }
+}
+
+enum ProtectedVaultFundingVerifier {
+    static func verify(
+        summary: PSKTSummary,
+        plan: ProtectedVaultFundingPlan,
+        vaultAddress: String,
+        expectedChangeAddress: String?,
+        requiresExactFee: Bool
+    ) throws -> VerifiedProtectedVaultFunding {
+        guard let inputs = summary.inputs,
+              inputs.count == plan.inputs.count,
+              summary.inputCount == nil || summary.inputCount == inputs.count
+        else {
+            throw ProtectedVaultFundingVerificationError.inputCountMismatch
+        }
+
+        let selectedOutpoints = Set(plan.inputs.map {
+            "\($0.txID.lowercased()):\($0.index)"
+        })
+        let builtOutpoints = Set(try inputs.map { input -> String in
+            guard let txID = input.txID?.lowercased(), let index = input.index else {
+                throw ProtectedVaultFundingVerificationError.missingInputOutpoint
+            }
+            return "\(txID):\(index)"
+        })
+        guard builtOutpoints == selectedOutpoints else {
+            throw ProtectedVaultFundingVerificationError.inputOutpointMismatch
+        }
+
+        guard let outputs = summary.outputs, !outputs.isEmpty,
+              summary.outputCount == nil || summary.outputCount == outputs.count
+        else {
+            throw ProtectedVaultFundingVerificationError.missingOutputs
+        }
+
+        let normalizedVaultAddress = normalize(vaultAddress)
+        let normalizedChangeAddress = expectedChangeAddress.map(normalize)
+        var depositMatches = 0
+        var changeMatches = 0
+
+        for output in outputs {
+            guard let address = output.address.map(normalize),
+                  let amount = output.amountSompi,
+                  amount > 0
+            else {
+                throw ProtectedVaultFundingVerificationError.invalidOutput
+            }
+
+            if address == normalizedVaultAddress && amount == plan.depositSompi {
+                guard summary.transactionVersion == 1,
+                      output.covenantAuthorizingInput == 0,
+                      output.covenantID?.count == 64,
+                      output.covenantID?.allSatisfy(\.isHexDigit) == true
+                else {
+                    throw ProtectedVaultFundingVerificationError.missingCovenantBinding
+                }
+                depositMatches += 1
+            } else if let normalizedChangeAddress,
+                      address == normalizedChangeAddress {
+                guard output.covenantAuthorizingInput == nil,
+                      output.covenantID == nil else {
+                    throw ProtectedVaultFundingVerificationError.unknownOutput
+                }
+                changeMatches += 1
+            } else {
+                throw ProtectedVaultFundingVerificationError.unknownOutput
+            }
+        }
+
+        guard depositMatches == 1 else {
+            throw ProtectedVaultFundingVerificationError.depositMismatch
+        }
+
+        guard let totalInput = summary.totalInputSompi,
+              let totalOutput = summary.totalOutputSompi,
+              let fee = summary.feeSompi,
+              totalInput == plan.inputTotalSompi,
+              totalInput >= totalOutput,
+              totalInput - totalOutput == fee
+        else {
+            throw ProtectedVaultFundingVerificationError.invalidFeeArithmetic
+        }
+
+        if requiresExactFee && fee != plan.feeSompi {
+            throw ProtectedVaultFundingVerificationError.exactFeeMismatch
+        }
+
+        let remainder = totalInput.subtractingReportingOverflow(plan.depositSompi)
+        guard !remainder.overflow else {
+            throw ProtectedVaultFundingVerificationError.invalidFeeArithmetic
+        }
+        let change = remainder.partialValue.subtractingReportingOverflow(fee)
+        guard !change.overflow else {
+            throw ProtectedVaultFundingVerificationError.invalidFeeArithmetic
+        }
+
+        if change.partialValue > 0 {
+            guard expectedChangeAddress != nil else {
+                throw ProtectedVaultFundingVerificationError.changeAddressUnavailable
+            }
+            guard changeMatches == 1,
+                  outputs.contains(where: {
+                      $0.address.map(normalize) == normalizedChangeAddress
+                          && $0.amountSompi == change.partialValue
+                  })
+            else {
+                throw ProtectedVaultFundingVerificationError.changeMismatch
+            }
+        } else if changeMatches != 0 {
+            throw ProtectedVaultFundingVerificationError.changeMismatch
+        }
+
+        return VerifiedProtectedVaultFunding(
+            depositSompi: plan.depositSompi,
+            feeSompi: fee,
+            changeSompi: change.partialValue,
+            inputCount: inputs.count,
+            selectedOutpoints: plan.inputs.map { "\($0.txID):\($0.index)" }
+        )
+    }
+
+    private static func normalize(_ address: String) -> String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+enum SignedProtectedVaultFundingVerificationError: LocalizedError, Equatable {
+    case transactionChanged
+    case missingSignatures
+
+    var errorDescription: String? {
+        switch self {
+        case .transactionChanged:
+            return "The returned signed transaction does not match the verified unsigned funding transaction."
+        case .missingSignatures:
+            return "The returned transaction is missing a required M5 signature."
+        }
+    }
+}
+
+enum SignedProtectedVaultFundingVerifier {
+    static func verify(unsigned: PSKTSummary, signed: PSKTSummary) throws {
+        guard unsigned.totalInputSompi == signed.totalInputSompi,
+              unsigned.totalOutputSompi == signed.totalOutputSompi,
+              unsigned.feeSompi == signed.feeSompi,
+              unsigned.inputCount == signed.inputCount,
+              unsigned.outputCount == signed.outputCount,
+              transactionInputs(unsigned.inputs) == transactionInputs(signed.inputs),
+              transactionOutputs(unsigned.outputs) == transactionOutputs(signed.outputs)
+        else {
+            throw SignedProtectedVaultFundingVerificationError.transactionChanged
+        }
+
+        guard signed.finalizeReady == true,
+              signed.inputs?.allSatisfy({ ($0.signaturesPresent ?? 0) >= 1 }) == true
+        else {
+            throw SignedProtectedVaultFundingVerificationError.missingSignatures
+        }
+    }
+
+    private static func transactionInputs(
+        _ inputs: [PSKTSummaryInput]?
+    ) -> [String]? {
+        inputs?.map {
+            [
+                $0.txID?.lowercased() ?? "",
+                $0.index.map(String.init) ?? "",
+                $0.amountSompi.map(String.init) ?? "",
+                $0.scriptHex?.lowercased() ?? ""
+            ].joined(separator: ":")
+        }
+    }
+
+    private static func transactionOutputs(
+        _ outputs: [PSKTSummaryOutput]?
+    ) -> [String]? {
+        outputs?.map {
+            [
+                $0.amountSompi.map(String.init) ?? "",
+                $0.scriptHex?.lowercased() ?? "",
+                $0.address?.lowercased() ?? "",
+                $0.covenantAuthorizingInput.map(String.init) ?? "",
+                $0.covenantID?.lowercased() ?? ""
+            ].joined(separator: ":")
+        }
+    }
+}
+
+@MainActor
+final class ProtectedVaultStore: ObservableObject {
+    @Published private(set) var vaults: [ProtectedVault] = []
+
+    private let storageKey = "kassigner.protectedVaults.v1"
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        load()
+    }
+
+    func vaults(for profileID: UUID) -> [ProtectedVault] {
+        vaults
+            .filter { $0.profileID == profileID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func add(_ vault: ProtectedVault) {
+        guard !vaults.contains(where: { $0.id == vault.id }) else { return }
+        vaults.append(vault)
+        save()
+    }
+
+    func remove(id: UUID) {
+        vaults.removeAll { $0.id == id }
+        save()
+    }
+
+    func recordFundingBroadcast(id: UUID, transactionID: String) {
+        update(id: id) { vault in
+            replacing(vault, status: .fundingBroadcast,
+                fundingTransactionID: transactionID, fundedAt: vault.fundedAt ?? .now,
+                lockedSompi: vault.lockedSompi, fundingOutpoints: vault.fundingOutpoints,
+                covenantIDs: vault.covenantIDs)
+        }
+    }
+
+    func recordApprovedSpend(id: UUID) {
+        update(id: id) { vault in
+            replacing(
+                vault, status: .spent,
+                fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                lockedSompi: 0, fundingOutpoints: [], covenantIDs: []
+            )
+        }
+    }
+
+    func updateOnChainFunding(id: UUID, utxos: [WalletUTXO]) {
+        var total: UInt64 = 0
+        for utxo in utxos {
+            let addition = total.addingReportingOverflow(utxo.amount)
+            guard !addition.overflow else { return }
+            total = addition.partialValue
+        }
+        update(id: id) { vault in
+            let covenantIDs = utxos.compactMap(\.covenantID).sorted()
+            let onChainStatus: ProtectedVault.Status
+            if utxos.isEmpty {
+                onChainStatus = vault.status == .spent
+                    ? .spent
+                    : (vault.fundingTransactionID == nil ? .localDraft : .fundingBroadcast)
+            } else if covenantIDs.count == utxos.count {
+                onChainStatus = .active
+            } else {
+                onChainStatus = .incompatibleFunding
+            }
+            return replacing(vault,
+                status: onChainStatus,
+                fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                lockedSompi: total, fundingOutpoints: utxos.map(\.id).sorted(),
+                covenantIDs: covenantIDs)
+        }
+    }
+
+    private func update(id: UUID, transform: (ProtectedVault) -> ProtectedVault) {
+        guard let index = vaults.firstIndex(where: { $0.id == id }) else { return }
+        vaults[index] = transform(vaults[index])
+        save()
+    }
+
+    private func replacing(_ vault: ProtectedVault, status: ProtectedVault.Status,
+                           fundingTransactionID: String?, fundedAt: Date?,
+                           lockedSompi: UInt64?, fundingOutpoints: [String],
+                           covenantIDs: [String]) -> ProtectedVault {
+        ProtectedVault(id: vault.id, profileID: vault.profileID, amount: vault.amount,
+            approvedAddress: vault.approvedAddress, delayDays: vault.delayDays,
+            delayHours: vault.delayHours, delayMinutes: vault.delayMinutes,
+            ownerDerivationIndex: vault.ownerDerivationIndex, ownerPublicKey: vault.ownerPublicKey,
+            redeemScriptHex: vault.redeemScriptHex, vaultAddress: vault.vaultAddress,
+            createdAt: vault.createdAt, status: status,
+            fundingTransactionID: fundingTransactionID, fundedAt: fundedAt,
+            lockedSompi: lockedSompi, fundingOutpoints: fundingOutpoints,
+            covenantIDs: covenantIDs)
+    }
+
+    private func load() {
+        guard let data = defaults.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([ProtectedVault].self, from: data)
+        else { return }
+        vaults = decoded
+    }
+
+    private func save() {
+        guard let data = try? JSONEncoder().encode(vaults) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}

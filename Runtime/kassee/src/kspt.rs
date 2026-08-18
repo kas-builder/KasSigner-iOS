@@ -2303,6 +2303,10 @@ fn push_data(script: &mut Vec<u8>, data: &[u8]) {
 mod covenant_builders;
 pub use covenant_builders::*;
 
+#[path = "kspt_protected_vault.rs"]
+mod protected_vault;
+pub use protected_vault::*;
+
 pub fn covenant_script_to_address(redeem_script: &[u8], prefix: &str) -> Result<String, String> {
     let script_hash = blake2b_hash(redeem_script);
     Ok(crate::address::encode_p2sh_address(&script_hash, prefix))

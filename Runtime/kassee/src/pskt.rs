@@ -272,6 +272,9 @@ pub struct OutputSummary {
     /// Decoded Kaspa address when the script is a recognized P2PK/P2SH
     /// form — saves the JS side from reimplementing address encoding.
     pub address: Option<String>,
+    /// Consensus covenant binding carried by this output, when present.
+    pub covenant_authorizing_input: Option<u16>,
+    pub covenant_id: Option<String>,
 }
 
 /// Everything the UI needs to render a PSKB review screen.
@@ -327,6 +330,244 @@ pub fn parse_summary(wire_hex: &str, network_prefix: &str) -> Result<PsktSummary
     };
 
     parse_pskt_object(&pskt_obj, format, network_prefix)
+}
+
+/// Cryptographically verify every standard P2PK signature in a PSKB.
+/// This is intentionally narrow: Protected Vault initial funding has ordinary
+/// wallet P2PK inputs and no covenant-bound outputs. Anything else fails closed.
+pub fn verify_standard_p2pk_signatures(wire_hex: &str) -> Result<(), String> {
+    verify_pskb_signatures(wire_hex, false)
+}
+
+pub fn verify_protected_vault_approved_signature(wire_hex: &str) -> Result<(), String> {
+    verify_pskb_signatures(wire_hex, true)
+}
+
+fn verify_pskb_signatures(wire_hex: &str, protected_vault_approved: bool) -> Result<(), String> {
+    let format = detect_format_hex(wire_hex);
+    if format == PsktFormat::Unknown {
+        return Err("Not a PSKT/PSKB payload".into());
+    }
+    let wire = hex::decode(wire_hex).map_err(|e| format!("outer hex: {}", e))?;
+    let json_bytes = hex::decode(wire.get(4..).ok_or("payload too short")?)
+        .map_err(|e| format!("inner hex: {}", e))?;
+    let root: Value =
+        serde_json::from_slice(&json_bytes).map_err(|e| format!("JSON parse: {}", e))?;
+    let pskt = match format {
+        PsktFormat::Pskb => root
+            .as_array()
+            .and_then(|a| (a.len() == 1).then(|| &a[0]))
+            .ok_or("PSKB must contain exactly one transaction")?,
+        PsktFormat::PsktSingle => &root,
+        PsktFormat::Unknown => unreachable!(),
+    };
+    let global = pskt
+        .get("global")
+        .and_then(Value::as_object)
+        .ok_or("missing global")?;
+    let tx_version = global
+        .get("txVersion")
+        .and_then(Value::as_u64)
+        .ok_or("missing txVersion")? as u16;
+    let inputs = pskt
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or("missing inputs")?;
+    let outputs = pskt
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or("missing outputs")?;
+    if inputs.is_empty() {
+        return Err("no inputs".into());
+    }
+
+    let params = || {
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(b"TransactionSigningHash")
+            .to_state()
+    };
+    let finish = |state: blake2b_simd::State| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(state.finalize().as_bytes());
+        out
+    };
+    let parse_input =
+        |input: &Value| -> Result<(Vec<u8>, u32, u64, u64, u8, u16, Vec<u8>), String> {
+            let op = input.get("previousOutpoint").ok_or("missing outpoint")?;
+            let txid = hex::decode(
+                op.get("transactionId")
+                    .and_then(Value::as_str)
+                    .ok_or("missing txid")?,
+            )
+            .map_err(|e| format!("txid hex: {}", e))?;
+            if txid.len() != 32 {
+                return Err("txid not 32 bytes".into());
+            }
+            let index = op
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("missing index")? as u32;
+            let sequence = input.get("sequence").and_then(Value::as_u64).unwrap_or(0);
+            let sigop = input.get("sigOpCount").and_then(Value::as_u64).unwrap_or(1) as u8;
+            let utxo = input.get("utxoEntry").ok_or("missing utxoEntry")?;
+            let amount = utxo
+                .get("amount")
+                .and_then(Value::as_u64)
+                .ok_or("missing amount")?;
+            let (version, script) = parse_spk_hex(
+                utxo.get("scriptPublicKey")
+                    .and_then(Value::as_str)
+                    .ok_or("missing input script")?,
+            )?;
+            Ok((txid, index, amount, sequence, sigop, version, script))
+        };
+    let parsed_inputs = inputs
+        .iter()
+        .map(parse_input)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut prev = params();
+    let mut seq = params();
+    let mut sigops = params();
+    for (txid, index, _, sequence, sigop, _, _) in &parsed_inputs {
+        prev.update(txid);
+        prev.update(&index.to_le_bytes());
+        seq.update(&sequence.to_le_bytes());
+        sigops.update(&[*sigop]);
+    }
+    let prev_hash = finish(prev);
+    let seq_hash = finish(seq);
+    let sigops_hash = finish(sigops);
+
+    let mut out_state = params();
+    for output in outputs {
+        let amount = output
+            .get("amount")
+            .and_then(Value::as_u64)
+            .ok_or("missing output amount")?;
+        let (version, script) = parse_spk_hex(
+            output
+                .get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("missing output script")?,
+        )?;
+        out_state.update(&amount.to_le_bytes());
+        out_state.update(&version.to_le_bytes());
+        out_state.update(&(script.len() as u64).to_le_bytes());
+        out_state.update(&script);
+        if tx_version >= 1 {
+            match output.get("covenantBinding") {
+                Some(Value::Object(binding)) => {
+                    let auth = binding
+                        .get("authorizingInput")
+                        .and_then(Value::as_u64)
+                        .ok_or("missing covenant authorizing input")?;
+                    let id = hex::decode(
+                        binding
+                            .get("covenantId")
+                            .and_then(Value::as_str)
+                            .ok_or("missing covenant id")?,
+                    )
+                    .map_err(|e| format!("covenant id hex: {}", e))?;
+                    if auth > u16::MAX as u64 || id.len() != 32 {
+                        return Err("invalid covenant binding".into());
+                    }
+                    out_state.update(&[1]);
+                    out_state.update(&(auth as u16).to_le_bytes());
+                    out_state.update(&id);
+                }
+                Some(Value::Null) | None => {
+                    out_state.update(&[0]);
+                }
+                Some(_) => return Err("invalid covenant binding object".into()),
+            }
+        }
+    }
+    let outputs_hash = finish(out_state);
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        let (txid, index, amount, sequence, sigop, spk_version, script) =
+            &parsed_inputs[input_index];
+        let signing_pubkey = if protected_vault_approved {
+            if inputs.len() != 1 || outputs.len() != 1 {
+                return Err(
+                    "Protected Vault approved spend must have one input and one output".into(),
+                );
+            }
+            let redeem_hex = input
+                .get("redeemScript")
+                .and_then(Value::as_str)
+                .ok_or("Protected Vault input is missing its redeem script")?;
+            let redeem =
+                hex::decode(redeem_hex).map_err(|e| format!("redeem script hex: {}", e))?;
+            if redeem.len() < 34
+                || redeem[0] != 0x20
+                || redeem[33] != 0xad
+                || crate::kspt::protected_vault_p2sh_script(&redeem) != *script
+            {
+                return Err("Protected Vault redeem script does not match the input".into());
+            }
+            redeem[1..33].to_vec()
+        } else {
+            if script.len() != 34 || script[0] != 0x20 || script[33] != 0xac {
+                return Err(format!("input[{}] is not standard P2PK", input_index));
+            }
+            script[1..33].to_vec()
+        };
+        let expected_key = format!("02{}", hex::encode(&signing_pubkey));
+        let partials = input
+            .get("partialSigs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("input[{}] missing partialSigs", input_index))?;
+        if partials.len() != 1 || !partials.contains_key(&expected_key) {
+            return Err(format!(
+                "input[{}] signature key does not match its P2PK script",
+                input_index
+            ));
+        }
+        let sig_hex = partials[&expected_key]
+            .get("schnorr")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("input[{}] missing Schnorr signature", input_index))?;
+        let sig_vec = hex::decode(sig_hex).map_err(|e| format!("signature hex: {}", e))?;
+        let sig: [u8; 64] = sig_vec
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes")?;
+
+        let mut h = params();
+        h.update(&tx_version.to_le_bytes());
+        h.update(&prev_hash);
+        h.update(&seq_hash);
+        if tx_version < 1 {
+            h.update(&sigops_hash);
+        }
+        h.update(txid);
+        h.update(&index.to_le_bytes());
+        h.update(&spk_version.to_le_bytes());
+        h.update(&(script.len() as u64).to_le_bytes());
+        h.update(script);
+        h.update(&amount.to_le_bytes());
+        h.update(&sequence.to_le_bytes());
+        if tx_version < 1 {
+            h.update(&[*sigop]);
+        }
+        h.update(&outputs_hash);
+        h.update(&0u64.to_le_bytes());
+        h.update(&[0u8; 20]);
+        h.update(&0u64.to_le_bytes());
+        h.update(&[0u8; 32]);
+        h.update(&[0x01]);
+        let sighash = finish(h);
+        let pubkey: [u8; 32] = signing_pubkey.try_into().unwrap();
+        if !crate::adaptor::bip340_verify(&pubkey, &sighash, &sig)? {
+            return Err(format!(
+                "input[{}] has an invalid M5 signature",
+                input_index
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_pskt_object(
@@ -498,6 +739,30 @@ fn parse_output_summary(out: &Value, network_prefix: &str) -> Result<OutputSumma
         .ok_or_else(|| "missing scriptPublicKey".to_string())?;
     let (_spk_version, spk_script) = parse_spk_hex(spk_full)?;
     let (kind, address) = classify_output_script(&spk_script, network_prefix);
+    let (covenant_authorizing_input, covenant_id) = match obj.get("covenantBinding") {
+        Some(Value::Object(binding)) => {
+            let authorizing_input = binding
+                .get("authorizingInput")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "covenant binding missing authorizing input".to_string())?;
+            let covenant_id = binding
+                .get("covenantId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "covenant binding missing covenant id".to_string())?;
+            if authorizing_input > u16::MAX as u64
+                || covenant_id.len() != 64
+                || !covenant_id.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("invalid covenant binding".into());
+            }
+            (
+                Some(authorizing_input as u16),
+                Some(covenant_id.to_ascii_lowercase()),
+            )
+        }
+        Some(Value::Null) | None => (None, None),
+        Some(_) => return Err("covenant binding is not an object".into()),
+    };
 
     Ok(OutputSummary {
         amount_sompi,
@@ -505,6 +770,8 @@ fn parse_output_summary(out: &Value, network_prefix: &str) -> Result<OutputSumma
         script_kind: kind,
         script_hex: hex::encode(&spk_script),
         address,
+        covenant_authorizing_input,
+        covenant_id,
     })
 }
 
@@ -1795,7 +2062,18 @@ fn build_consensus_input(
             .and_then(|p| p.get("oracleMbConsumer"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if omb_publish {
+        let protected_vault_approved = obj
+            .get("proprietaries")
+            .and_then(|v| v.as_object())
+            .and_then(|p| p.get("protectedVaultApproved"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if protected_vault_approved {
+            if partial_map.is_empty() {
+                return Err("Protected Vault approved spend requires an M5 signature".into());
+            }
+            build_protected_vault_approved_sig_script(rs, &partial_map)?
+        } else if omb_publish {
             let seal = obj
                 .get("proprietaries")
                 .and_then(|v| v.as_object())
@@ -2663,6 +2941,62 @@ fn build_p2sh_multisig_sig_script(
     push_redeem_script(&mut sig_script, redeem)?;
 
     Ok(sig_script)
+}
+
+/// Assemble the exact stack required by Protected Vault V1's approved branch.
+/// The redeem script begins with CHECKSIGVERIFY and only then consumes OP_TRUE,
+/// so the selector must be below the signature on the initial stack:
+/// `OP_TRUE <push signature||SIGHASH_ALL> <push redeem_script>`.
+fn build_protected_vault_approved_sig_script(
+    redeem: &[u8],
+    partial_map: &serde_json::Map<String, Value>,
+) -> Result<Vec<u8>, String> {
+    let (_pk_hex, sig_val) = partial_map
+        .iter()
+        .next()
+        .ok_or_else(|| "Protected Vault input has no signature".to_string())?;
+    let sig_hex = sig_val
+        .get("schnorr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "partial sig missing schnorr variant".to_string())?;
+    if sig_hex.len() != 128 {
+        return Err(format!(
+            "bad Protected Vault signature length: {}",
+            sig_hex.len()
+        ));
+    }
+    let mut signature = hex::decode(sig_hex).map_err(|e| format!("signature hex: {}", e))?;
+    signature.push(0x01);
+
+    let mut script = Vec::with_capacity(redeem.len() + signature.len() + 8);
+    script.push(0x51);
+    push_data_sigscript(&mut script, &signature);
+    push_redeem_script(&mut script, redeem)?;
+    Ok(script)
+}
+
+#[cfg(test)]
+mod protected_vault_finalizer_tests {
+    use super::*;
+
+    #[test]
+    fn approved_witness_places_selector_below_signature() {
+        let redeem = vec![0x20; 80];
+        let mut partials = serde_json::Map::new();
+        partials.insert(
+            format!("02{}", "11".repeat(32)),
+            serde_json::json!({ "schnorr": "22".repeat(64) }),
+        );
+
+        let script = build_protected_vault_approved_sig_script(&redeem, &partials).unwrap();
+        assert_eq!(script[0], 0x51);
+        assert_eq!(script[1], 65);
+        assert_eq!(&script[2..66], &[0x22; 64]);
+        assert_eq!(script[66], 0x01);
+        assert_eq!(script[67], 76); // OP_PUSHDATA1 for the 80-byte redeem script
+        assert_eq!(script[68], 80);
+        assert_eq!(&script[69..], redeem.as_slice());
+    }
 }
 
 /// Assemble the final sig_script for a covenant P2SH input (owner spend).

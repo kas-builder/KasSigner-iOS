@@ -210,7 +210,8 @@ enum SendDraftError: LocalizedError {
 
 
 
-struct PSKTSummary: Decodable {
+struct PSKTSummary: Decodable, Equatable {
+    let transactionVersion: UInt16?
     let totalInputSompi: UInt64?
     let totalOutputSompi: UInt64?
     let feeSompi: UInt64?
@@ -218,8 +219,27 @@ struct PSKTSummary: Decodable {
     let outputCount: Int?
     let inputs: [PSKTSummaryInput]?
     let outputs: [PSKTSummaryOutput]?
+    let finalizeReady: Bool?
+
+    init(
+        totalInputSompi: UInt64?, totalOutputSompi: UInt64?, feeSompi: UInt64?,
+        inputCount: Int?, outputCount: Int?, inputs: [PSKTSummaryInput]?,
+        outputs: [PSKTSummaryOutput]?, finalizeReady: Bool? = nil,
+        transactionVersion: UInt16? = nil
+    ) {
+        self.transactionVersion = transactionVersion
+        self.totalInputSompi = totalInputSompi
+        self.totalOutputSompi = totalOutputSompi
+        self.feeSompi = feeSompi
+        self.inputCount = inputCount
+        self.outputCount = outputCount
+        self.inputs = inputs
+        self.outputs = outputs
+        self.finalizeReady = finalizeReady
+    }
 
     private enum CodingKeys: String, CodingKey {
+        case transactionVersion = "tx_version"
         case totalInputSompi = "total_in_sompi"
         case totalOutputSompi = "total_out_sompi"
         case feeSompi = "fee_sompi"
@@ -227,26 +247,61 @@ struct PSKTSummary: Decodable {
         case outputCount = "output_count"
         case inputs
         case outputs
+        case finalizeReady = "finalize_ready"
     }
 }
 
-struct PSKTSummaryInput: Decodable {
+struct PSKTSummaryInput: Decodable, Equatable {
     let txID: String?
     let index: UInt32?
+    let amountSompi: UInt64?
+    let scriptHex: String?
+    let signaturesPresent: Int?
+
+    init(
+        txID: String?, index: UInt32?, amountSompi: UInt64? = nil,
+        scriptHex: String? = nil, signaturesPresent: Int? = nil
+    ) {
+        self.txID = txID
+        self.index = index
+        self.amountSompi = amountSompi
+        self.scriptHex = scriptHex
+        self.signaturesPresent = signaturesPresent
+    }
 
     private enum CodingKeys: String, CodingKey {
         case txID = "prev_tx_id"
         case index = "prev_index"
+        case amountSompi = "amount_sompi"
+        case scriptHex = "script_hex"
+        case signaturesPresent = "sigs_present"
     }
 }
 
-struct PSKTSummaryOutput: Decodable {
+struct PSKTSummaryOutput: Decodable, Equatable {
     let address: String?
     let amountSompi: UInt64?
+    let scriptHex: String?
+    let covenantAuthorizingInput: UInt16?
+    let covenantID: String?
+
+    init(
+        address: String?, amountSompi: UInt64?, scriptHex: String? = nil,
+        covenantAuthorizingInput: UInt16? = nil, covenantID: String? = nil
+    ) {
+        self.address = address
+        self.amountSompi = amountSompi
+        self.scriptHex = scriptHex
+        self.covenantAuthorizingInput = covenantAuthorizingInput
+        self.covenantID = covenantID
+    }
 
     private enum CodingKeys: String, CodingKey {
         case address
         case amountSompi = "amount_sompi"
+        case scriptHex = "script_hex"
+        case covenantAuthorizingInput = "covenant_authorizing_input"
+        case covenantID = "covenant_id"
     }
 }
 
@@ -493,6 +548,33 @@ final class KasSignerEngine: NSObject, ObservableObject {
         )
     }
 
+    func deriveProtectedVault(
+        profile: WalletProfile,
+        receiveIndex: Int,
+        approvedAddress: String,
+        delayDAA: UInt64
+    ) async throws -> ProtectedVaultDescriptor {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.deriveProtectedVault(kpub, receiveIndex, approvedAddress, delayDAA);",
+            arguments: [
+                "kpub": profile.kpub,
+                "receiveIndex": receiveIndex,
+                "approvedAddress": approvedAddress,
+                "delayDAA": String(delayDAA)
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let json = result as? [String: Any] else {
+            throw EngineError.invalidResponse
+        }
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return try JSONDecoder().decode(ProtectedVaultDescriptor.self, from: data)
+    }
+
 
     func getFeeEstimate(
         nodeConfiguration: [String: Any]
@@ -622,6 +704,156 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return normalized.lowercased()
     }
 
+    func buildProtectedVaultFundingPSKB(
+        profile: WalletProfile,
+        selectedInputs: [WalletUTXO],
+        vaultAddress: String,
+        amountSompi: UInt64,
+        feeSompi: UInt64
+    ) async throws -> String {
+        try await ensureReady()
+        let wallet: [String: Any] = [
+            "kpub": profile.kpub,
+            "receive_addresses": profile.receiveAddresses,
+            "change_addresses": profile.changeAddresses,
+            "next_receive_index": profile.nextReceiveIndex,
+            "next_change_index": profile.nextChangeIndex
+        ]
+        let utxosData = try JSONEncoder().encode(selectedInputs)
+        guard let utxosJSON = String(data: utxosData, encoding: .utf8) else {
+            throw EngineError.invalidResponse
+        }
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = await window.kaspi.buildProtectedVaultFundingPSKB(
+                    wallet, vaultAddress, amountSompi, feeSompi, utxosJSON
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "wallet": wallet,
+                "vaultAddress": vaultAddress,
+                "amountSompi": String(amountSompi),
+                "feeSompi": String(feeSompi),
+                "utxosJSON": utxosJSON
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(response["error"] as? String ?? "Tagged vault funding failed.")
+        }
+        guard let value = response["value"] as? String else { throw EngineError.invalidResponse }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized.count.isMultiple(of: 2),
+              normalized.allSatisfy(\.isHexDigit) else {
+            throw EngineError.javascript("The tagged funding PSKB was not valid hexadecimal.")
+        }
+        return normalized
+    }
+
+    func buildProtectedVaultApprovedSpendPSKB(
+        utxo: WalletUTXO,
+        redeemScriptHex: String,
+        approvedAddress: String,
+        feeSompi: UInt64
+    ) async throws -> String {
+        try await ensureReady()
+        let utxoData = try JSONEncoder().encode(utxo)
+        guard let utxoJSON = String(data: utxoData, encoding: .utf8) else {
+            throw EngineError.invalidResponse
+        }
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.buildProtectedVaultApprovedSpendPSKB(
+                    utxoJSON, redeemScriptHex, approvedAddress, feeSompi
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "utxoJSON": utxoJSON,
+                "redeemScriptHex": redeemScriptHex,
+                "approvedAddress": approvedAddress,
+                "feeSompi": String(feeSompi)
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(
+                response["error"] as? String ?? "The vault spend runtime rejected the transaction."
+            )
+        }
+        guard let value = response["value"] as? String else { throw EngineError.invalidResponse }
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty, normalized.count.isMultiple(of: 2),
+              normalized.allSatisfy(\.isHexDigit) else { throw EngineError.invalidResponse }
+        return normalized
+    }
+
+    func verifyProtectedVaultApprovedSignature(_ wireHex: String) async throws {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.verifyProtectedVaultApprovedSignature(wireHex);
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: ["wireHex": wireHex], in: nil, contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(
+                response["error"] as? String ?? "The M5 vault signature could not be verified."
+            )
+        }
+        guard response["value"] as? Bool == true else {
+            throw EngineError.javascript("The M5 vault signature could not be verified.")
+        }
+    }
+
+    func broadcastSignedPSKB(
+        _ wireHex: String,
+        nodeConfiguration: [String: Any]
+    ) async throws -> String {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = await window.kaspi.broadcastSignedPSKB(wireHex, nodeConfig);
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: ["wireHex": wireHex, "nodeConfig": nodeConfiguration],
+            in: nil, contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(response["error"] as? String ?? "The node rejected the vault transaction.")
+        }
+        guard let txid = response["value"] as? String else { throw EngineError.invalidResponse }
+        let normalized = txid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard normalized.count == 64, normalized.allSatisfy(\.isHexDigit) else {
+            throw EngineError.invalidResponse
+        }
+        return normalized
+    }
+
 
     func relayPSKBToKSPT(
         _ wireHex: String
@@ -665,7 +897,22 @@ final class KasSignerEngine: NSObject, ObservableObject {
         try await ensureReady()
 
         let result = try await webView.callAsyncJavaScript(
-            "return window.kaspi.mergeSignedKSPTIntoPSKB(signedKSPTHex, originalPSKBHex);",
+            """
+            try {
+                const value = await window.kaspi.mergeSignedKSPTIntoPSKB(
+                    signedKSPTHex,
+                    originalPSKBHex
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: error instanceof Error
+                        ? `${error.name}: ${error.message}`
+                        : String(error)
+                };
+            }
+            """,
             arguments: [
                 "signedKSPTHex": signedKSPTHex,
                 "originalPSKBHex": originalPSKBHex
@@ -674,7 +921,17 @@ final class KasSignerEngine: NSObject, ObservableObject {
             contentWorld: .page
         )
 
-        guard let merged = result as? String else {
+        guard let response = result as? [String: Any] else {
+            throw EngineError.invalidResponse
+        }
+
+        guard response["ok"] as? Bool == true else {
+            let detail = response["error"] as? String
+                ?? "The M5 response could not be merged."
+            throw EngineError.javascript("M5 merge failed: \(detail)")
+        }
+
+        guard let merged = response["value"] as? String else {
             throw EngineError.invalidResponse
         }
 
@@ -683,34 +940,47 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
     func broadcastSignedKSPT(
         signedKSPTHex: String,
-        wsURL: String
+        nodeConfiguration: [String: Any]
     ) async throws -> String {
         try await ensureReady()
 
         let result = try await webView.callAsyncJavaScript(
             """
-            return window.kaspi.broadcastSignedKSPT(
-                signedKSPTHex,
-                wsURL
-            );
+            try {
+                const value = await window.kaspi.broadcastSignedKSPT(
+                    signedKSPTHex,
+                    nodeConfig
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: error instanceof Error
+                        ? `${error.name}: ${error.message}`
+                        : String(error)
+                };
+            }
             """,
             arguments: [
                 "signedKSPTHex": signedKSPTHex,
-                "wsURL": wsURL
+                "nodeConfig": nodeConfiguration
             ],
             in: nil,
             contentWorld: .page
         )
 
-        guard let txid = result as? String else {
-            throw NSError(
-                domain: "KasSigner",
-                code: -1,
-                userInfo: [
-                    NSLocalizedDescriptionKey:
-                        "Broadcast returned an invalid transaction id."
-                ]
-            )
+        guard let response = result as? [String: Any] else {
+            throw EngineError.invalidResponse
+        }
+
+        guard response["ok"] as? Bool == true else {
+            let detail = response["error"] as? String
+                ?? "The Kaspa node rejected the transaction."
+            throw EngineError.javascript(detail)
+        }
+
+        guard let txid = response["value"] as? String else {
+            throw EngineError.invalidResponse
         }
 
         let normalizedTransactionID = txid
@@ -759,6 +1029,89 @@ final class KasSignerEngine: NSObject, ObservableObject {
                 "Unable to decode PSKB summary: \(error.localizedDescription)"
             )
         }
+    }
+
+    func verifyStandardPSKBSignatures(_ wireHex: String) async throws {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = await window.kaspi.verifyStandardPSKBSignatures(
+                    wireHex
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: error instanceof Error
+                        ? `${error.name}: ${error.message}`
+                        : String(error)
+                };
+            }
+            """,
+            arguments: ["wireHex": wireHex],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let response = result as? [String: Any] else {
+            throw EngineError.invalidResponse
+        }
+
+        guard response["ok"] as? Bool == true else {
+            let detail = response["error"] as? String
+                ?? "The returned M5 signatures could not be checked."
+            throw EngineError.javascript(
+                "M5 signature verification failed: \(detail)"
+            )
+        }
+
+        guard response["value"] as? Bool == true else {
+            throw EngineError.javascript("The returned M5 signatures are invalid.")
+        }
+    }
+
+    func finalizeSignedPSKB(_ wireHex: String) async throws -> String {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = await window.kaspi.finalizeSignedPSKB(wireHex);
+                return { ok: true, value };
+            } catch (error) {
+                return {
+                    ok: false,
+                    error: error instanceof Error
+                        ? `${error.name}: ${error.message}`
+                        : String(error)
+                };
+            }
+            """,
+            arguments: ["wireHex": wireHex],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let response = result as? [String: Any] else {
+            throw EngineError.invalidResponse
+        }
+
+        guard response["ok"] as? Bool == true else {
+            let detail = response["error"] as? String
+                ?? "The signed transaction could not be finalized."
+            throw EngineError.javascript(
+                "Signed transaction finalization failed: \(detail)"
+            )
+        }
+
+        guard let finalized = response["value"] as? String,
+              !finalized.isEmpty,
+              finalized.count.isMultiple(of: 2),
+              finalized.allSatisfy(\.isHexDigit)
+        else {
+            throw EngineError.invalidResponse
+        }
+        return finalized.lowercased()
     }
 
 
@@ -960,6 +1313,39 @@ final class KasSignerEngine: NSObject, ObservableObject {
             return try JSONDecoder().decode(WalletSyncPayload.self, from: data)
         } catch {
             throw EngineError.javascript("KasSigner sync response could not be decoded: \(error.localizedDescription)")
+        }
+    }
+
+    func syncAddress(
+        _ address: String,
+        nodeConfiguration: [String: Any]
+    ) async throws -> WalletSyncPayload {
+        try await ensureReady()
+
+        let wallet: [String: Any] = [
+            "kpub": "",
+            "receive_addresses": [address],
+            "change_addresses": [],
+            "next_receive_index": 0,
+            "next_change_index": 0
+        ]
+        let result = try await webView.callAsyncJavaScript(
+            "return await window.kaspi.syncWallet(wallet, nodeConfig);",
+            arguments: ["wallet": wallet, "nodeConfig": nodeConfiguration],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let json = result as? String,
+              let data = json.data(using: .utf8)
+        else { throw EngineError.invalidResponse }
+
+        do {
+            return try JSONDecoder().decode(WalletSyncPayload.self, from: data)
+        } catch {
+            throw EngineError.javascript(
+                "Vault balance response could not be decoded: \(error.localizedDescription)"
+            )
         }
     }
 

@@ -119,7 +119,7 @@
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
     const runtimeVersion = "db218007d8f955c5";
-    const transactionRuntimeVersion = "9925ca26a4904a05";
+    const transactionRuntimeVersion = "7308c70496c253d4";
     const module = await import(
       `./pkg/kassee_web.js?runtime=${runtimeVersion}`
     );
@@ -149,6 +149,28 @@
     await transactionModule.default({
       module_or_path: transactionWasmBytes
     });
+
+    const requiredTransactionExports = [
+      "create_send_pskb_with_utxos",
+      "create_protected_vault_funding_pskb_with_utxos",
+      "create_protected_vault_approved_spend_pskb",
+      "pskt_summary",
+      "pskt_relay_to_kspt_v2",
+      "pskt_merge_signed_kspt_v2",
+      "pskt_verify_standard_signatures",
+      "pskt_verify_protected_vault_approved_signature",
+      "pskt_finalize_to_kspt",
+      "pskt_finalize_and_broadcast",
+      "broadcast_signed"
+    ];
+    const missingTransactionExports = requiredTransactionExports.filter(
+      name => typeof transactionModule[name] !== "function"
+    );
+    if (missingTransactionExports.length > 0) {
+      throw new Error(
+        `Transaction runtime is incomplete: ${missingTransactionExports.join(", ")}`
+      );
+    }
 
     let liveNodeURL = "";
     let liveNodeConfig = { mode: "automatic", customURL: "" };
@@ -465,6 +487,17 @@
         );
       },
 
+      deriveProtectedVault(kpub, receiveIndex, approvedAddress, delayDAA) {
+        return JSON.parse(
+          transactionModule.derive_protected_vault_v1(
+            String(kpub).trim(),
+            Number(receiveIndex),
+            String(approvedAddress).trim(),
+            BigInt(String(delayDAA))
+          )
+        );
+      },
+
       async buildUnsignedPSKB(
         wallet,
         destination,
@@ -492,8 +525,27 @@
         return result.value;
       },
 
+      async buildProtectedVaultFundingPSKB(wallet, vaultAddress, amountSompi, feeSompi, utxosJSON) {
+        return await transactionModule.create_protected_vault_funding_pskb_with_utxos(
+          JSON.stringify(wallet),
+          String(vaultAddress),
+          BigInt(amountSompi),
+          BigInt(feeSompi),
+          String(utxosJSON)
+        );
+      },
+
+      buildProtectedVaultApprovedSpendPSKB(utxoJSON, redeemScriptHex, approvedAddress, feeSompi) {
+        return transactionModule.create_protected_vault_approved_spend_pskb(
+          String(utxoJSON),
+          String(redeemScriptHex),
+          String(approvedAddress),
+          BigInt(feeSompi)
+        );
+      },
+
       summarizePSKB(wireHex) {
-        const summaryJSON = module.pskt_summary(
+        const summaryJSON = transactionModule.pskt_summary(
           String(wireHex),
           "mainnet"
         );
@@ -501,25 +553,54 @@
         return String(summaryJSON);
       },
 
+      verifyStandardPSKBSignatures(wireHex) {
+        return transactionModule.pskt_verify_standard_signatures(
+          String(wireHex)
+        );
+      },
+
+      verifyProtectedVaultApprovedSignature(wireHex) {
+        return transactionModule.pskt_verify_protected_vault_approved_signature(String(wireHex));
+      },
+
+      finalizeSignedPSKB(wireHex) {
+        return transactionModule.pskt_finalize_to_kspt(String(wireHex));
+      },
+
       relayPSKBToKSPT(wireHex) {
-        return module.pskt_relay_to_kspt_v2(
+        return transactionModule.pskt_relay_to_kspt_v2(
           String(wireHex)
         );
       },
 
       mergeSignedKSPTIntoPSKB(signedKSPTHex, originalPSKBHex) {
-        return module.pskt_merge_signed_kspt_v2(
+        return transactionModule.pskt_merge_signed_kspt_v2(
           String(signedKSPTHex),
           String(originalPSKBHex)
         );
       },
 
 
-      broadcastSignedKSPT(signedKSPTHex, wsURL) {
-        return module.broadcast_signed(
-          String(signedKSPTHex),
-          String(wsURL)
+      async broadcastSignedKSPT(signedKSPTHex, nodeConfig) {
+        const result = await runWithNodeFailover(
+          nodeConfig,
+          async resolved => await transactionModule.broadcast_signed(
+            String(signedKSPTHex),
+            String(resolved.nodeURL)
+          )
         );
+        return result.value;
+      },
+
+      async broadcastSignedPSKB(signedPSKBHex, nodeConfig) {
+        const result = await runWithNodeFailover(
+          nodeConfig,
+          async resolved => await transactionModule.pskt_finalize_and_broadcast(
+            String(signedPSKBHex),
+            String(resolved.nodeURL)
+          )
+        );
+        return result.value;
       },
 
 

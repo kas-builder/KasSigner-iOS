@@ -194,21 +194,13 @@ pub fn bip340_verify(
     msg: &[u8; 32],
     sig: &[u8; 64],
 ) -> Result<bool, String> {
-    let rx: [u8; 32] = sig[0..32].try_into().unwrap();
-    let s_bytes: [u8; 32] = sig[32..64].try_into().unwrap();
+    use k256::schnorr::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
 
-    let p = xonly_to_point(pubkey_xonly)?;
-    let s = scalar_from_hex(&hex::encode(s_bytes))?;
-    let e = bip340_challenge(&rx, pubkey_xonly, msg);
-
-    // s*G == R + e*P
-    let sg = ProjectivePoint::GENERATOR * s;
-    let r = xonly_to_point(&rx)?;
-    let rhs = r + p * e;
-
-    let (sg_x, _) = point_to_xonly(&sg);
-    let (rhs_x, _) = point_to_xonly(&rhs);
-    Ok(sg_x == rhs_x)
+    let verifying_key = VerifyingKey::from_bytes(pubkey_xonly)
+        .map_err(|e| format!("invalid BIP340 public key: {}", e))?;
+    let signature = Signature::try_from(sig.as_slice())
+        .map_err(|e| format!("invalid BIP340 signature: {}", e))?;
+    Ok(verifying_key.verify_prehash(msg, &signature).is_ok())
 }
 
 // ─── Adaptor Signature Functions ───

@@ -43,6 +43,19 @@ final class WalletStore: ObservableObject {
         return true
     }
 
+    @discardableResult
+    func reserveReceiveAddress(profileID: UUID, index: Int) -> Bool {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+              index == profiles[profileIndex].nextReceiveIndex
+        else {
+            return false
+        }
+
+        profiles[profileIndex].nextReceiveIndex = index + 1
+        save()
+        return true
+    }
+
     func lastViewedReceiveIndex(for profileID: UUID, addressCount: Int) -> Int {
         guard addressCount > 0 else { return 0 }
         let stored = UserDefaults.standard.integer(

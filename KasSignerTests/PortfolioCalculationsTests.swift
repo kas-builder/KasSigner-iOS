@@ -1,6 +1,316 @@
 import XCTest
 @testable import KasSigner
 
+final class ProtectedVaultFundingPlanTests: XCTestCase {
+    private let profileID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+
+    func testFundingSelectionSessionClearsOnlyOnceForSameProfile() {
+        var session = ProtectedVaultFundingSelectionSession()
+
+        XCTAssertTrue(session.begin(profileID: profileID))
+        XCTAssertFalse(session.begin(profileID: profileID))
+        XCTAssertTrue(session.begin(profileID: UUID()))
+    }
+
+    func testMultipleInputsProduceRequestedFeeAndWalletChange() throws {
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: Decimal(string: "1.25")!),
+            inputs: [
+                utxo(amount: 100_000_000, index: 0),
+                utxo(amount: 50_000_000, index: 1)
+            ],
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(plan.depositSompi, 125_000_000)
+        XCTAssertEqual(plan.feeSompi, 1_000)
+        XCTAssertEqual(plan.inputTotalSompi, 150_000_000)
+        XCTAssertEqual(plan.changeSompi, 24_999_000)
+    }
+
+    func testCustomFeeMustFitSelectedInputs() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: 1),
+                inputs: [utxo(amount: 100_000_500)],
+                feeSompi: 1_000
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .insufficientInput)
+        }
+    }
+
+    func testZeroFeeIsRejected() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: 1),
+                inputs: [utxo(amount: 200_000_000)],
+                feeSompi: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .invalidFee)
+        }
+    }
+
+    func testSubSompiDepositIsRejected() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: Decimal(string: "1.000000001")!),
+                inputs: [utxo(amount: 200_000_000)],
+                feeSompi: 1_000
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .invalidDepositAmount)
+        }
+    }
+
+    func testFundingSummaryVerifiesExactInputsDepositChangeAndFee() throws {
+        let inputs = [
+            utxo(amount: 100_000_000, index: 0),
+            utxo(amount: 50_000_000, index: 1)
+        ]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: Decimal(string: "1.25")!),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+
+        let verified = try ProtectedVaultFundingVerifier.verify(
+            summary: summary(
+                inputs: inputs,
+                outputs: [
+                    ("kaspa:vault", 125_000_000),
+                    ("kaspa:change", 24_999_000)
+                ],
+                fee: 1_000
+            ),
+            plan: plan,
+            vaultAddress: "kaspa:vault",
+            expectedChangeAddress: "kaspa:change",
+            requiresExactFee: true
+        )
+
+        XCTAssertEqual(verified.depositSompi, 125_000_000)
+        XCTAssertEqual(verified.feeSompi, 1_000)
+        XCTAssertEqual(verified.changeSompi, 24_999_000)
+        XCTAssertEqual(verified.inputCount, 2)
+    }
+
+    func testFundingSummaryRejectsUnknownOutput() throws {
+        let inputs = [utxo(amount: 150_000_000)]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: 1),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingVerifier.verify(
+                summary: summary(
+                    inputs: inputs,
+                    outputs: [
+                        ("kaspa:vault", 100_000_000),
+                        ("kaspa:attacker", 49_999_000)
+                    ],
+                    fee: 1_000
+                ),
+                plan: plan,
+                vaultAddress: "kaspa:vault",
+                expectedChangeAddress: "kaspa:change",
+                requiresExactFee: true
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProtectedVaultFundingVerificationError,
+                .unknownOutput
+            )
+        }
+    }
+
+    func testFundingSummaryRejectsDifferentSelectedOutpoint() throws {
+        let inputs = [utxo(amount: 150_000_000)]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: 1),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+        let differentInput = WalletUTXO(
+            txID: String(repeating: "b", count: 64),
+            index: 0,
+            amount: 150_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: nil
+        )
+
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingVerifier.verify(
+                summary: summary(
+                    inputs: [differentInput],
+                    outputs: [
+                        ("kaspa:vault", 100_000_000),
+                        ("kaspa:change", 49_999_000)
+                    ],
+                    fee: 1_000,
+                    totalInput: 150_000_000
+                ),
+                plan: plan,
+                vaultAddress: "kaspa:vault",
+                expectedChangeAddress: "kaspa:change",
+                requiresExactFee: true
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProtectedVaultFundingVerificationError,
+                .inputOutpointMismatch
+            )
+        }
+    }
+
+    func testSignedFundingRequiresUnchangedTransactionAndAllSignatures() throws {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+        let signed = signedSummary(input: input, signatureCount: 1, ready: true)
+
+        XCTAssertNoThrow(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: signed
+            )
+        )
+    }
+
+    func testSignedFundingRejectsMissingSignature() {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+
+        XCTAssertThrowsError(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: unsigned
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SignedProtectedVaultFundingVerificationError,
+                .missingSignatures
+            )
+        }
+    }
+
+    func testSignedFundingRejectsChangedOutput() {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+        var changed = signedSummary(input: input, signatureCount: 1, ready: true)
+        changed = PSKTSummary(
+            totalInputSompi: changed.totalInputSompi,
+            totalOutputSompi: 149_998_999,
+            feeSompi: 1_001,
+            inputCount: changed.inputCount,
+            outputCount: changed.outputCount,
+            inputs: changed.inputs,
+            outputs: [PSKTSummaryOutput(
+                address: "kaspa:vault",
+                amountSompi: 149_998_999,
+                scriptHex: "bb"
+            )],
+            finalizeReady: true
+        )
+
+        XCTAssertThrowsError(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: changed
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SignedProtectedVaultFundingVerificationError,
+                .transactionChanged
+            )
+        }
+    }
+
+    private func vault(amount: Decimal) -> ProtectedVault {
+        ProtectedVault(
+            profileID: profileID,
+            amount: amount,
+            approvedAddress: "kaspa:test",
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            covenantIDs: []
+        )
+    }
+
+    private func utxo(amount: UInt64, index: UInt32 = 0) -> WalletUTXO {
+        WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: index,
+            amount: amount,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: nil
+        )
+    }
+
+    private func summary(
+        inputs: [WalletUTXO],
+        outputs: [(String, UInt64)],
+        fee: UInt64,
+        totalInput: UInt64? = nil
+    ) -> PSKTSummary {
+        let inputTotal = totalInput ?? inputs.reduce(0) { $0 + $1.amount }
+        let outputTotal = outputs.reduce(0) { $0 + $1.1 }
+        return PSKTSummary(
+            totalInputSompi: inputTotal,
+            totalOutputSompi: outputTotal,
+            feeSompi: fee,
+            inputCount: inputs.count,
+            outputCount: outputs.count,
+            inputs: inputs.map {
+                PSKTSummaryInput(txID: $0.txID, index: $0.index)
+            },
+            outputs: outputs.map {
+                PSKTSummaryOutput(
+                    address: $0.0,
+                    amountSompi: $0.1,
+                    covenantAuthorizingInput: $0.0 == "kaspa:vault" ? 0 : nil,
+                    covenantID: $0.0 == "kaspa:vault"
+                        ? String(repeating: "c", count: 64)
+                        : nil
+                )
+            },
+            transactionVersion: 1
+        )
+    }
+
+    private func signedSummary(
+        input: WalletUTXO,
+        signatureCount: Int,
+        ready: Bool
+    ) -> PSKTSummary {
+        PSKTSummary(
+            totalInputSompi: input.amount,
+            totalOutputSompi: 149_999_000,
+            feeSompi: 1_000,
+            inputCount: 1,
+            outputCount: 1,
+            inputs: [PSKTSummaryInput(
+                txID: input.txID,
+                index: input.index,
+                amountSompi: input.amount,
+                scriptHex: "aa",
+                signaturesPresent: signatureCount
+            )],
+            outputs: [PSKTSummaryOutput(
+                address: "kaspa:vault",
+                amountSompi: 149_999_000,
+                scriptHex: "bb"
+            )],
+            finalizeReady: ready
+        )
+    }
+}
+
 final class PortfolioCalculationsTests: XCTestCase {
     private let portfolioID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
