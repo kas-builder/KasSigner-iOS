@@ -242,12 +242,13 @@ struct SettingsView: View {
                 Text("Enter a new name for this watch-only account.")
             }
             .navigationTitle("Settings")
-            .alert(
-                "Delete account?",
-                isPresented: deleteAlertIsPresented,
+            .confirmationDialog(
+                "Delete Account?",
+                isPresented: deleteConfirmationIsPresented,
+                titleVisibility: .visible,
                 presenting: profilePendingDeletion
             ) { profile in
-                Button("Delete", role: .destructive) {
+                Button("Delete Account", role: .destructive) {
                     deleteProfile(profile)
                 }
 
@@ -282,7 +283,7 @@ struct SettingsView: View {
         )
     }
 
-    private var deleteAlertIsPresented: Binding<Bool> {
+    private var deleteConfirmationIsPresented: Binding<Bool> {
         Binding(
             get: { profilePendingDeletion != nil },
             set: { isPresented in

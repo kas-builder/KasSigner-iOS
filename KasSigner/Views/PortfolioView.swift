@@ -73,7 +73,6 @@ struct PortfolioView: View {
     @State private var transactionEditorDetent: PresentationDetent = .fraction(0.9)
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
-    @State private var transactionPendingDeletion: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
     @State private var showingHoldingDetail = false
     @State private var chartPoints: [PortfolioChartPoint] = []
@@ -185,8 +184,8 @@ struct PortfolioView: View {
                     selectedTransaction = nil
                 },
                 onDelete: {
+                    deleteTransaction(transaction)
                     selectedTransaction = nil
-                    transactionPendingDeletion = transaction
                 }
             )
             .presentationDetents([.fraction(0.9)])
@@ -233,40 +232,32 @@ struct PortfolioView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
-        .alert(
+        .confirmationDialog(
             "Delete Portfolio Account?",
             isPresented: Binding(
                 get: { accountPendingDeletion != nil },
                 set: { if !$0 { accountPendingDeletion = nil } }
             ),
+            titleVisibility: .visible,
             presenting: accountPendingDeletion
         ) { account in
-            Button("Delete", role: .destructive) {
+            Button("Delete Portfolio Account", role: .destructive) {
                 deleteAccount(account)
             }
             Button("Cancel", role: .cancel) {}
         } message: { account in
             Text("“\(account.name)” and its future portfolio transactions will be removed from this device.")
         }
-        .alert(
-            "Delete Transaction?",
-            isPresented: Binding(
-                get: { transactionPendingDeletion != nil },
-                set: { if !$0 { transactionPendingDeletion = nil } }
-            ),
-            presenting: transactionPendingDeletion
-        ) { transaction in
-            Button("Delete", role: .destructive) {
-                deleteTransaction(transaction)
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: { _ in
-            Text("This transaction will be permanently removed from this device.")
-        }
         .onChange(of: accounts.map(\.id)) { _, accountIDs in
-            guard let selectedPortfolioUUID else { return }
-            if !accountIDs.contains(selectedPortfolioUUID) {
+            guard !accountIDs.isEmpty else {
                 selectedPortfolioID = ""
+                return
+            }
+            guard !selectedPortfolioID.isEmpty else { return }
+            guard let selectedPortfolioUUID,
+                  accountIDs.contains(selectedPortfolioUUID) else {
+                selectedPortfolioID = accountIDs[0].uuidString
+                return
             }
         }
         .task {
@@ -1088,12 +1079,13 @@ struct PortfolioView: View {
     private func deleteTransaction(_ transaction: PortfolioTransaction) {
         modelContext.delete(transaction)
         try? modelContext.save()
-        transactionPendingDeletion = nil
     }
 
     private func deleteAccount(_ account: PortfolioAccount) {
         if selectedPortfolioID == account.id.uuidString {
-            selectedPortfolioID = ""
+            selectedPortfolioID = accounts
+                .first(where: { $0.id != account.id })?
+                .id.uuidString ?? ""
         }
         for transaction in transactions where transaction.portfolioID == account.id {
             modelContext.delete(transaction)
@@ -1246,6 +1238,7 @@ private struct PortfolioTransactionDraft {
 
 private struct PortfolioTransactionDetail: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var showingDeleteConfirmation = false
 
     let transaction: PortfolioTransaction
     let portfolioName: String
@@ -1291,7 +1284,7 @@ private struct PortfolioTransactionDetail: View {
                     .foregroundStyle(accentColor)
 
                     Button("Delete Transaction", role: .destructive) {
-                        onDelete()
+                        showingDeleteConfirmation = true
                     }
                 }
             }
@@ -1303,6 +1296,19 @@ private struct PortfolioTransactionDetail: View {
                 }
             }
             .tint(accentColor)
+            .confirmationDialog(
+                "Delete Transaction?",
+                isPresented: $showingDeleteConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Delete Transaction", role: .destructive) {
+                    onDelete()
+                    dismiss()
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This transaction will be permanently removed from this device.")
+            }
         }
     }
 
