@@ -384,6 +384,53 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertTrue(preview.issues.isEmpty)
     }
 
+    func testPortfolioCSVExportRoundTripsTransactionsAndEscapesNotes() throws {
+        let portfolioID = UUID()
+        let later = PortfolioTransaction(
+            portfolioID: portfolioID,
+            type: PortfolioTransactionType.sell.rawValue,
+            kasAmount: 25.5,
+            kasPriceUSD: 0.12345678,
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-14T16:30:00Z")!,
+            notes: "Partial sale, \"summer\"\nlot",
+            feeUSD: 1.25
+        )
+        let earlier = PortfolioTransaction(
+            portfolioID: portfolioID,
+            type: PortfolioTransactionType.buy.rawValue,
+            kasAmount: 100,
+            kasPriceUSD: 0.10,
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-13T14:00:00Z")!,
+            notes: "First lot"
+        )
+
+        let exportedData = PortfolioCSVExporter.data(transactions: [later, earlier])
+        let exportedText = String(decoding: exportedData, as: UTF8.self)
+        XCTAssertTrue(exportedText.hasPrefix("\u{feff}Date (UTC-4:00),Coin,Type"))
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: exportedData,
+            fileName: "export.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: ISO8601DateFormatter().date(from: "2026-08-15T12:00:00Z")!
+        )
+
+        XCTAssertEqual(preview.transactions.count, 2)
+        XCTAssertEqual(preview.transactions.map(\.type), [.buy, .sell])
+        XCTAssertEqual(preview.transactions[1].notes, "Partial sale, \"summer\"\nlot")
+        XCTAssertEqual(preview.transactions[1].feeUSD, 1.25, accuracy: 0.000_001)
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
+    func testPortfolioCSVExportCreatesNativeFriendlyFileName() {
+        let date = ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z")!
+        XCTAssertEqual(
+            PortfolioCSVExporter.suggestedFileName(portfolioName: "Long Term / Wallet", date: date),
+            "KasSigner-Long-Term-Wallet-Transactions-2026-08-18"
+        )
+    }
+
     func testOldDatedManualTransactionUsesHistoricalPriceInsteadOfLivePrice() {
         let oldTransactionDate = baseDate.addingTimeInterval(30)
         let now = baseDate.addingTimeInterval(86_400 * 30)

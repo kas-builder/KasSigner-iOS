@@ -85,6 +85,9 @@ struct PortfolioView: View {
     @State private var showingCSVFileImporter = false
     @State private var csvImportPreview: PortfolioCSVImportPreview?
     @State private var csvImportAlert: CSVImportAlert?
+    @State private var showingCSVFileExporter = false
+    @State private var csvExportDocument: PortfolioCSVDocument?
+    @State private var csvExportFileName = "KasSigner-Portfolio-Transactions"
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -124,6 +127,13 @@ struct PortfolioView: View {
                             } label: {
                                 Label("Import CSV", systemImage: "square.and.arrow.down")
                             }
+
+                            Button {
+                                beginCSVExport(for: selectedAccount)
+                            } label: {
+                                Label("Export CSV", systemImage: "square.and.arrow.up")
+                            }
+                            .disabled(transactionsForSelectedAccount.isEmpty)
 
                             Button(role: .destructive) {
                                 accountPendingDeletion = selectedAccount
@@ -196,6 +206,14 @@ struct PortfolioView: View {
             allowedContentTypes: [.commaSeparatedText, .plainText]
         ) { result in
             handleCSVSelection(result)
+        }
+        .fileExporter(
+            isPresented: $showingCSVFileExporter,
+            document: csvExportDocument,
+            contentType: .commaSeparatedText,
+            defaultFilename: csvExportFileName
+        ) { result in
+            handleCSVExport(result)
         }
         .sheet(item: $csvImportPreview) { preview in
             PortfolioCSVImportPreviewView(
@@ -982,6 +1000,44 @@ struct PortfolioView: View {
             if (error as NSError).code != NSUserCancelledError {
                 csvImportAlert = CSVImportAlert(
                     title: "Unable to Open CSV",
+                    message: error.localizedDescription
+                )
+            }
+        }
+    }
+
+    private var transactionsForSelectedAccount: [PortfolioTransaction] {
+        guard let selectedPortfolioUUID else { return [] }
+        return transactions.filter { $0.portfolioID == selectedPortfolioUUID }
+    }
+
+    private func beginCSVExport(for account: PortfolioAccount) {
+        let portfolioTransactions = transactions.filter { $0.portfolioID == account.id }
+        guard !portfolioTransactions.isEmpty else {
+            csvImportAlert = CSVImportAlert(
+                title: "Nothing to Export",
+                message: "Add a transaction to this portfolio before exporting a CSV."
+            )
+            return
+        }
+
+        csvExportDocument = PortfolioCSVExporter.document(transactions: portfolioTransactions)
+        csvExportFileName = PortfolioCSVExporter.suggestedFileName(portfolioName: account.name)
+        showingCSVFileExporter = true
+    }
+
+    private func handleCSVExport(_ result: Result<URL, Error>) {
+        defer { csvExportDocument = nil }
+        switch result {
+        case .success(let url):
+            csvImportAlert = CSVImportAlert(
+                title: "Export Complete",
+                message: "Saved \(url.lastPathComponent) to Files."
+            )
+        case .failure(let error):
+            if (error as NSError).code != NSUserCancelledError {
+                csvImportAlert = CSVImportAlert(
+                    title: "Unable to Export CSV",
                     message: error.localizedDescription
                 )
             }

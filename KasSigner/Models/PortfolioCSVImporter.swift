@@ -1,4 +1,101 @@
 import Foundation
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct PortfolioCSVDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.commaSeparatedText] }
+
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        data = configuration.file.regularFileContents ?? Data()
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+enum PortfolioCSVExporter {
+    private static let columns = [
+        "Date (UTC-4:00)",
+        "Coin",
+        "Type",
+        "Price (USD)",
+        "Amount",
+        "Total value (USD)",
+        "Fee",
+        "Fee Currency",
+        "Notes"
+    ]
+
+    static func document(transactions: [PortfolioTransaction]) -> PortfolioCSVDocument {
+        PortfolioCSVDocument(data: data(transactions: transactions))
+    }
+
+    static func data(transactions: [PortfolioTransaction]) -> Data {
+        var rows = [columns]
+        rows.append(contentsOf: transactions.sorted(by: PortfolioTransactionOrder.ascending).map { transaction in
+            let fee = transaction.feeUSD
+            return [
+                dateString(transaction.timestamp),
+                "KAS",
+                transaction.type,
+                decimalString(transaction.kasPriceUSD),
+                decimalString(transaction.kasAmount),
+                decimalString(transaction.kasAmount * transaction.kasPriceUSD),
+                decimalString(fee),
+                fee > 0.000_000_01 ? "USD" : "",
+                transaction.notes
+            ]
+        })
+
+        let csv = rows
+            .map { $0.map(escapedField).joined(separator: ",") }
+            .joined(separator: "\r\n") + "\r\n"
+        return Data(("\u{feff}" + csv).utf8)
+    }
+
+    static func suggestedFileName(portfolioName: String, date: Date = Date()) -> String {
+        let cleanName = portfolioName
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        let portfolio = cleanName.isEmpty ? "Portfolio" : cleanName
+        return "KasSigner-\(portfolio)-Transactions-\(formatter.string(from: date))"
+    }
+
+    private static func dateString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: -4 * 60 * 60)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter.string(from: date)
+    }
+
+    private static func decimalString(_ value: Double) -> String {
+        String(format: "%.8f", locale: Locale(identifier: "en_US_POSIX"), value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+    }
+
+    private static func escapedField(_ value: String) -> String {
+        guard value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r") else {
+            return value
+        }
+        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}
 
 struct PortfolioCSVImportTransaction: Identifiable {
     let id = UUID()
@@ -61,7 +158,6 @@ enum PortfolioCSVImporter {
 
     private static let requiredColumns = [
         "Date (UTC-4:00)",
-        "Token",
         "Type",
         "Price (USD)",
         "Amount",
@@ -102,8 +198,12 @@ enum PortfolioCSVImporter {
             }
             headerIndexes[normalized] = index
         }
-        let missingColumns = requiredColumns.filter {
+        var missingColumns = requiredColumns.filter {
             headerIndexes[normalizedHeader($0)] == nil
+        }
+        if headerIndexes[normalizedHeader("Token")] == nil,
+           headerIndexes[normalizedHeader("Coin")] == nil {
+            missingColumns.insert("Coin", at: 1)
         }
         guard missingColumns.isEmpty else {
             throw ImportError.missingColumns(missingColumns)
@@ -226,8 +326,9 @@ enum PortfolioCSVImporter {
             return record[index].trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        guard value("Token").uppercased() == "KAS" else {
-            throw RowError(message: "Token must be KAS.")
+        let coin = value("Coin").isEmpty ? value("Token") : value("Coin")
+        guard coin.uppercased() == "KAS" else {
+            throw RowError(message: "Coin must be KAS.")
         }
         guard let type = transactionType(value("Type")) else {
             throw RowError(message: "Unsupported transaction type.")
