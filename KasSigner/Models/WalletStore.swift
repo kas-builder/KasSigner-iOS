@@ -1,5 +1,15 @@
 import Foundation
 
+enum WalletTransactionDirection: String, Codable, Equatable {
+    case sent
+    case received
+}
+
+enum WalletTransactionStatus: String, Codable, Equatable {
+    case pending
+    case confirmed
+}
+
 struct WalletTransaction: Identifiable, Codable, Equatable {
     let id: UUID
     let profileID: UUID
@@ -8,6 +18,75 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     let amountSompi: UInt64
     let feeSompi: UInt64
     let broadcastAt: Date
+    let direction: WalletTransactionDirection
+    let status: WalletTransactionStatus
+
+    init(
+        id: UUID = UUID(),
+        profileID: UUID,
+        transactionID: String,
+        destination: String,
+        amountSompi: UInt64,
+        feeSompi: UInt64,
+        broadcastAt: Date,
+        direction: WalletTransactionDirection,
+        status: WalletTransactionStatus
+    ) {
+        self.id = id
+        self.profileID = profileID
+        self.transactionID = transactionID
+        self.destination = destination
+        self.amountSompi = amountSompi
+        self.feeSompi = feeSompi
+        self.broadcastAt = broadcastAt
+        self.direction = direction
+        self.status = status
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case profileID
+        case transactionID
+        case destination
+        case amountSompi
+        case feeSompi
+        case broadcastAt
+        case direction
+        case status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        profileID = try container.decode(UUID.self, forKey: .profileID)
+        transactionID = try container.decode(String.self, forKey: .transactionID)
+        destination = try container.decode(String.self, forKey: .destination)
+        amountSompi = try container.decode(UInt64.self, forKey: .amountSompi)
+        feeSompi = try container.decode(UInt64.self, forKey: .feeSompi)
+        broadcastAt = try container.decode(Date.self, forKey: .broadcastAt)
+        direction = try container.decodeIfPresent(
+            WalletTransactionDirection.self,
+            forKey: .direction
+        ) ?? .sent
+        status = try container.decodeIfPresent(
+            WalletTransactionStatus.self,
+            forKey: .status
+        ) ?? .pending
+    }
+
+    func preservingID(_ id: UUID) -> WalletTransaction {
+        WalletTransaction(
+            id: id,
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: destination,
+            amountSompi: amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: broadcastAt,
+            direction: direction,
+            status: status
+        )
+    }
 }
 
 @MainActor
@@ -93,15 +172,42 @@ final class WalletStore: ObservableObject {
 
         transactions.append(
             WalletTransaction(
-                id: UUID(),
                 profileID: profileID,
                 transactionID: normalizedTransactionID,
                 destination: destination,
                 amountSompi: amountSompi,
                 feeSompi: feeSompi,
-                broadcastAt: Date()
+                broadcastAt: Date(),
+                direction: .sent,
+                status: .pending
             )
         )
+        save()
+    }
+
+    func mergeSyncedTransactions(
+        _ syncedTransactions: [WalletTransaction],
+        profileID: UUID
+    ) {
+        let existingForProfile = transactions.filter { $0.profileID == profileID }
+        let existingByID = Dictionary(
+            existingForProfile.map { ($0.transactionID.lowercased(), $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        let syncedIDs = Set(syncedTransactions.map { $0.transactionID.lowercased() })
+        let confirmed = syncedTransactions.map { transaction in
+            guard let existing = existingByID[transaction.transactionID.lowercased()] else {
+                return transaction
+            }
+            return transaction.preservingID(existing.id)
+        }
+        let pending = existingForProfile.filter {
+            $0.status == .pending && !syncedIDs.contains($0.transactionID.lowercased())
+        }
+
+        transactions.removeAll { $0.profileID == profileID }
+        transactions.append(contentsOf: confirmed)
+        transactions.append(contentsOf: pending)
         save()
     }
 

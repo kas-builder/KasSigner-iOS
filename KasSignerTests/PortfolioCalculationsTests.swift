@@ -431,6 +431,93 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 
+    func testLegacyBroadcastTransactionDecodesAsPendingSentTransaction() throws {
+        struct LegacyTransaction: Encodable {
+            let id: UUID
+            let profileID: UUID
+            let transactionID: String
+            let destination: String
+            let amountSompi: UInt64
+            let feeSompi: UInt64
+            let broadcastAt: Date
+        }
+
+        let legacy = LegacyTransaction(
+            id: UUID(),
+            profileID: UUID(),
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100,
+            feeSompi: 2,
+            broadcastAt: baseDate
+        )
+        let decoded = try JSONDecoder().decode(
+            WalletTransaction.self,
+            from: JSONEncoder().encode(legacy)
+        )
+
+        XCTAssertEqual(decoded.direction, .sent)
+        XCTAssertEqual(decoded.status, .pending)
+    }
+
+    func testIndexedHistoryMapsIncomingAndOutgoingNetActivity() {
+        let profileID = UUID()
+        let walletAddress = "kaspa:wallet"
+        let externalAddress = "kaspa:external"
+        let client = TransactionHistoryClient()
+        let incoming = IndexedTransaction(
+            transactionID: String(repeating: "1", count: 64),
+            blockTime: 1_700_000_000_000,
+            isAccepted: true,
+            acceptingBlockTime: 1_700_000_001_000,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: externalAddress,
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(amount: 900, scriptPublicKeyAddress: walletAddress),
+                IndexedTransactionOutput(amount: 90, scriptPublicKeyAddress: externalAddress)
+            ]
+        )
+        let outgoing = IndexedTransaction(
+            transactionID: String(repeating: "2", count: 64),
+            blockTime: 1_700_000_002_000,
+            isAccepted: true,
+            acceptingBlockTime: nil,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: walletAddress,
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(amount: 600, scriptPublicKeyAddress: externalAddress),
+                IndexedTransactionOutput(amount: 390, scriptPublicKeyAddress: walletAddress)
+            ]
+        )
+
+        let transactions = client.mapTransactions(
+            [incoming, outgoing, incoming],
+            profileID: profileID,
+            walletAddresses: Set([walletAddress])
+        )
+
+        XCTAssertEqual(transactions.count, 2)
+        let received = transactions.first { $0.direction == .received }
+        XCTAssertEqual(received?.amountSompi, 900)
+        XCTAssertEqual(received?.feeSompi, 0)
+        XCTAssertEqual(received?.destination, externalAddress)
+        XCTAssertEqual(received?.status, .confirmed)
+
+        let sent = transactions.first { $0.direction == .sent }
+        XCTAssertEqual(sent?.amountSompi, 600)
+        XCTAssertEqual(sent?.feeSompi, 10)
+        XCTAssertEqual(sent?.destination, externalAddress)
+        XCTAssertEqual(sent?.status, .confirmed)
+    }
+
     func testOldDatedManualTransactionUsesHistoricalPriceInsteadOfLivePrice() {
         let oldTransactionDate = baseDate.addingTimeInterval(30)
         let now = baseDate.addingTimeInterval(86_400 * 30)
