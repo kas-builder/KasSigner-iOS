@@ -5,6 +5,7 @@ struct ActivityView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var priceService: PriceService
     @Environment(\.openURL) private var openURL
 
     @State private var editingLabelTransactionID: String?
@@ -69,6 +70,9 @@ struct ActivityView: View {
             }
             .task(id: walletStore.selectedProfileID) {
                 await refreshHistory(force: false)
+            }
+            .task {
+                await priceService.refresh(preferences: preferences)
             }
             .onAppear {
                 coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
@@ -137,8 +141,8 @@ struct ActivityView: View {
         let label = coinControlStore.label(forTransactionID: transaction.transactionID)
 
         return VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(amountText(transaction))
                         .font(.body.weight(.regular).monospacedDigit())
                         .lineLimit(1)
@@ -146,15 +150,23 @@ struct ActivityView: View {
                         .allowsTightening(true)
                         .foregroundStyle(.primary)
 
-                    Spacer()
-
-                    statusLabel(transaction.status)
-                        .font(.body.weight(.semibold))
+                    if let usdValue = usdValueText(transaction) {
+                        Text(usdValue)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
-                Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    statusLabel(transaction.status)
+                        .font(.body.weight(.semibold))
+
+                    Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Divider()
@@ -360,6 +372,17 @@ struct ActivityView: View {
     private func amountText(_ transaction: WalletTransaction) -> String {
         let prefix = transaction.direction == .sent ? "−" : "+"
         return prefix + formatKas(transaction.amountSompi)
+    }
+
+    private func usdValueText(_ transaction: WalletTransaction) -> String? {
+        let kas = Double(transaction.amountSompi) / 100_000_000
+        guard let value = priceService.convertedBalance(kas: kas, currency: .usd) else {
+            return nil
+        }
+        return value.formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(0...2))
+        )
     }
 
     private func formatKas(_ sompi: UInt64) -> String {
