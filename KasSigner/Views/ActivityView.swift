@@ -142,19 +142,35 @@ struct ActivityView: View {
             Divider()
                 .opacity(0.45)
 
-            Button {
-                openURL(preferences.explorer.transactionURL(transaction.transactionID))
-            } label: {
-                Text("Tx ID: \(transaction.transactionID)")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Transaction ID")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+                }
+
+                Button {
+                    openURL(preferences.explorer.transactionURL(transaction.transactionID))
+                } label: {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(transaction.transactionID)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .padding(.top, 2)
+                    }
+                }
+                .buttonStyle(SubtlePressButtonStyle())
+                .accessibilityHint("Opens this transaction in the selected block explorer")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens this transaction in the selected block explorer")
         }
         .padding(16)
         .background(
