@@ -502,6 +502,50 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 
+    func testWalletTransactionCSVExportUsesLocalDatesAndEscapesNotes() {
+        let timeZone = TimeZone(secondsFromGMT: -4 * 60 * 60)!
+        let earlier = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-20T03:40:00Z")!,
+            type: .received,
+            priceUSD: 0.029,
+            amountKas: 9.85,
+            notes: "Gift, \"summer\"\nwallet"
+        )
+        let later = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-21T15:11:00Z")!,
+            type: .sent,
+            priceUSD: 0.03,
+            amountKas: 28,
+            notes: "Payment"
+        )
+
+        let data = WalletTransactionCSVExporter.data(
+            records: [later, earlier],
+            timeZone: timeZone
+        )
+        let text = String(decoding: data, as: UTF8.self)
+
+        XCTAssertTrue(text.hasPrefix("\u{feff}Date (Local Time),Coin,Type,Price (USD),Amount (KAS),Value (USD),Notes\r\n"))
+        XCTAssertTrue(text.contains("2026-08-19 23:40:00 -04:00,KAS,Received,0.029,9.85,0.28565"))
+        XCTAssertTrue(text.contains("2026-08-21 11:11:00 -04:00,KAS,Sent,0.03,28,0.84,Payment"))
+        XCTAssertTrue(text.contains("\"Gift, \"\"summer\"\"\nwallet\""))
+        XCTAssertLessThan(
+            text.range(of: "Received")!.lowerBound,
+            text.range(of: "Sent")!.lowerBound
+        )
+    }
+
+    func testWalletTransactionCSVExportCreatesWalletSpecificFileName() {
+        let date = ISO8601DateFormatter().date(from: "2026-08-21T12:00:00Z")!
+        XCTAssertEqual(
+            WalletTransactionCSVExporter.suggestedFileName(
+                walletName: "Cold / Savings Wallet",
+                date: date
+            ),
+            "KasSigner-Cold-Savings-Wallet-Transactions-2026-08-21"
+        )
+    }
+
     func testLegacyBroadcastTransactionDecodesAsPendingSentTransaction() throws {
         struct LegacyTransaction: Encodable {
             let id: UUID

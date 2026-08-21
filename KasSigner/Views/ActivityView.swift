@@ -1,6 +1,13 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ActivityView: View {
+    private struct ExportAlert: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
@@ -12,6 +19,11 @@ struct ActivityView: View {
     @State private var draftLabel = ""
     @State private var isLabelEditorPresented = false
     @State private var historicalUSDPrices: [HistoricalPricePoint] = []
+    @State private var showingCSVFileExporter = false
+    @State private var csvExportDocument: PortfolioCSVDocument?
+    @State private var csvExportFileName = "KasSigner-Wallet-Transactions"
+    @State private var csvExportAlert: ExportAlert?
+    @State private var isPreparingCSVExport = false
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -61,6 +73,23 @@ struct ActivityView: View {
             .background(Color(.systemGroupedBackground))
             .navigationTitle("Transactions")
             .toolbar {
+                if walletStore.selectedProfile != nil {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button {
+                                Task { await beginCSVExport() }
+                            } label: {
+                                Label("Export Transactions", systemImage: "square.and.arrow.down")
+                            }
+                            .disabled(transactions.isEmpty || isPreparingCSVExport)
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                        .accessibilityLabel("Transaction Actions")
+                    }
+                }
+
                 if syncService.isRefreshingTransactionHistory {
                     ToolbarItem(placement: .topBarTrailing) {
                         ProgressView()
@@ -91,6 +120,21 @@ struct ActivityView: View {
                     labelEditorOverlay(forTransactionID: transactionID)
                 }
             }
+        }
+        .fileExporter(
+            isPresented: $showingCSVFileExporter,
+            document: csvExportDocument,
+            contentType: .commaSeparatedText,
+            defaultFilename: csvExportFileName
+        ) { result in
+            handleCSVExport(result)
+        }
+        .alert(item: $csvExportAlert) { alert in
+            Alert(
+                title: Text(alert.title),
+                message: Text(alert.message),
+                dismissButton: .default(Text("OK"))
+            )
         }
     }
 
@@ -153,6 +197,91 @@ struct ActivityView: View {
             force: force
         )
         walletStore.reloadCachedTransactions(profileID: profile.id)
+    }
+
+    private func beginCSVExport() async {
+        guard !isPreparingCSVExport,
+              let profile = walletStore.selectedProfile else { return }
+
+        let walletTransactions = transactions
+        guard !walletTransactions.isEmpty else {
+            csvExportAlert = ExportAlert(
+                title: "Nothing to Export",
+                message: "This wallet does not have any transactions to export."
+            )
+            return
+        }
+
+        isPreparingCSVExport = true
+        defer { isPreparingCSVExport = false }
+
+        await priceService.refresh(preferences: preferences)
+
+        let now = Date()
+        let oldestTimestamp = walletTransactions.map(\.broadcastAt).min() ?? now
+        let elapsedDays = Calendar.current.dateComponents(
+            [.day],
+            from: oldestTimestamp,
+            to: now
+        ).day ?? 1
+        let prices = try? await priceService.historicalUSDPrices(
+            days: String(max(1, elapsedDays + 1))
+        )
+
+        guard !Task.isCancelled,
+              walletStore.selectedProfile?.id == profile.id else { return }
+
+        let historicalPrices = prices ?? historicalUSDPrices
+        let livePrice = priceService.price(for: .usd)
+        var records: [WalletTransactionCSVRecord] = []
+        records.reserveCapacity(walletTransactions.count)
+
+        for transaction in walletTransactions {
+            guard let price = PortfolioTransactionPriceResolver.automaticPrice(
+                at: transaction.broadcastAt,
+                now: now,
+                livePrice: livePrice,
+                historicalPrices: historicalPrices
+            ) else {
+                csvExportAlert = ExportAlert(
+                    title: "Unable to Export Transactions",
+                    message: "Historical USD pricing is unavailable for one or more transactions. Please try again when price data is available."
+                )
+                return
+            }
+
+            records.append(
+                WalletTransactionCSVRecord(
+                    timestamp: transaction.broadcastAt,
+                    type: transaction.direction,
+                    priceUSD: price,
+                    amountKas: Double(transaction.amountSompi) / 100_000_000,
+                    notes: coinControlStore.label(forTransactionID: transaction.transactionID)
+                )
+            )
+        }
+
+        csvExportDocument = WalletTransactionCSVExporter.document(records: records)
+        csvExportFileName = WalletTransactionCSVExporter.suggestedFileName(walletName: profile.name)
+        showingCSVFileExporter = true
+    }
+
+    private func handleCSVExport(_ result: Result<URL, Error>) {
+        defer { csvExportDocument = nil }
+        switch result {
+        case .success(let url):
+            csvExportAlert = ExportAlert(
+                title: "Export Complete",
+                message: "Saved \(url.lastPathComponent) to Files."
+            )
+        case .failure(let error):
+            if (error as NSError).code != NSUserCancelledError {
+                csvExportAlert = ExportAlert(
+                    title: "Unable to Export Transactions",
+                    message: error.localizedDescription
+                )
+            }
+        }
     }
 
     private func historyMessage(_ message: String) -> some View {

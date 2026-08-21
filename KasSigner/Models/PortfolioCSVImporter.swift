@@ -97,6 +97,92 @@ enum PortfolioCSVExporter {
     }
 }
 
+struct WalletTransactionCSVRecord {
+    let timestamp: Date
+    let type: WalletTransactionDirection
+    let priceUSD: Double
+    let amountKas: Double
+    let notes: String
+}
+
+enum WalletTransactionCSVExporter {
+    private static let columns = [
+        "Date (Local Time)",
+        "Coin",
+        "Type",
+        "Price (USD)",
+        "Amount (KAS)",
+        "Value (USD)",
+        "Notes"
+    ]
+
+    static func document(
+        records: [WalletTransactionCSVRecord],
+        timeZone: TimeZone = .current
+    ) -> PortfolioCSVDocument {
+        PortfolioCSVDocument(data: data(records: records, timeZone: timeZone))
+    }
+
+    static func data(
+        records: [WalletTransactionCSVRecord],
+        timeZone: TimeZone = .current
+    ) -> Data {
+        var rows = [columns]
+        rows.append(contentsOf: records.sorted { $0.timestamp < $1.timestamp }.map { record in
+            [
+                dateString(record.timestamp, timeZone: timeZone),
+                "KAS",
+                record.type == .received ? "Received" : "Sent",
+                decimalString(record.priceUSD),
+                decimalString(record.amountKas),
+                decimalString(record.amountKas * record.priceUSD),
+                record.notes
+            ]
+        })
+
+        let csv = rows
+            .map { $0.map(escapedField).joined(separator: ",") }
+            .joined(separator: "\r\n") + "\r\n"
+        return Data(("\u{feff}" + csv).utf8)
+    }
+
+    static func suggestedFileName(walletName: String, date: Date = Date()) -> String {
+        let cleanName = walletName
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        let wallet = cleanName.isEmpty ? "Wallet" : cleanName
+        return "KasSigner-\(wallet)-Transactions-\(formatter.string(from: date))"
+    }
+
+    private static func dateString(_ date: Date, timeZone: TimeZone) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss XXX"
+        return formatter.string(from: date)
+    }
+
+    private static func decimalString(_ value: Double) -> String {
+        String(format: "%.8f", locale: Locale(identifier: "en_US_POSIX"), value)
+            .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+    }
+
+    private static func escapedField(_ value: String) -> String {
+        guard value.contains(",") || value.contains("\"") || value.contains("\n") || value.contains("\r") else {
+            return value
+        }
+        return "\"\(value.replacingOccurrences(of: "\"", with: "\"\""))\""
+    }
+}
+
 struct PortfolioCSVImportTransaction: Identifiable {
     let id = UUID()
     let lineNumber: Int
