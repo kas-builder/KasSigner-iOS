@@ -118,6 +118,21 @@ final class UTXOCoinControlStore: ObservableObject {
         saveLabels()
     }
 
+    func label(forTransactionID transactionID: String) -> String {
+        labels[transactionLabelKey(transactionID)] ?? ""
+    }
+
+    func setLabel(_ value: String, forTransactionID transactionID: String) {
+        let key = transactionLabelKey(transactionID)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            labels.removeValue(forKey: key)
+        } else {
+            labels[key] = trimmed
+        }
+        saveLabels()
+    }
+
     func selectedUTXOs(from utxos: [WalletUTXO]) -> [WalletUTXO] {
         utxos.filter { selectedOutpoints.contains($0.id) }
     }
@@ -171,5 +186,11 @@ final class UTXOCoinControlStore: ObservableObject {
             data,
             forKey: labelsPrefix + profileID.uuidString
         )
+    }
+
+    private func transactionLabelKey(_ transactionID: String) -> String {
+        "transaction:" + transactionID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 }

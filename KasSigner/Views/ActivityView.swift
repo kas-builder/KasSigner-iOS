@@ -4,7 +4,14 @@ struct ActivityView: View {
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @Environment(\.openURL) private var openURL
+
+    @State private var editingLabelTransactionID: String?
+    @State private var draftLabel = ""
+    @State private var isLabelEditorPresented = false
+
+    @FocusState private var labelEditorFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -63,6 +70,19 @@ struct ActivityView: View {
             .task(id: walletStore.selectedProfileID) {
                 await refreshHistory(force: false)
             }
+            .onAppear {
+                coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
+            }
+            .onChange(of: walletStore.selectedProfileID) { _, newValue in
+                dismissLabelEditor()
+                coinControlStore.activate(profileID: newValue)
+            }
+            .overlay {
+                if isLabelEditorPresented,
+                   let transactionID = editingLabelTransactionID {
+                    labelEditorOverlay(forTransactionID: transactionID)
+                }
+            }
         }
     }
 
@@ -114,7 +134,9 @@ struct ActivityView: View {
     }
 
     private func transactionCard(_ transaction: WalletTransaction) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let label = coinControlStore.label(forTransactionID: transaction.transactionID)
+
+        return VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(amountText(transaction))
@@ -171,6 +193,39 @@ struct ActivityView: View {
                 .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityHint("Opens this transaction in the selected block explorer")
             }
+
+            Divider()
+
+            HStack(alignment: .center, spacing: 8) {
+                Text("Label")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 46, alignment: .leading)
+
+                Button {
+                    beginEditingLabel(for: transaction)
+                } label: {
+                    HStack(spacing: 8) {
+                        if label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            Color.clear
+                                .frame(height: 18)
+                        } else {
+                            Text(label)
+                                .font(.caption)
+                                .foregroundStyle(.primary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SubtlePressButtonStyle())
+                .accessibilityLabel(label.isEmpty ? "Add label" : "Edit label")
+            }
         }
         .padding(16)
         .background(
@@ -219,6 +274,78 @@ struct ActivityView: View {
                     ? Color(red: 0.18, green: 0.68, blue: 0.62)
                     : .orange
             )
+    }
+
+    private func beginEditingLabel(for transaction: WalletTransaction) {
+        draftLabel = coinControlStore.label(forTransactionID: transaction.transactionID)
+        editingLabelTransactionID = transaction.transactionID
+        isLabelEditorPresented = true
+
+        Task { @MainActor in
+            await Task.yield()
+            labelEditorFocused = true
+        }
+    }
+
+    private func dismissLabelEditor() {
+        labelEditorFocused = false
+        isLabelEditorPresented = false
+        editingLabelTransactionID = nil
+        draftLabel = ""
+    }
+
+    private func saveLabel(forTransactionID transactionID: String) {
+        coinControlStore.setLabel(draftLabel, forTransactionID: transactionID)
+        dismissLabelEditor()
+    }
+
+    private func labelEditorOverlay(forTransactionID transactionID: String) -> some View {
+        ZStack {
+            Color.black.opacity(0.30)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 16) {
+                Text(coinControlStore.label(forTransactionID: transactionID).isEmpty ? "Add Label" : "Edit Label")
+                    .font(.headline)
+
+                TextField("", text: $draftLabel, axis: .vertical)
+                    .focused($labelEditorFocused)
+                    .font(.body)
+                    .lineLimit(1...5)
+                    .textInputAutocapitalization(.sentences)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background(
+                        Color(.tertiarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+
+                HStack(spacing: 12) {
+                    Button("Cancel") {
+                        dismissLabelEditor()
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
+
+                    Button("Save") {
+                        saveLabel(forTransactionID: transactionID)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: 350)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .shadow(color: .black.opacity(0.16), radius: 18, y: 6)
+            .padding(.horizontal, 24)
+            .offset(y: -50)
+        }
+        .ignoresSafeArea(.keyboard)
+        .zIndex(100)
     }
 
     private func directionIcon(_ direction: WalletTransactionDirection) -> String {
