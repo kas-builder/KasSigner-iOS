@@ -173,7 +173,7 @@ struct ActivityView: View {
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text(amountText(transaction))
                         .font(.body.weight(.regular).monospacedDigit())
                         .lineLimit(1)
@@ -183,7 +183,7 @@ struct ActivityView: View {
 
                     if let usdValue = usdValueText(transaction) {
                         Text(usdValue)
-                            .font(.caption)
+                            .font(.subheadline.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                 }
