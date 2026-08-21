@@ -115,35 +115,24 @@ struct ActivityView: View {
 
     private func transactionCard(_ transaction: WalletTransaction) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: directionIcon(transaction.direction))
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(directionColor(transaction.direction))
-                    .frame(width: 38, height: 38)
-                    .background(
-                        directionColor(transaction.direction).opacity(0.12),
-                        in: Circle()
-                    )
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(transaction.direction == .sent ? "Sent" : "Received")
-                        .font(.headline)
-                        .foregroundStyle(.primary)
-                    Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
                     Text(amountText(transaction))
-                        .font(.headline.monospacedDigit())
-                        .foregroundStyle(.primary)
+                        .font(.body.weight(.regular).monospacedDigit())
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
+                        .allowsTightening(true)
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
                     statusLabel(transaction.status)
+                        .font(.body.weight(.semibold))
                 }
+
+                Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Divider()
@@ -208,12 +197,12 @@ struct ActivityView: View {
     }
 
     private func statusLabel(_ status: WalletTransactionStatus) -> some View {
-        Label(
-            status == .confirmed ? "Confirmed" : "Pending",
-            systemImage: status == .confirmed ? "checkmark.circle.fill" : "clock.fill"
-        )
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(status == .confirmed ? .green : .orange)
+        Text(status == .confirmed ? "Confirmed" : "Pending")
+            .foregroundStyle(
+                status == .confirmed
+                    ? Color(red: 0.18, green: 0.68, blue: 0.62)
+                    : .orange
+            )
     }
 
     private func directionIcon(_ direction: WalletTransactionDirection) -> String {
