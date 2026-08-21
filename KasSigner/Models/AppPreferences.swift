@@ -36,6 +36,16 @@ enum KasBalanceFormatter {
             .number.precision(.fractionLength(decimalPlaces.rawValue))
         )
     }
+
+    static func string(
+        fromSompi sompi: UInt64,
+        decimalPlaces: KasBalanceDecimalPlaces
+    ) -> String {
+        string(
+            from: Double(sompi) / 100_000_000,
+            decimalPlaces: decimalPlaces
+        )
+    }
 }
 
 enum ExplorerChoice: String, CaseIterable, Identifiable {

@@ -5,6 +5,21 @@ final class PortfolioCalculationsTests: XCTestCase {
     private let portfolioID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
 
+    func testSompiFormattingUsesSelectedDecimalPlaces() {
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_550_000_000, decimalPlaces: .zero),
+            "26"
+        )
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_550_000_000, decimalPlaces: .two),
+            "25.50"
+        )
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_500_000_000, decimalPlaces: .four),
+            "25.0000"
+        )
+    }
+
     @MainActor
     func testBroadcastTransactionPublishesImmediately() {
         let store = WalletStore()

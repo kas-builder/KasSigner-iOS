@@ -230,20 +230,9 @@ struct ActivityView: View {
     }
 
     private func formatKas(_ sompi: UInt64) -> String {
-        let whole = sompi / 100_000_000
-        let fractional = sompi % 100_000_000
-
-        guard fractional != 0 else {
-            return "\(whole) KAS"
-        }
-
-        let fractionalText = String(format: "%08llu", fractional)
-            .replacingOccurrences(
-                of: "0+$",
-                with: "",
-                options: .regularExpression
-            )
-
-        return "\(whole).\(fractionalText) KAS"
+        KasBalanceFormatter.string(
+            fromSompi: sompi,
+            decimalPlaces: preferences.kasBalanceDecimalPlaces
+        ) + " KAS"
     }
 }

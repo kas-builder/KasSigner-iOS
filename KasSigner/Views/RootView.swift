@@ -259,13 +259,18 @@ struct RootView: View {
                 force: true,
                 includeTransactionHistory: false
             )
-            let addedUTXOs = (syncService.snapshot?.utxos ?? []).filter {
+            let currentUTXOs = syncService.snapshot?.utxos ?? []
+            let currentOutpoints = Set(currentUTXOs.map(\.id))
+            let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+            let addedUTXOs = currentUTXOs.filter {
                 !previousOutpoints.contains($0.id)
             }
-            walletStore.recordObservedUTXOTransactions(
-                profileID: profile.id,
-                addedUTXOs: addedUTXOs
-            )
+            if removedOutpoints.isEmpty {
+                walletStore.recordObservedUTXOTransactions(
+                    profileID: profile.id,
+                    addedUTXOs: addedUTXOs
+                )
+            }
             await syncService.reconcilePendingTransactions(
                 profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
                 walletStore: walletStore
