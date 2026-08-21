@@ -11,6 +11,7 @@ struct ActivityView: View {
     @State private var editingLabelTransactionID: String?
     @State private var draftLabel = ""
     @State private var isLabelEditorPresented = false
+    @State private var historicalUSDPrices: [HistoricalPricePoint] = []
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -74,6 +75,9 @@ struct ActivityView: View {
             .task {
                 await priceService.refresh(preferences: preferences)
             }
+            .task(id: historicalPriceRequestID) {
+                await loadHistoricalUSDPrices()
+            }
             .onAppear {
                 coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
             }
@@ -112,6 +116,33 @@ struct ActivityView: View {
             return "Looking for wallet activity…"
         }
         return "Incoming and outgoing transactions will appear here after synchronization."
+    }
+
+    private var historicalPriceRequestID: String {
+        let profileID = walletStore.selectedProfileID?.uuidString ?? "none"
+        guard let oldestTimestamp = transactions.map(\.broadcastAt).min() else {
+            return profileID + ":empty"
+        }
+        return profileID + ":" + String(Int(oldestTimestamp.timeIntervalSince1970))
+    }
+
+    private func loadHistoricalUSDPrices() async {
+        guard let oldestTimestamp = transactions.map(\.broadcastAt).min() else {
+            historicalUSDPrices = []
+            return
+        }
+
+        let elapsedDays = Calendar.current.dateComponents(
+            [.day],
+            from: oldestTimestamp,
+            to: Date()
+        ).day ?? 1
+        let prices = try? await priceService.historicalUSDPrices(
+            days: String(max(1, elapsedDays + 1))
+        )
+
+        guard !Task.isCancelled else { return }
+        historicalUSDPrices = prices ?? []
     }
 
     private func refreshHistory(force: Bool) async {
@@ -376,9 +407,15 @@ struct ActivityView: View {
 
     private func usdValueText(_ transaction: WalletTransaction) -> String? {
         let kas = Double(transaction.amountSompi) / 100_000_000
-        guard let value = priceService.convertedBalance(kas: kas, currency: .usd) else {
+        guard let price = PortfolioTransactionPriceResolver.automaticPrice(
+            at: transaction.broadcastAt,
+            now: Date(),
+            livePrice: priceService.price(for: .usd),
+            historicalPrices: historicalUSDPrices
+        ) else {
             return nil
         }
+        let value = kas * price
         return value.formatted(
             .currency(code: "USD")
                 .precision(.fractionLength(0...2))
