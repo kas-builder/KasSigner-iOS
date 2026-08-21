@@ -271,6 +271,8 @@ struct PortfolioView: View {
     private var emptyState: some View {
         ContentUnavailableView {
             Label("No Portfolio", systemImage: "briefcase.fill")
+        } description: {
+            Text("Create an account to start tracking KAS buys, sells, and transfers.")
         } actions: {
             Button("New Portfolio") {
                 beginAddingAccount()
