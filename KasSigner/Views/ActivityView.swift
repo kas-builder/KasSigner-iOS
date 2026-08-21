@@ -180,7 +180,8 @@ struct ActivityView: View {
                         Text(transaction.transactionID)
                             .font(.caption.monospaced())
                             .foregroundStyle(.primary)
-                            .lineLimit(2)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
