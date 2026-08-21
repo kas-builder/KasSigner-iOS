@@ -135,6 +135,9 @@ struct RootView: View {
         .onChange(of: liveRPCService.notificationVersion) { _, _ in
             scheduleNotificationRefresh()
         }
+        .onChange(of: engine.rpcNotificationVersion) { _, _ in
+            scheduleNotificationRefresh()
+        }
         .onChange(of: syncService.snapshot) { _, snapshot in
             guard let snapshot,
                   let profile = walletStore.selectedProfile else { return }
@@ -246,13 +249,33 @@ struct RootView: View {
                 return
             }
 
+            let previousOutpoints = Set((syncService.snapshot?.utxos ?? []).map(\.id))
+
             await syncService.refresh(
                 profile: profile,
                 walletStore: walletStore,
                 engine: engine,
                 preferences: preferences,
-                force: true
+                force: true,
+                includeTransactionHistory: false
             )
+            let addedUTXOs = (syncService.snapshot?.utxos ?? []).filter {
+                !previousOutpoints.contains($0.id)
+            }
+            walletStore.recordObservedUTXOTransactions(
+                profileID: profile.id,
+                addedUTXOs: addedUTXOs
+            )
+            await syncService.reconcilePendingTransactions(
+                profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+                walletStore: walletStore
+            )
+            await syncService.reconcileTransactionIDs(
+                addedUTXOs.map(\.txID),
+                profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+                walletStore: walletStore
+            )
+            walletStore.reloadCachedTransactions(profileID: profile.id)
         }
     }
 }
@@ -421,9 +444,8 @@ struct UTXOsView: View {
             Group {
                 if walletStore.selectedProfile == nil {
                     ContentUnavailableView(
-                        "No Account",
-                        systemImage: "wallet.pass",
-                        description: Text("Add and select an account before viewing UTXOs.")
+                        "No UTXOs",
+                        systemImage: "square.stack.3d.up"
                     )
                 } else if syncService.snapshot == nil {
                     ContentUnavailableView(

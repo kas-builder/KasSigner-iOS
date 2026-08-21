@@ -362,6 +362,9 @@
           liveNodeURL,
           JSON.stringify(liveAddresses)
         );
+        await module.rpc_session_subscribe_virtual_chain_changed(
+          liveNodeURL
+        );
         if (runtimeActive) {
           liveSubscriptionConfirmed = true;
           liveNodeNeedsFailover = false;

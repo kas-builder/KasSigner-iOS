@@ -1596,7 +1596,12 @@ private struct VerifiedSigningPreparationView: View {
             walletStore: walletStore,
             engine: engine,
             preferences: preferences,
-            force: true
+            force: true,
+            includeTransactionHistory: false
+        )
+        await syncService.reconcilePendingTransactions(
+            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
         )
     }
 

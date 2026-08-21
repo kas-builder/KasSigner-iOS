@@ -28,9 +28,9 @@ struct WalletHomeView: View {
                     ContentUnavailableView {
                         Label("No Account", systemImage: "wallet.pass")
                     } description: {
-                        Text("Import the public wallet data exported by KasSigner. Private keys remain on the M5 device.")
+                        Text("Import the public wallet data exported by KasSigner. Private keys remain on the signing device.")
                     } actions: {
-                        Button("Add KasSigner Account") { showingAddWallet = true }
+                        Button("Add Account") { showingAddWallet = true }
                             .buttonStyle(.borderedProminent)
                     }
                 }

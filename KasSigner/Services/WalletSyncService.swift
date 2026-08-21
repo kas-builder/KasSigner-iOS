@@ -52,6 +52,7 @@ private enum TransactionHistoryError: LocalizedError {
     case unsupportedNetwork
     case invalidResponse
     case server(Int)
+    case rateLimited
 
     var errorDescription: String? {
         switch self {
@@ -61,6 +62,8 @@ private enum TransactionHistoryError: LocalizedError {
             "The transaction history service returned an invalid response."
         case .server(let status):
             "The transaction history service returned HTTP \(status)."
+        case .rateLimited:
+            "Transaction history synchronization will retry shortly."
         }
     }
 }
@@ -107,6 +110,35 @@ struct TransactionHistoryClient: Sendable {
         )
     }
 
+    func transaction(
+        id: String,
+        for profile: WalletProfile
+    ) async throws -> WalletTransaction? {
+        guard profile.network.lowercased() == "mainnet" else { return nil }
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedID.isEmpty else { return nil }
+
+        var components = URLComponents(
+            url: baseURL.appending(path: "transactions").appending(path: normalizedID),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
+        ]
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let (data, _) = try await data(for: request)
+        let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
+        let addresses = Set(profile.receiveAddresses + profile.changeAddresses)
+        return mapTransactions(
+            [indexed],
+            profileID: profile.id,
+            walletAddresses: addresses
+        ).first
+    }
+
     private func fetchActiveAddresses(_ addresses: [String]) async throws -> [String] {
         var active: [String] = []
         for start in stride(from: 0, to: addresses.count, by: 250) {
@@ -119,8 +151,7 @@ struct TransactionHistoryClient: Sendable {
                 ActiveAddressRequest(addresses: Array(addresses[start..<end]))
             )
 
-            let (data, response) = try await URLSession.shared.data(for: request)
-            try validate(response)
+            let (data, _) = try await data(for: request)
             let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: data)
             active.append(contentsOf: entries.filter(\.active).map(\.address))
         }
@@ -142,8 +173,7 @@ struct TransactionHistoryClient: Sendable {
             )!
             var queryItems = [
                 URLQueryItem(name: "limit", value: "500"),
-                URLQueryItem(name: "resolve_previous_outpoints", value: "light"),
-                URLQueryItem(name: "acceptance", value: "accepted")
+                URLQueryItem(name: "resolve_previous_outpoints", value: "light")
             ]
             if let before {
                 queryItems.append(URLQueryItem(name: "before", value: before))
@@ -155,8 +185,7 @@ struct TransactionHistoryClient: Sendable {
 
             var request = URLRequest(url: url)
             request.timeoutInterval = 30
-            let (data, response) = try await URLSession.shared.data(for: request)
-            try validate(response)
+            let (data, response) = try await data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw TransactionHistoryError.invalidResponse
             }
@@ -172,6 +201,34 @@ struct TransactionHistoryClient: Sendable {
             before = next
         }
         return transactions
+    }
+
+    private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+        for attempt in 0..<3 {
+            let result = try await URLSession.shared.data(for: request)
+
+            guard let response = result.1 as? HTTPURLResponse else {
+                throw TransactionHistoryError.invalidResponse
+            }
+
+            if response.statusCode == 429 {
+                guard attempt < 2 else {
+                    throw TransactionHistoryError.rateLimited
+                }
+
+                let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+                    .flatMap(TimeInterval.init)
+                let fallbackDelay = TimeInterval(1 << attempt)
+                let delay = min(max(retryAfter ?? fallbackDelay, 1), 15)
+                try await Task.sleep(for: .seconds(delay))
+                continue
+            }
+
+            try validate(response)
+            return result
+        }
+
+        throw TransactionHistoryError.rateLimited
     }
 
     private func validate(_ response: URLResponse) throws {
@@ -190,7 +247,7 @@ struct TransactionHistoryClient: Sendable {
     ) -> [WalletTransaction] {
         var mappedByID: [String: WalletTransaction] = [:]
 
-        for transaction in indexedTransactions where transaction.isAccepted != false {
+        for transaction in indexedTransactions {
             guard let rawID = transaction.transactionID else { continue }
             let transactionID = rawID.lowercased()
             guard mappedByID[transactionID] == nil else { continue }
@@ -245,9 +302,11 @@ struct TransactionHistoryClient: Sendable {
                 destination: counterparty,
                 amountSompi: amount,
                 feeSompi: direction == .sent ? fee : 0,
-                broadcastAt: Date(timeIntervalSince1970: Double(milliseconds) / 1_000),
+                broadcastAt: milliseconds > 0
+                    ? Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+                    : Date(),
                 direction: direction,
-                status: .confirmed
+                status: transaction.isAccepted == false ? .pending : .confirmed
             )
         }
 
@@ -334,6 +393,8 @@ final class WalletSyncService: ObservableObject {
 
         activeProfileID = profile.id
         lastRefreshAttempt = nil
+        transactionHistoryError = nil
+        transactionHistoryUpdatedAt = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
 
         snapshot = WalletSnapshotCache.shared.load(profileID: profile.id)
@@ -361,7 +422,8 @@ final class WalletSyncService: ObservableObject {
         engine: KasSignerEngine,
         preferences: AppPreferences,
         force: Bool = true,
-        minimumInterval: TimeInterval = 9
+        minimumInterval: TimeInterval = 9,
+        includeTransactionHistory: Bool = true
     ) async {
         guard isNetworkAvailable else {
             state = .failed("No internet connection.")
@@ -418,10 +480,12 @@ final class WalletSyncService: ObservableObject {
                 profileID: profile.id
             )
             state = .connected
-            await refreshTransactionHistory(
-                profile: discoveredProfile,
-                walletStore: walletStore
-            )
+            if includeTransactionHistory {
+                await refreshTransactionHistory(
+                    profile: discoveredProfile,
+                    walletStore: walletStore
+                )
+            }
         } catch {
             guard activeProfileID == profile.id else { return }
             state = .failed(friendlyMessage(for: error, preferences: preferences))
@@ -456,8 +520,79 @@ final class WalletSyncService: ObservableObject {
             transactionHistoryUpdatedAt = Date()
         } catch {
             guard activeProfileID == profile.id else { return }
+            guard !Task.isCancelled,
+                  !(error is CancellationError),
+                  (error as? URLError)?.code != .cancelled else { return }
+            if case TransactionHistoryError.rateLimited = error {
+                return
+            }
             transactionHistoryError = error.localizedDescription
         }
+    }
+
+    func reconcilePendingTransactions(
+        profile: WalletProfile,
+        walletStore: WalletStore
+    ) async {
+        let pending = walletStore.pendingTransactions.filter {
+            $0.profileID == profile.id
+        }
+        guard !pending.isEmpty else { return }
+
+        var resolved: [WalletTransaction] = []
+        for transaction in pending.prefix(8) {
+            do {
+                if let indexed = try await transactionHistoryClient.transaction(
+                    id: transaction.transactionID,
+                    for: profile
+                ) {
+                    resolved.append(indexed)
+                }
+            } catch {
+                // The node/indexer may not expose a just-broadcast transaction yet.
+                // Keep the local pending card and retry on the next wallet event.
+            }
+        }
+        guard !resolved.isEmpty else { return }
+        walletStore.mergeResolvedTransactions(resolved, profileID: profile.id)
+    }
+
+    func reconcileTransactionIDs(
+        _ transactionIDs: some Sequence<String>,
+        profile: WalletProfile,
+        walletStore: WalletStore
+    ) async {
+        let unresolved = Array(Set(transactionIDs.map { $0.lowercased() })).prefix(16)
+        var unresolvedIDs = Array(unresolved)
+        var resolved: [WalletTransaction] = []
+
+        for attempt in 0..<3 where !unresolvedIDs.isEmpty {
+            if attempt > 0 {
+                let delay = attempt == 1 ? 2.0 : 5.0
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+            }
+
+            var stillUnresolved: [String] = []
+            for transactionID in unresolvedIDs {
+                do {
+                    if let indexed = try await transactionHistoryClient.transaction(
+                        id: transactionID,
+                        for: profile
+                    ) {
+                        resolved.append(indexed)
+                    } else {
+                        stillUnresolved.append(transactionID)
+                    }
+                } catch {
+                    stillUnresolved.append(transactionID)
+                }
+            }
+            unresolvedIDs = stillUnresolved
+        }
+
+        guard !resolved.isEmpty else { return }
+        walletStore.mergeResolvedTransactions(resolved, profileID: profile.id)
     }
 
     private func syncWithAddressDiscovery(

@@ -5,6 +5,62 @@ final class PortfolioCalculationsTests: XCTestCase {
     private let portfolioID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
 
+    @MainActor
+    func testBroadcastTransactionPublishesImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "a", count: 64)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "kaspa:testdestination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(store.pendingTransactions.count, 1)
+        XCTAssertEqual(store.pendingTransactions.first?.transactionID, transactionID)
+        XCTAssertTrue(store.transactions.contains {
+            $0.profileID == profileID && $0.transactionID == transactionID
+        })
+    }
+
+    @MainActor
+    func testAddedUTXOTransactionPublishesImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "b", count: 64)
+
+        store.recordObservedUTXOTransactions(
+            profileID: profileID,
+            addedUTXOs: [
+                WalletUTXO(
+                    txID: transactionID,
+                    index: 0,
+                    amount: 75_000_000,
+                    scriptPublicKey: [],
+                    blockDAAScore: 1,
+                    covenantID: nil
+                ),
+                WalletUTXO(
+                    txID: transactionID,
+                    index: 1,
+                    amount: 25_000_000,
+                    scriptPublicKey: [],
+                    blockDAAScore: 1,
+                    covenantID: nil
+                )
+            ]
+        )
+
+        let transaction = store.transactions.first {
+            $0.profileID == profileID && $0.transactionID == transactionID
+        }
+        XCTAssertEqual(transaction?.amountSompi, 100_000_000)
+        XCTAssertEqual(transaction?.direction, .received)
+    }
+
     func testMultipleBuysUseWeightedAverageCost() {
         let summary = PortfolioHoldingSummary(transactions: [
             transaction(.buy, amount: 100, price: 0.02, offset: 0),

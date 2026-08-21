@@ -89,19 +89,91 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     }
 }
 
+private final class WalletTransactionCache {
+    private let fileManager: FileManager
+    private let directoryURL: URL?
+
+    init(fileManager: FileManager = .default) {
+        self.fileManager = fileManager
+        directoryURL = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?
+            .appending(path: "KasSigner", directoryHint: .isDirectory)
+            .appending(path: "TransactionHistory", directoryHint: .isDirectory)
+    }
+
+    func load(profileID: UUID) -> [WalletTransaction]? {
+        guard let fileURL = fileURL(profileID: profileID),
+              let data = try? Data(contentsOf: fileURL),
+              let transactions = try? JSONDecoder().decode(
+                  [WalletTransaction].self,
+                  from: data
+              ) else {
+            return nil
+        }
+
+        return transactions.filter { $0.profileID == profileID }
+    }
+
+    @discardableResult
+    func save(_ transactions: [WalletTransaction], profileID: UUID) -> Bool {
+        guard let directoryURL,
+              let fileURL = fileURL(profileID: profileID),
+              let data = try? JSONEncoder().encode(
+                  transactions.filter { $0.profileID == profileID }
+              ) else {
+            return false
+        }
+
+        do {
+            try fileManager.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true
+            )
+            try data.write(to: fileURL, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func remove(profileID: UUID) {
+        guard let fileURL = fileURL(profileID: profileID) else { return }
+        try? fileManager.removeItem(at: fileURL)
+    }
+
+    private func fileURL(profileID: UUID) -> URL? {
+        directoryURL?.appending(
+            path: profileID.uuidString.lowercased() + ".json",
+            directoryHint: .notDirectory
+        )
+    }
+}
+
 @MainActor
 final class WalletStore: ObservableObject {
     @Published private(set) var profiles: [WalletProfile] = []
     @Published private(set) var transactions: [WalletTransaction] = []
-    @Published var selectedProfileID: UUID? { didSet { save() } }
+    @Published private(set) var pendingTransactions: [WalletTransaction] = []
+    @Published private(set) var transactionRevision: UInt64 = 0
+    @Published var selectedProfileID: UUID? {
+        didSet {
+            guard !isLoading else { return }
+            save()
+        }
+    }
 
     private let storageKey = "kassigner.walletProfiles.v1"
     private let transactionsStorageKey = "kassigner.walletTransactions.v1"
     private let selectionKey = "kassigner.selectedWalletProfile.v1"
     private let receiveIndexKeyPrefix = "kassigner.lastViewedReceiveIndex.v1."
+    private let transactionCache = WalletTransactionCache()
+    private var isLoading = true
 
     init() {
         load()
+        isLoading = false
     }
 
     var selectedProfile: WalletProfile? {
@@ -162,26 +234,70 @@ final class WalletStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        guard !normalizedTransactionID.isEmpty,
-              !transactions.contains(where: {
-                  $0.transactionID.caseInsensitiveCompare(normalizedTransactionID) == .orderedSame
-              })
-        else {
-            return
+        guard !normalizedTransactionID.isEmpty else { return }
+
+        let pendingTransaction = WalletTransaction(
+            profileID: profileID,
+            transactionID: normalizedTransactionID,
+            destination: destination,
+            amountSompi: amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: Date(),
+            direction: .sent,
+            status: .pending
+        )
+
+        var updatedPending = pendingTransactions
+        if let existingIndex = updatedPending.firstIndex(where: {
+            $0.profileID == profileID
+                && $0.transactionID.caseInsensitiveCompare(normalizedTransactionID) == .orderedSame
+        }) {
+            updatedPending[existingIndex] = pendingTransaction.preservingID(
+                updatedPending[existingIndex].id
+            )
+        } else {
+            updatedPending.append(pendingTransaction)
         }
 
-        transactions.append(
-            WalletTransaction(
-                profileID: profileID,
-                transactionID: normalizedTransactionID,
-                destination: destination,
-                amountSompi: amountSompi,
-                feeSompi: feeSompi,
-                broadcastAt: Date(),
-                direction: .sent,
-                status: .pending
+        pendingTransactions = updatedPending
+        rebuildPublishedTransactions()
+        transactionRevision &+= 1
+        save()
+    }
+
+    func recordObservedUTXOTransactions(
+        profileID: UUID,
+        addedUTXOs: [WalletUTXO]
+    ) {
+        let pendingIDs = Set(pendingTransactions.filter { $0.profileID == profileID }
+            .map { $0.transactionID.lowercased() })
+        let existingIDs = Set(transactions.filter { $0.profileID == profileID }
+            .map { $0.transactionID.lowercased() })
+        let grouped = Dictionary(grouping: addedUTXOs) { $0.txID.lowercased() }
+        var additions: [WalletTransaction] = []
+
+        for (transactionID, utxos) in grouped {
+            guard !transactionID.isEmpty,
+                  !pendingIDs.contains(transactionID),
+                  !existingIDs.contains(transactionID) else { continue }
+
+            additions.append(
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Multiple senders",
+                    amountSompi: utxos.reduce(UInt64(0)) { $0 &+ $1.amount },
+                    feeSompi: 0,
+                    broadcastAt: Date(),
+                    direction: .received,
+                    status: .confirmed
+                )
             )
-        )
+        }
+
+        guard !additions.isEmpty else { return }
+        transactions = transactions + additions
+        transactionRevision &+= 1
         save()
     }
 
@@ -201,14 +317,62 @@ final class WalletStore: ObservableObject {
             }
             return transaction.preservingID(existing.id)
         }
-        let pending = existingForProfile.filter {
+        let pending = pendingTransactions.filter {
+            $0.profileID == profileID
+                && !syncedIDs.contains($0.transactionID.lowercased())
+        }
+        pendingTransactions.removeAll {
+            $0.profileID == profileID
+                && syncedIDs.contains($0.transactionID.lowercased())
+        }
+        let retainedPending = existingForProfile.filter {
             $0.status == .pending && !syncedIDs.contains($0.transactionID.lowercased())
         }
 
-        transactions.removeAll { $0.profileID == profileID }
-        transactions.append(contentsOf: confirmed)
-        transactions.append(contentsOf: pending)
+        transactions = transactions.filter { $0.profileID != profileID }
+            + confirmed
+            + pending
+            + retainedPending.filter { retained in
+                !pending.contains { $0.transactionID.caseInsensitiveCompare(retained.transactionID) == .orderedSame }
+            }
+        transactionRevision &+= 1
         save()
+    }
+
+    func mergeResolvedTransactions(
+        _ resolvedTransactions: [WalletTransaction],
+        profileID: UUID
+    ) {
+        guard !resolvedTransactions.isEmpty else { return }
+        var updated = transactions
+
+        for transaction in resolvedTransactions where transaction.profileID == profileID {
+            if let index = updated.firstIndex(where: {
+                $0.profileID == profileID
+                    && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
+            }) {
+                updated[index] = transaction.preservingID(updated[index].id)
+            } else {
+                updated.append(transaction)
+            }
+        }
+
+        let resolvedIDs = Set(resolvedTransactions.map { $0.transactionID.lowercased() })
+        pendingTransactions.removeAll {
+            $0.profileID == profileID
+                && resolvedIDs.contains($0.transactionID.lowercased())
+        }
+        transactions = updated
+        transactionRevision &+= 1
+        save()
+    }
+
+    func reloadCachedTransactions(profileID: UUID) {
+        guard let cached = transactionCache.load(profileID: profileID) else { return }
+        transactions = transactions.filter { $0.profileID != profileID } + cached
+        pendingTransactions = pendingTransactions.filter { $0.profileID != profileID }
+            + cached.filter { $0.status == .pending }
+        transactionRevision &+= 1
     }
 
     func remove(at offsets: IndexSet) {
@@ -220,9 +384,11 @@ final class WalletStore: ObservableObject {
             UserDefaults.standard.removeObject(
                 forKey: receiveIndexKeyPrefix + profileID.uuidString
             )
+            transactionCache.remove(profileID: profileID)
         }
 
         transactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
 
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
@@ -244,9 +410,32 @@ final class WalletStore: ObservableObject {
             }
         }
 
+        let legacyTransactions: [WalletTransaction]
         if let data = UserDefaults.standard.data(forKey: transactionsStorageKey),
            let decoded = try? JSONDecoder().decode([WalletTransaction].self, from: data) {
-            transactions = decoded
+            legacyTransactions = decoded
+        } else {
+            legacyTransactions = []
+        }
+
+        var migratedLegacyHistory = false
+        transactions = profiles.flatMap { profile in
+            if let cached = transactionCache.load(profileID: profile.id) {
+                return cached
+            }
+
+            let legacyForProfile = legacyTransactions.filter {
+                $0.profileID == profile.id
+            }
+            if !legacyForProfile.isEmpty {
+                migratedLegacyHistory = true
+            }
+            return legacyForProfile
+        }
+        pendingTransactions = transactions.filter { $0.status == .pending }
+
+        if migratedLegacyHistory {
+            persistTransactionCache()
         }
     }
 
@@ -254,9 +443,27 @@ final class WalletStore: ObservableObject {
         if let data = try? JSONEncoder().encode(profiles) {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
-        if let data = try? JSONEncoder().encode(transactions) {
-            UserDefaults.standard.set(data, forKey: transactionsStorageKey)
-        }
+        persistTransactionCache()
         UserDefaults.standard.set(selectedProfileID?.uuidString, forKey: selectionKey)
+    }
+
+    private func persistTransactionCache() {
+        for profile in profiles {
+            transactionCache.save(
+                transactions.filter { $0.profileID == profile.id },
+                profileID: profile.id
+            )
+        }
+    }
+
+    private func rebuildPublishedTransactions() {
+        let pendingKeys = Set(pendingTransactions.map {
+            "\($0.profileID.uuidString.lowercased()):\($0.transactionID.lowercased())"
+        })
+        transactions = transactions.filter {
+            !pendingKeys.contains(
+                "\($0.profileID.uuidString.lowercased()):\($0.transactionID.lowercased())"
+            )
+        } + pendingTransactions
     }
 }
