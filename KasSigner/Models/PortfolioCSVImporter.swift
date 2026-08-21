@@ -128,7 +128,7 @@ enum WalletTransactionCSVExporter {
         timeZone: TimeZone = .current
     ) -> Data {
         var rows = [columns]
-        rows.append(contentsOf: records.sorted { $0.timestamp < $1.timestamp }.map { record in
+        rows.append(contentsOf: records.sorted { $0.timestamp > $1.timestamp }.map { record in
             [
                 dateString(record.timestamp, timeZone: timeZone),
                 "KAS",

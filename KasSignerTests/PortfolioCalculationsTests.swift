@@ -530,8 +530,8 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertTrue(text.contains("2026-08-21 11:11:00 -04:00,KAS,Sent,0.03,28,0.84,Payment"))
         XCTAssertTrue(text.contains("\"Gift, \"\"summer\"\"\nwallet\""))
         XCTAssertLessThan(
-            text.range(of: "Received")!.lowerBound,
-            text.range(of: "Sent")!.lowerBound
+            text.range(of: "Sent")!.lowerBound,
+            text.range(of: "Received")!.lowerBound
         )
     }
 
