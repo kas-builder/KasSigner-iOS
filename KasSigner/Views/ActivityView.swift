@@ -253,7 +253,7 @@ struct ActivityView: View {
             records.append(
                 WalletTransactionCSVRecord(
                     timestamp: transaction.broadcastAt,
-                    type: transaction.direction,
+                    kind: transaction.kind,
                     priceUSD: price,
                     amountKas: Double(transaction.amountSompi) / 100_000_000,
                     notes: coinControlStore.label(forTransactionID: transaction.transactionID)
@@ -530,7 +530,12 @@ struct ActivityView: View {
     }
 
     private func amountText(_ transaction: WalletTransaction) -> String {
-        let prefix = transaction.direction == .sent ? "−" : "+"
+        let prefix: String
+        switch transaction.kind {
+        case .sent: prefix = "−"
+        case .received: prefix = "+"
+        case .internalTransfer: prefix = "↔ "
+        }
         return prefix + formatKas(transaction.amountSompi)
     }
 

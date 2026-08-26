@@ -99,7 +99,7 @@ enum PortfolioCSVExporter {
 
 struct WalletTransactionCSVRecord {
     let timestamp: Date
-    let type: WalletTransactionDirection
+    let kind: WalletTransactionKind
     let priceUSD: Double
     let amountKas: Double
     let notes: String
@@ -132,7 +132,7 @@ enum WalletTransactionCSVExporter {
             [
                 dateString(record.timestamp, timeZone: timeZone),
                 "KAS",
-                record.type == .received ? "Received" : "Sent",
+                typeString(record.kind),
                 decimalString(record.priceUSD),
                 decimalString(record.amountKas),
                 decimalString(record.amountKas * record.priceUSD),
@@ -173,6 +173,14 @@ enum WalletTransactionCSVExporter {
     private static func decimalString(_ value: Double) -> String {
         String(format: "%.8f", locale: Locale(identifier: "en_US_POSIX"), value)
             .replacingOccurrences(of: #"\.?0+$"#, with: "", options: .regularExpression)
+    }
+
+    private static func typeString(_ kind: WalletTransactionKind) -> String {
+        switch kind {
+        case .sent: "Sent"
+        case .received: "Received"
+        case .internalTransfer: "Internal Transfer"
+        }
     }
 
     private static func escapedField(_ value: String) -> String {

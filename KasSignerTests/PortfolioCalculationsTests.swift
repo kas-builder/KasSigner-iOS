@@ -42,6 +42,55 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testKnownWalletBroadcastPreservesInternalTransferAmountWhenConfirmed() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let internalAddress = "kaspa:internal"
+        let transactionID = String(repeating: "b", count: 64)
+        let profile = WalletProfile(
+            id: profileID,
+            name: "Internal Transfer Test",
+            kpub: "kpub-test",
+            receiveAddresses: [internalAddress]
+        )
+        store.add(profile)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: internalAddress,
+            amountSompi: 250_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(store.pendingTransactions.first?.kind, .internalTransfer)
+        XCTAssertEqual(store.pendingTransactions.first?.destination, "Internal Transfer")
+        XCTAssertEqual(store.pendingTransactions.first?.amountSompi, 250_000_000)
+
+        store.mergeSyncedTransactions(
+            [
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Self transfer",
+                    amountSompi: 0,
+                    feeSompi: 1_000,
+                    broadcastAt: Date(),
+                    direction: .sent,
+                    status: .confirmed
+                )
+            ],
+            profileID: profileID
+        )
+
+        let confirmed = store.transactions.first { $0.transactionID == transactionID }
+        XCTAssertEqual(confirmed?.kind, .internalTransfer)
+        XCTAssertEqual(confirmed?.destination, "Internal Transfer")
+        XCTAssertEqual(confirmed?.amountSompi, 250_000_000)
+        XCTAssertEqual(confirmed?.status, .confirmed)
+    }
+
+    @MainActor
     func testAddedUTXOTransactionPublishesImmediately() {
         let store = WalletStore()
         let profileID = UUID()
@@ -506,14 +555,14 @@ final class PortfolioCalculationsTests: XCTestCase {
         let timeZone = TimeZone(secondsFromGMT: -4 * 60 * 60)!
         let earlier = WalletTransactionCSVRecord(
             timestamp: ISO8601DateFormatter().date(from: "2026-08-20T03:40:00Z")!,
-            type: .received,
+            kind: .received,
             priceUSD: 0.029,
             amountKas: 9.85,
             notes: "Gift, \"summer\"\nwallet"
         )
         let later = WalletTransactionCSVRecord(
             timestamp: ISO8601DateFormatter().date(from: "2026-08-21T15:11:00Z")!,
-            type: .sent,
+            kind: .sent,
             priceUSD: 0.03,
             amountKas: 28,
             notes: "Payment"
@@ -546,6 +595,22 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 
+    func testWalletTransactionCSVExportIncludesInternalTransferValue() {
+        let record = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-21T15:11:00Z")!,
+            kind: .internalTransfer,
+            priceUSD: 0.03,
+            amountKas: 250,
+            notes: "Moved to savings"
+        )
+
+        let text = String(
+            decoding: WalletTransactionCSVExporter.data(records: [record]),
+            as: UTF8.self
+        )
+        XCTAssertTrue(text.contains(",KAS,Internal Transfer,0.03,250,7.5,Moved to savings"))
+    }
+
     func testLegacyBroadcastTransactionDecodesAsPendingSentTransaction() throws {
         struct LegacyTransaction: Encodable {
             let id: UUID
@@ -572,6 +637,7 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
 
         XCTAssertEqual(decoded.direction, .sent)
+        XCTAssertEqual(decoded.kind, .sent)
         XCTAssertEqual(decoded.status, .pending)
     }
 

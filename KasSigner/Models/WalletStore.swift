@@ -5,6 +5,12 @@ enum WalletTransactionDirection: String, Codable, Equatable {
     case received
 }
 
+enum WalletTransactionKind: String, Codable, Equatable {
+    case sent
+    case received
+    case internalTransfer
+}
+
 enum WalletTransactionStatus: String, Codable, Equatable {
     case pending
     case confirmed
@@ -19,6 +25,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     let feeSompi: UInt64
     let broadcastAt: Date
     let direction: WalletTransactionDirection
+    let kind: WalletTransactionKind
     let status: WalletTransactionStatus
 
     init(
@@ -30,6 +37,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         feeSompi: UInt64,
         broadcastAt: Date,
         direction: WalletTransactionDirection,
+        kind: WalletTransactionKind? = nil,
         status: WalletTransactionStatus
     ) {
         self.id = id
@@ -40,6 +48,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         self.feeSompi = feeSompi
         self.broadcastAt = broadcastAt
         self.direction = direction
+        self.kind = kind ?? (direction == .sent ? .sent : .received)
         self.status = status
     }
 
@@ -52,6 +61,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         case feeSompi
         case broadcastAt
         case direction
+        case kind
         case status
     }
 
@@ -68,6 +78,10 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             WalletTransactionDirection.self,
             forKey: .direction
         ) ?? .sent
+        kind = try container.decodeIfPresent(
+            WalletTransactionKind.self,
+            forKey: .kind
+        ) ?? (direction == .sent ? .sent : .received)
         status = try container.decodeIfPresent(
             WalletTransactionStatus.self,
             forKey: .status
@@ -84,6 +98,29 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             feeSompi: feeSompi,
             broadcastAt: broadcastAt,
             direction: direction,
+            kind: kind,
+            status: status
+        )
+    }
+
+    func preservingLocalInternalTransfer(from existing: WalletTransaction) -> WalletTransaction {
+        guard existing.kind == .internalTransfer,
+              direction == .sent,
+              amountSompi == 0,
+              destination == "Self transfer" else {
+            return preservingID(existing.id)
+        }
+
+        return WalletTransaction(
+            id: existing.id,
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "Internal Transfer",
+            amountSompi: existing.amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: broadcastAt,
+            direction: .sent,
+            kind: .internalTransfer,
             status: status
         )
     }
@@ -236,14 +273,27 @@ final class WalletStore: ObservableObject {
 
         guard !normalizedTransactionID.isEmpty else { return }
 
+        let normalizedDestination = destination
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let profile = profiles.first(where: { $0.id == profileID })
+        let knownWalletAddresses = Set(
+            ((profile?.receiveAddresses ?? []) + (profile?.changeAddresses ?? []))
+                .map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+        )
+        let isInternalTransfer = knownWalletAddresses.contains(normalizedDestination)
+
         let pendingTransaction = WalletTransaction(
             profileID: profileID,
             transactionID: normalizedTransactionID,
-            destination: destination,
+            destination: isInternalTransfer ? "Internal Transfer" : destination,
             amountSompi: amountSompi,
             feeSompi: feeSompi,
             broadcastAt: Date(),
             direction: .sent,
+            kind: isInternalTransfer ? .internalTransfer : .sent,
             status: .pending
         )
 
@@ -315,7 +365,7 @@ final class WalletStore: ObservableObject {
             guard let existing = existingByID[transaction.transactionID.lowercased()] else {
                 return transaction
             }
-            return transaction.preservingID(existing.id)
+            return transaction.preservingLocalInternalTransfer(from: existing)
         }
         let pending = pendingTransactions.filter {
             $0.profileID == profileID
@@ -351,7 +401,7 @@ final class WalletStore: ObservableObject {
                 $0.profileID == profileID
                     && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
             }) {
-                updated[index] = transaction.preservingID(updated[index].id)
+                updated[index] = transaction.preservingLocalInternalTransfer(from: updated[index])
             } else {
                 updated.append(transaction)
             }
