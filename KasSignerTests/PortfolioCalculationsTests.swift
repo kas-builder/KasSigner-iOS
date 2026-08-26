@@ -91,6 +91,53 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testLocallyBroadcastTransferToUncachedWalletAddressBecomesInternalWhenConfirmed() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "c", count: 64)
+        let profile = WalletProfile(
+            id: profileID,
+            name: "Uncached Internal Transfer Test",
+            kpub: "kpub-test"
+        )
+        store.add(profile)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "kaspa:uncached-wallet-address",
+            amountSompi: 375_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertTrue(store.transactions.contains {
+            $0.transactionID == transactionID && $0.amountSompi == 375_000_000
+        })
+
+        store.mergeResolvedTransactions(
+            [
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Self transfer",
+                    amountSompi: 0,
+                    feeSompi: 1_000,
+                    broadcastAt: Date(),
+                    direction: .sent,
+                    status: .confirmed
+                )
+            ],
+            profileID: profileID
+        )
+
+        let confirmed = store.transactions.first { $0.transactionID == transactionID }
+        XCTAssertEqual(confirmed?.kind, .internalTransfer)
+        XCTAssertEqual(confirmed?.destination, "Internal Transfer")
+        XCTAssertEqual(confirmed?.amountSompi, 375_000_000)
+        XCTAssertEqual(confirmed?.status, .confirmed)
+    }
+
+    @MainActor
     func testAddedUTXOTransactionPublishesImmediately() {
         let store = WalletStore()
         let profileID = UUID()
@@ -682,7 +729,8 @@ final class PortfolioCalculationsTests: XCTestCase {
         let transactions = client.mapTransactions(
             [incoming, outgoing, incoming],
             profileID: profileID,
-            walletAddresses: Set([walletAddress])
+            receiveAddresses: Set([walletAddress]),
+            changeAddresses: []
         )
 
         XCTAssertEqual(transactions.count, 2)
@@ -697,6 +745,48 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(sent?.feeSompi, 10)
         XCTAssertEqual(sent?.destination, externalAddress)
         XCTAssertEqual(sent?.status, .confirmed)
+    }
+
+    func testIndexedHistoryMapsInternalDestinationSeparatelyFromChange() {
+        let profileID = UUID()
+        let inputAddress = "kaspa:qz5esder"
+        let internalReceiveAddress = "kaspa:qq47r9e5"
+        let changeAddress = "kaspa:qq0ycwwa"
+        let client = TransactionHistoryClient()
+        let indexed = IndexedTransaction(
+            transactionID: "c29d9dc3f1ce740b9c743563483a5d0d9ab214358faa7bb7cb25bbb1d7d6b986",
+            blockTime: 1_787_763_994_363,
+            isAccepted: true,
+            acceptingBlockTime: 1_787_763_994_583,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: inputAddress,
+                    previousOutpointAmount: 30_905_800_294
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(
+                    amount: 2_400_000_000,
+                    scriptPublicKeyAddress: internalReceiveAddress
+                ),
+                IndexedTransactionOutput(
+                    amount: 28_505_471_694,
+                    scriptPublicKeyAddress: changeAddress
+                )
+            ]
+        )
+
+        let transaction = client.mapTransactions(
+            [indexed],
+            profileID: profileID,
+            receiveAddresses: Set([inputAddress, internalReceiveAddress]),
+            changeAddresses: Set([changeAddress])
+        ).first
+
+        XCTAssertEqual(transaction?.kind, .internalTransfer)
+        XCTAssertEqual(transaction?.destination, "Internal Transfer")
+        XCTAssertEqual(transaction?.amountSompi, 2_400_000_000)
+        XCTAssertEqual(transaction?.feeSompi, 328_600)
     }
 
     func testOldDatedManualTransactionUsesHistoricalPriceInsteadOfLivePrice() {

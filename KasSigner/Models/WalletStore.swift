@@ -103,8 +103,11 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         )
     }
 
-    func preservingLocalInternalTransfer(from existing: WalletTransaction) -> WalletTransaction {
-        guard existing.kind == .internalTransfer,
+    func preservingLocallyBroadcastInternalTransfer(from existing: WalletTransaction) -> WalletTransaction {
+        let hasExactLocalTransferDetails = existing.kind == .internalTransfer
+            || (existing.status == .pending && existing.amountSompi > 0)
+
+        guard hasExactLocalTransferDetails,
               direction == .sent,
               amountSompi == 0,
               destination == "Self transfer" else {
@@ -365,7 +368,7 @@ final class WalletStore: ObservableObject {
             guard let existing = existingByID[transaction.transactionID.lowercased()] else {
                 return transaction
             }
-            return transaction.preservingLocalInternalTransfer(from: existing)
+            return transaction.preservingLocallyBroadcastInternalTransfer(from: existing)
         }
         let pending = pendingTransactions.filter {
             $0.profileID == profileID
@@ -401,7 +404,7 @@ final class WalletStore: ObservableObject {
                 $0.profileID == profileID
                     && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
             }) {
-                updated[index] = transaction.preservingLocalInternalTransfer(from: updated[index])
+                updated[index] = transaction.preservingLocallyBroadcastInternalTransfer(from: updated[index])
             } else {
                 updated.append(transaction)
             }

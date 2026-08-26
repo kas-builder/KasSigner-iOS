@@ -106,7 +106,8 @@ struct TransactionHistoryClient: Sendable {
         return mapTransactions(
             indexedTransactions,
             profileID: profile.id,
-            walletAddresses: Set(addresses)
+            receiveAddresses: Set(profile.receiveAddresses),
+            changeAddresses: Set(profile.changeAddresses)
         )
     }
 
@@ -131,11 +132,11 @@ struct TransactionHistoryClient: Sendable {
         request.timeoutInterval = 15
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
-        let addresses = Set(profile.receiveAddresses + profile.changeAddresses)
         return mapTransactions(
             [indexed],
             profileID: profile.id,
-            walletAddresses: addresses
+            receiveAddresses: Set(profile.receiveAddresses),
+            changeAddresses: Set(profile.changeAddresses)
         ).first
     }
 
@@ -243,8 +244,12 @@ struct TransactionHistoryClient: Sendable {
     func mapTransactions(
         _ indexedTransactions: [IndexedTransaction],
         profileID: UUID,
-        walletAddresses: Set<String>
+        receiveAddresses: Set<String>,
+        changeAddresses: Set<String>
     ) -> [WalletTransaction] {
+        let normalizedReceiveAddresses = Set(receiveAddresses.map { $0.lowercased() })
+        let normalizedChangeAddresses = Set(changeAddresses.map { $0.lowercased() })
+        let walletAddresses = normalizedReceiveAddresses.union(normalizedChangeAddresses)
         var mappedByID: [String: WalletTransaction] = [:]
 
         for transaction in indexedTransactions {
@@ -256,12 +261,12 @@ struct TransactionHistoryClient: Sendable {
             let outputs = transaction.outputs ?? []
             let walletInputTotal = inputs.reduce(UInt64(0)) { result, input in
                 guard let address = input.previousOutpointAddress,
-                      walletAddresses.contains(address) else { return result }
+                      walletAddresses.contains(address.lowercased()) else { return result }
                 return result &+ (input.previousOutpointAmount ?? 0)
             }
             let walletOutputTotal = outputs.reduce(UInt64(0)) { result, output in
                 guard let address = output.scriptPublicKeyAddress,
-                      walletAddresses.contains(address) else { return result }
+                      walletAddresses.contains(address.lowercased()) else { return result }
                 return result &+ output.amount
             }
             guard walletInputTotal > 0 || walletOutputTotal > 0 else { continue }
@@ -274,25 +279,41 @@ struct TransactionHistoryClient: Sendable {
             let direction: WalletTransactionDirection = walletInputTotal > 0 ? .sent : .received
             let amount: UInt64
             let counterparty: String
+            let kind: WalletTransactionKind
 
             if direction == .sent {
                 let externalOutputs = outputs.filter {
                     guard let address = $0.scriptPublicKeyAddress else { return false }
-                    return !walletAddresses.contains(address)
+                    return !walletAddresses.contains(address.lowercased())
                 }
-                amount = externalOutputs.reduce(UInt64(0)) { $0 &+ $1.amount }
-                let addresses = Array(Set(externalOutputs.compactMap(\.scriptPublicKeyAddress)))
-                counterparty = addresses.count == 1
-                    ? addresses[0]
-                    : addresses.isEmpty ? "Self transfer" : "\(addresses.count) recipients"
+                if externalOutputs.isEmpty {
+                    let internalDestinationOutputs = outputs.filter {
+                        guard let address = $0.scriptPublicKeyAddress?.lowercased() else {
+                            return false
+                        }
+                        return normalizedReceiveAddresses.contains(address)
+                            && !normalizedChangeAddresses.contains(address)
+                    }
+                    amount = internalDestinationOutputs.reduce(UInt64(0)) { $0 &+ $1.amount }
+                    counterparty = "Internal Transfer"
+                    kind = .internalTransfer
+                } else {
+                    amount = externalOutputs.reduce(UInt64(0)) { $0 &+ $1.amount }
+                    let addresses = Array(Set(externalOutputs.compactMap(\.scriptPublicKeyAddress)))
+                    counterparty = addresses.count == 1
+                        ? addresses[0]
+                        : "\(addresses.count) recipients"
+                    kind = .sent
+                }
             } else {
                 amount = walletOutputTotal
                 let sourceAddresses = Array(Set(inputs.compactMap(\.previousOutpointAddress).filter {
-                    !walletAddresses.contains($0)
+                    !walletAddresses.contains($0.lowercased())
                 }))
                 counterparty = sourceAddresses.count == 1
                     ? sourceAddresses[0]
                     : sourceAddresses.isEmpty ? "Coinbase or unknown source" : "Multiple senders"
+                kind = .received
             }
 
             let milliseconds = transaction.acceptingBlockTime ?? transaction.blockTime ?? 0
@@ -306,6 +327,7 @@ struct TransactionHistoryClient: Sendable {
                     ? Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
                     : Date(),
                 direction: direction,
+                kind: kind,
                 status: transaction.isAccepted == false ? .pending : .confirmed
             )
         }
