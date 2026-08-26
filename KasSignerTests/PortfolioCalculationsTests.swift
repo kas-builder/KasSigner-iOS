@@ -42,6 +42,74 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testOutOfOrderChangeAddressIsMarkedUsedWithoutMovingCursorBackward() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 5
+            )
+        )
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "d", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndex: 1
+        )
+
+        XCTAssertTrue(
+            store.isChangeAddressLocallyUsed(changeAddresses[1], profileID: profileID)
+        )
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            5
+        )
+
+        if let index = store.profiles.firstIndex(where: { $0.id == profileID }) {
+            store.remove(at: IndexSet(integer: index))
+        }
+    }
+
+    @MainActor
+    func testBroadcastToOwnedReceiveAddressMarksItUsedImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let receiveAddress = "kaspa:owned-receive-address"
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Receive Address Test",
+                kpub: "kpub-test",
+                receiveAddresses: [receiveAddress]
+            )
+        )
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "e", count: 64),
+            destination: receiveAddress,
+            amountSompi: 100_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertTrue(
+            store.isReceiveAddressLocallyUsed(receiveAddress, profileID: profileID)
+        )
+
+        if let index = store.profiles.firstIndex(where: { $0.id == profileID }) {
+            store.remove(at: IndexSet(integer: index))
+        }
+    }
+
+    @MainActor
     func testKnownWalletBroadcastPreservesInternalTransferAmountWhenConfirmed() {
         let store = WalletStore()
         let profileID = UUID()

@@ -534,6 +534,10 @@ struct ReceiveView: View {
 
         for (index, address) in addresses.enumerated() {
             guard !addressWasManuallySelected else { return }
+            guard !walletStore.isReceiveAddressLocallyUsed(
+                address,
+                profileID: profile.id
+            ) else { continue }
 
             do {
                 let status = try await AddressUsageChecker.shared.status(for: address)
@@ -565,6 +569,14 @@ struct ReceiveView: View {
     ) async {
         guard preferences.addressStatusDisplayMode.isEnabled, !address.isEmpty else {
             addressUsageStatus = .unavailable
+            return
+        }
+
+        let isLocallyUsed = addressChain == .change
+            ? walletStore.isChangeAddressLocallyUsed(address, profileID: profile.id)
+            : walletStore.isReceiveAddressLocallyUsed(address, profileID: profile.id)
+        if isLocallyUsed {
+            addressUsageStatus = .used
             return
         }
 

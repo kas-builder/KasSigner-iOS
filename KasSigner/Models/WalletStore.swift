@@ -236,6 +236,8 @@ final class WalletStore: ObservableObject {
     private let sendSessionsKey = "kassigner.sendSessions.v1"
     private let receiveIndexKeyPrefix = "kassigner.lastViewedReceiveIndex.v1."
     private let changeIndexKeyPrefix = "kassigner.lastViewedChangeIndex.v1."
+    private let usedChangeAddressesKeyPrefix = "kassigner.usedChangeAddresses.v1."
+    private let usedReceiveAddressesKeyPrefix = "kassigner.usedReceiveAddresses.v1."
     private let transactionCache = WalletTransactionCache()
     private var isLoading = true
 
@@ -362,6 +364,18 @@ final class WalletStore: ObservableObject {
         )
     }
 
+    func isChangeAddressLocallyUsed(_ address: String, profileID: UUID) -> Bool {
+        locallyUsedChangeAddresses(for: profileID).contains(
+            normalizedWalletAddress(address)
+        )
+    }
+
+    func isReceiveAddressLocallyUsed(_ address: String, profileID: UUID) -> Bool {
+        locallyUsedReceiveAddresses(for: profileID).contains(
+            normalizedWalletAddress(address)
+        )
+    }
+
     func recordBroadcastedTransaction(
         profileID: UUID,
         transactionID: String,
@@ -378,6 +392,12 @@ final class WalletStore: ObservableObject {
 
         if let committedChangeIndex,
            let profileIndex = profiles.firstIndex(where: { $0.id == profileID }) {
+            if profiles[profileIndex].changeAddresses.indices.contains(committedChangeIndex) {
+                markChangeAddressLocallyUsed(
+                    profiles[profileIndex].changeAddresses[committedChangeIndex],
+                    profileID: profileID
+                )
+            }
             profiles[profileIndex].nextChangeIndex = max(
                 profiles[profileIndex].nextChangeIndex,
                 committedChangeIndex + 1
@@ -389,6 +409,14 @@ final class WalletStore: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         let profile = profiles.first(where: { $0.id == profileID })
+        if profile?.receiveAddresses.contains(where: {
+            normalizedWalletAddress($0) == normalizedDestination
+        }) == true {
+            markReceiveAddressLocallyUsed(
+                normalizedDestination,
+                profileID: profileID
+            )
+        }
         let knownWalletAddresses = Set(
             ((profile?.receiveAddresses ?? []) + (profile?.changeAddresses ?? []))
                 .map {
@@ -549,6 +577,12 @@ final class WalletStore: ObservableObject {
             UserDefaults.standard.removeObject(
                 forKey: changeIndexKeyPrefix + profileID.uuidString
             )
+            UserDefaults.standard.removeObject(
+                forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
+            )
+            UserDefaults.standard.removeObject(
+                forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
+            )
             transactionCache.remove(profileID: profileID)
         }
 
@@ -631,6 +665,44 @@ final class WalletStore: ObservableObject {
         if let data = try? JSONEncoder().encode(sendSessions) {
             UserDefaults.standard.set(data, forKey: sendSessionsKey)
         }
+    }
+
+    private func locallyUsedChangeAddresses(for profileID: UUID) -> Set<String> {
+        Set(
+            UserDefaults.standard.stringArray(
+                forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
+            ) ?? []
+        )
+    }
+
+    private func markChangeAddressLocallyUsed(_ address: String, profileID: UUID) {
+        var addresses = locallyUsedChangeAddresses(for: profileID)
+        addresses.insert(normalizedWalletAddress(address))
+        UserDefaults.standard.set(
+            addresses.sorted(),
+            forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
+        )
+    }
+
+    private func locallyUsedReceiveAddresses(for profileID: UUID) -> Set<String> {
+        Set(
+            UserDefaults.standard.stringArray(
+                forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
+            ) ?? []
+        )
+    }
+
+    private func markReceiveAddressLocallyUsed(_ address: String, profileID: UUID) {
+        var addresses = locallyUsedReceiveAddresses(for: profileID)
+        addresses.insert(normalizedWalletAddress(address))
+        UserDefaults.standard.set(
+            addresses.sorted(),
+            forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
+        )
+    }
+
+    private func normalizedWalletAddress(_ address: String) -> String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func persistTransactionCache() {

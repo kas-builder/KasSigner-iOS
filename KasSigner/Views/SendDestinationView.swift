@@ -2139,7 +2139,10 @@ private struct ChangeAddressPickerView: View {
                             index: index,
                             address: address,
                             isSelected: index == selectedIndex,
-                            isEligible: index >= profile.nextChangeIndex
+                            isLocallyUsed: walletStore.isChangeAddressLocallyUsed(
+                                address,
+                                profileID: profileID
+                            )
                         ) {
                             selectedIndex = index
                             selectedAddress = address
@@ -2200,7 +2203,7 @@ private struct ChangeAddressSelectionRow: View {
     let index: Int
     let address: String
     let isSelected: Bool
-    let isEligible: Bool
+    let isLocallyUsed: Bool
     let select: () -> Void
     @State private var status: AddressUsageStatus = .checking
 
@@ -2224,8 +2227,12 @@ private struct ChangeAddressSelectionRow: View {
                 }
             }
         }
-        .disabled(!isEligible || status != .fresh)
+        .disabled(isLocallyUsed || status != .fresh)
         .task(id: address) {
+            guard !isLocallyUsed else {
+                status = .used
+                return
+            }
             do {
                 status = try await AddressUsageChecker.shared.status(for: address)
             } catch {
