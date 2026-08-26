@@ -209,6 +209,11 @@ struct WalletHomeView: View {
                 showingSendFlow: $showingSendFlow
             )
         }
+        .onChange(of: showingSendFlow) { _, isShowing in
+            if !isShowing {
+                walletStore.cancelSendSession(profileID: profile.id)
+            }
+        }
     }
 
     private func walletHomeReceiveAddress(for profile: WalletProfile) -> String {
@@ -305,7 +310,10 @@ struct SendUTXOSelectionView: View {
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var walletStore: WalletStore
     @State private var showingUTXOSelectionLimit = false
+    @State private var showingDestination = false
+    @State private var showingSessionError = false
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -336,12 +344,15 @@ struct SendUTXOSelectionView: View {
                     }
                     .background(Color(.systemGroupedBackground))
 
-                    NavigationLink {
-                        SendDestinationView(
-                            profile: profile,
-                            selectedUTXOs: selectedUTXOs,
-                            showingSendFlow: $showingSendFlow
-                        )
+                    Button {
+                        guard walletStore.beginSendSession(
+                            profileID: profile.id,
+                            selectedUTXOs: selectedUTXOs
+                        ) != nil else {
+                            showingSessionError = true
+                            return
+                        }
+                        showingDestination = true
                     } label: {
                         Text(selectedUTXOs.count == 1 ? "Send UTXO" : "Send UTXOs")
                             .font(.headline)
@@ -359,6 +370,13 @@ struct SendUTXOSelectionView: View {
         .navigationTitle("Select UTXOs")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
+        .navigationDestination(isPresented: $showingDestination) {
+            SendDestinationView(
+                profile: profile,
+                selectedUTXOs: selectedUTXOs,
+                showingSendFlow: $showingSendFlow
+            )
+        }
         .onAppear {
             coinControlStore.activate(profileID: profile.id)
             if clearSelectionOnAppear {
@@ -369,6 +387,11 @@ struct SendUTXOSelectionView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("KasSigner supports at most 8 selected UTXOs in one transaction. Additional UTXOs were not selected.")
+        }
+        .alert("Send could not begin", isPresented: $showingSessionError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("No fresh change address is available. Refresh the wallet and try again.")
         }
     }
 

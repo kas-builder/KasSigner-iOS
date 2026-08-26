@@ -129,6 +129,31 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     }
 }
 
+enum SendSessionStage: String, Codable, Equatable {
+    case draft
+    case verified
+    case signing
+    case signed
+}
+
+struct SendSession: Identifiable, Codable, Equatable {
+    let id: UUID
+    let profileID: UUID
+    var selectedUTXOs: [WalletUTXO]
+    var changeAddressIndex: Int
+    var changeAddress: String
+    var destination: String
+    var amountText: String
+    var sendMax: Bool
+    var feeChoice: String
+    var customFeeText: String
+    var unsignedPSKB: String?
+    var verifiedDigest: String?
+    var stage: SendSessionStage
+    let createdAt: Date
+    var updatedAt: Date
+}
+
 private final class WalletTransactionCache {
     private let fileManager: FileManager
     private let directoryURL: URL?
@@ -196,6 +221,7 @@ final class WalletStore: ObservableObject {
     @Published private(set) var profiles: [WalletProfile] = []
     @Published private(set) var transactions: [WalletTransaction] = []
     @Published private(set) var pendingTransactions: [WalletTransaction] = []
+    @Published private(set) var sendSessions: [SendSession] = []
     @Published private(set) var transactionRevision: UInt64 = 0
     @Published var selectedProfileID: UUID? {
         didSet {
@@ -207,7 +233,9 @@ final class WalletStore: ObservableObject {
     private let storageKey = "kassigner.walletProfiles.v1"
     private let transactionsStorageKey = "kassigner.walletTransactions.v1"
     private let selectionKey = "kassigner.selectedWalletProfile.v1"
+    private let sendSessionsKey = "kassigner.sendSessions.v1"
     private let receiveIndexKeyPrefix = "kassigner.lastViewedReceiveIndex.v1."
+    private let changeIndexKeyPrefix = "kassigner.lastViewedChangeIndex.v1."
     private let transactionCache = WalletTransactionCache()
     private var isLoading = true
 
@@ -231,6 +259,60 @@ final class WalletStore: ObservableObject {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         profiles[index] = profile
         save()
+    }
+
+    @discardableResult
+    func beginSendSession(profileID: UUID, selectedUTXOs: [WalletUTXO]) -> SendSession? {
+        guard !selectedUTXOs.isEmpty,
+              let profile = profiles.first(where: { $0.id == profileID }),
+              profile.changeAddresses.indices.contains(profile.nextChangeIndex)
+        else { return nil }
+
+        if var existing = sendSessions.first(where: { $0.profileID == profileID }) {
+            existing.selectedUTXOs = selectedUTXOs
+            existing.updatedAt = Date()
+            replaceSendSession(existing)
+            return existing
+        }
+
+        let now = Date()
+        let session = SendSession(
+            id: UUID(),
+            profileID: profileID,
+            selectedUTXOs: selectedUTXOs,
+            changeAddressIndex: profile.nextChangeIndex,
+            changeAddress: profile.changeAddresses[profile.nextChangeIndex],
+            destination: "",
+            amountText: "",
+            sendMax: false,
+            feeChoice: "normal",
+            customFeeText: "",
+            unsignedPSKB: nil,
+            verifiedDigest: nil,
+            stage: .draft,
+            createdAt: now,
+            updatedAt: now
+        )
+        sendSessions.removeAll { $0.profileID == profileID }
+        sendSessions.append(session)
+        saveSendSessions()
+        return session
+    }
+
+    func sendSession(profileID: UUID) -> SendSession? {
+        sendSessions.first { $0.profileID == profileID }
+    }
+
+    func updateSendSession(_ session: SendSession) {
+        guard profiles.contains(where: { $0.id == session.profileID }) else { return }
+        var updated = session
+        updated.updatedAt = Date()
+        replaceSendSession(updated)
+    }
+
+    func cancelSendSession(profileID: UUID) {
+        sendSessions.removeAll { $0.profileID == profileID }
+        saveSendSessions()
     }
 
     @discardableResult
@@ -263,18 +345,45 @@ final class WalletStore: ObservableObject {
         )
     }
 
+    func lastViewedChangeIndex(for profileID: UUID, addressCount: Int) -> Int {
+        guard addressCount > 0 else { return 0 }
+        let stored = UserDefaults.standard.integer(
+            forKey: changeIndexKeyPrefix + profileID.uuidString
+        )
+        return min(max(0, stored), addressCount - 1)
+    }
+
+    func setLastViewedChangeIndex(_ index: Int, for profileID: UUID, addressCount: Int) {
+        guard addressCount > 0 else { return }
+        let clamped = min(max(0, index), addressCount - 1)
+        UserDefaults.standard.set(
+            clamped,
+            forKey: changeIndexKeyPrefix + profileID.uuidString
+        )
+    }
+
     func recordBroadcastedTransaction(
         profileID: UUID,
         transactionID: String,
         destination: String,
         amountSompi: UInt64,
-        feeSompi: UInt64
+        feeSompi: UInt64,
+        committedChangeIndex: Int? = nil
     ) {
         let normalizedTransactionID = transactionID
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
         guard !normalizedTransactionID.isEmpty else { return }
+
+        if let committedChangeIndex,
+           let profileIndex = profiles.firstIndex(where: { $0.id == profileID }) {
+            profiles[profileIndex].nextChangeIndex = max(
+                profiles[profileIndex].nextChangeIndex,
+                committedChangeIndex + 1
+            )
+        }
+        sendSessions.removeAll { $0.profileID == profileID }
 
         let normalizedDestination = destination
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -437,8 +546,13 @@ final class WalletStore: ObservableObject {
             UserDefaults.standard.removeObject(
                 forKey: receiveIndexKeyPrefix + profileID.uuidString
             )
+            UserDefaults.standard.removeObject(
+                forKey: changeIndexKeyPrefix + profileID.uuidString
+            )
             transactionCache.remove(profileID: profileID)
         }
+
+        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
 
         transactions.removeAll { removedProfileIDs.contains($0.profileID) }
         pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
@@ -487,6 +601,12 @@ final class WalletStore: ObservableObject {
         }
         pendingTransactions = transactions.filter { $0.status == .pending }
 
+        if let data = UserDefaults.standard.data(forKey: sendSessionsKey),
+           let decoded = try? JSONDecoder().decode([SendSession].self, from: data) {
+            let profileIDs = Set(profiles.map(\.id))
+            sendSessions = decoded.filter { profileIDs.contains($0.profileID) }
+        }
+
         if migratedLegacyHistory {
             persistTransactionCache()
         }
@@ -497,7 +617,20 @@ final class WalletStore: ObservableObject {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
         persistTransactionCache()
+        saveSendSessions()
         UserDefaults.standard.set(selectedProfileID?.uuidString, forKey: selectionKey)
+    }
+
+    private func replaceSendSession(_ session: SendSession) {
+        sendSessions.removeAll { $0.profileID == session.profileID }
+        sendSessions.append(session)
+        saveSendSessions()
+    }
+
+    private func saveSendSessions() {
+        if let data = try? JSONEncoder().encode(sendSessions) {
+            UserDefaults.standard.set(data, forKey: sendSessionsKey)
+        }
     }
 
     private func persistTransactionCache() {

@@ -21,6 +21,9 @@ struct SendDestinationView: View {
     @State private var buildErrorMessage = ""
     @State private var isBuildingPSKB = false
     @State private var verifiedReview: VerifiedTransactionReview?
+    @State private var selectedChangeIndex = 0
+    @State private var selectedChangeAddress = ""
+    @State private var showingChangeAddressPicker = false
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
@@ -195,6 +198,7 @@ struct SendDestinationView: View {
             ScrollView {
                 VStack(spacing: 14) {
                     destinationCard
+                    changeAddressCard
                     amountCard
                     feeCard
                 }
@@ -228,15 +232,24 @@ struct SendDestinationView: View {
         .navigationTitle("Destination & Amount")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
+        .onAppear {
+            restoreSendSession()
+        }
         .onDisappear {
             addressValidationTask?.cancel()
         }
         .onChange(of: selectedFee) { _, _ in
             updateSendMaxAmount()
+            persistSendSession()
         }
         .onChange(of: customFeeText) { _, _ in
             updateSendMaxAmount()
+            persistSendSession()
         }
+        .onChange(of: destinationAddress) { _, _ in persistSendSession() }
+        .onChange(of: amountText) { _, _ in persistSendSession() }
+        .onChange(of: sendMax) { _, _ in persistSendSession() }
+        .onChange(of: selectedChangeIndex) { _, _ in persistSendSession() }
         .onChange(of: syncService.feeEstimate) { _, _ in
             updateSendMaxAmount()
         }
@@ -247,6 +260,15 @@ struct SendDestinationView: View {
                 validateDestinationAddress(scanned)
                 showingScanner = false
             }
+        }
+        .sheet(isPresented: $showingChangeAddressPicker) {
+            ChangeAddressPickerView(
+                profileID: profile.id,
+                selectedIndex: $selectedChangeIndex,
+                selectedAddress: $selectedChangeAddress
+            )
+            .environmentObject(engine)
+            .environmentObject(walletStore)
         }
         .alert("Transaction could not be built", isPresented: $showingBuildError) {
             Button("OK", role: .cancel) {}
@@ -315,10 +337,20 @@ struct SendDestinationView: View {
                 throw SendVerificationError.walletStateChanged
             }
 
+            guard activeProfile.changeAddresses.indices.contains(selectedChangeIndex),
+                  activeProfile.changeAddresses[selectedChangeIndex]
+                    .caseInsensitiveCompare(selectedChangeAddress) == .orderedSame
+            else {
+                throw SendVerificationError.walletStateChanged
+            }
+
+            var draftProfile = activeProfile
+            draftProfile.nextChangeIndex = selectedChangeIndex
+
             // Provisional runtime checkpoint only. Final fee selection will use
             // the exact verified transaction mass.
             let draft = try SendDraft(
-                profile: activeProfile,
+                profile: draftProfile,
                 selectedUTXOs: selectedUTXOs,
                 destination: destinationAddress,
                 amountSompi: amountSompi,
@@ -445,15 +477,7 @@ struct SendDestinationView: View {
             let verifiedChangeSompi = afterFee.partialValue
 
             if verifiedChangeSompi > 0 {
-                guard activeProfile.changeAddresses.indices.contains(
-                    activeProfile.nextChangeIndex
-                ) else {
-                    throw SendVerificationError.changeAddressUnavailable
-                }
-
-                let expectedChangeAddress = activeProfile.changeAddresses[
-                    activeProfile.nextChangeIndex
-                ]
+                let expectedChangeAddress = selectedChangeAddress
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .lowercased()
                 let matchingChangeOutputs = outputs.filter {
@@ -467,21 +491,31 @@ struct SendDestinationView: View {
                     throw SendVerificationError.changeAddressMismatch
                 }
 
-                guard walletStore.reserveChangeAddress(
-                    profileID: activeProfile.id,
-                    index: activeProfile.nextChangeIndex
-                ) else {
-                    throw SendVerificationError.walletStateChanged
-                }
             }
 
             unsignedPSKB = pskb
+            if var session = walletStore.sendSession(profileID: activeProfile.id) {
+                session.destination = normalizedDestination
+                session.amountText = amountText
+                session.sendMax = sendMax
+                session.feeChoice = selectedFee.rawValue
+                session.customFeeText = customFeeText
+                session.changeAddressIndex = selectedChangeIndex
+                session.changeAddress = selectedChangeAddress
+                session.unsignedPSKB = pskb
+                session.verifiedDigest = SHA256.hash(
+                    data: Data(pskb.utf8)
+                ).map { String(format: "%02x", $0) }.joined()
+                session.stage = .verified
+                walletStore.updateSendSession(session)
+            }
             verifiedReview = VerifiedTransactionReview(
                 profileID: activeProfile.id,
                 destination: normalizedDestination,
                 amountSompi: verifiedAmountSompi,
                 feeSompi: reportedFee,
                 changeSompi: verifiedChangeSompi,
+                changeAddressIndex: selectedChangeIndex,
                 selectedInputCount: builtInputs.count,
                 selectedOutpoints: draft.selectedInputs.map { $0.outpointKey },
                 unsignedPSKB: pskb,
@@ -504,6 +538,57 @@ struct SendDestinationView: View {
     private func showBuildError(_ message: String) {
         buildErrorMessage = message
         showingBuildError = true
+    }
+
+    private func restoreSendSession() {
+        guard let session = walletStore.sendSession(profileID: profile.id) else { return }
+        destinationAddress = session.destination
+        amountText = session.amountText
+        sendMax = session.sendMax
+        selectedFee = SendFeeChoice(rawValue: session.feeChoice) ?? .normal
+        customFeeText = session.customFeeText
+        selectedChangeIndex = session.changeAddressIndex
+        selectedChangeAddress = session.changeAddress
+        if !destinationAddress.isEmpty {
+            validateDestinationAddress(destinationAddress)
+        }
+    }
+
+    private func persistSendSession() {
+        guard var session = walletStore.sendSession(profileID: profile.id) else { return }
+        session.destination = destinationAddress
+        session.amountText = amountText
+        session.sendMax = sendMax
+        session.feeChoice = selectedFee.rawValue
+        session.customFeeText = customFeeText
+        session.changeAddressIndex = selectedChangeIndex
+        session.changeAddress = selectedChangeAddress
+        walletStore.updateSendSession(session)
+    }
+
+    private var changeAddressCard: some View {
+        Button {
+            showingChangeAddressPicker = true
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Change Address")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text(selectedChangeAddress.isEmpty ? "Select a fresh change address" : selectedChangeAddress)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.tertiary)
+            }
+            .padding()
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private var destinationCard: some View {
@@ -927,6 +1012,7 @@ private struct VerifiedTransactionReview: Identifiable, Hashable {
     let amountSompi: UInt64
     let feeSompi: UInt64
     let changeSompi: UInt64
+    let changeAddressIndex: Int
     let selectedInputCount: Int
     let selectedOutpoints: [String]
     let unsignedPSKB: String
@@ -1647,7 +1733,10 @@ private struct VerifiedSigningPreparationView: View {
                 transactionID: transactionID,
                 destination: review.destination,
                 amountSompi: review.amountSompi,
-                feeSompi: review.feeSompi
+                feeSompi: review.feeSompi,
+                committedChangeIndex: review.changeSompi > 0
+                    ? review.changeAddressIndex
+                    : nil
             )
             broadcastTransactionID = transactionID
             showingBroadcastSuccess = true
@@ -2023,6 +2112,134 @@ private enum SendVerificationError: LocalizedError {
             return "The transaction did not use the expected unused change address."
         case .walletStateChanged:
             return "The wallet address state changed. Return to the wallet and try again."
+        }
+    }
+}
+
+private struct ChangeAddressPickerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var walletStore: WalletStore
+    let profileID: UUID
+    @Binding var selectedIndex: Int
+    @Binding var selectedAddress: String
+    @State private var isGenerating = false
+    @State private var generationError: String?
+
+    private var profile: WalletProfile? {
+        walletStore.profiles.first { $0.id == profileID }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let profile {
+                    ForEach(Array(profile.changeAddresses.enumerated()), id: \.offset) { index, address in
+                        ChangeAddressSelectionRow(
+                            index: index,
+                            address: address,
+                            isSelected: index == selectedIndex,
+                            isEligible: index >= profile.nextChangeIndex
+                        ) {
+                            selectedIndex = index
+                            selectedAddress = address
+                            dismiss()
+                        }
+                    }
+
+                    Button {
+                        Task { await generateAddress(from: profile) }
+                    } label: {
+                        if isGenerating {
+                            ProgressView()
+                        } else {
+                            Label("Generate New Change Address", systemImage: "plus")
+                        }
+                    }
+                    .disabled(isGenerating)
+                }
+            }
+            .navigationTitle("Change Address")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .alert("Address could not be generated", isPresented: Binding(
+                get: { generationError != nil },
+                set: { if !$0 { generationError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(generationError ?? "Unknown error")
+            }
+        }
+    }
+
+    private func generateAddress(from profile: WalletProfile) async {
+        isGenerating = true
+        defer { isGenerating = false }
+        do {
+            var updated = profile
+            let derived = try await engine.extendAddresses(
+                for: updated,
+                receiveCount: 0,
+                changeCount: 1
+            )
+            updated.receiveAddresses = derived.receiveAddresses
+            updated.changeAddresses = derived.changeAddresses
+            walletStore.update(updated)
+        } catch {
+            generationError = error.localizedDescription
+        }
+    }
+}
+
+private struct ChangeAddressSelectionRow: View {
+    let index: Int
+    let address: String
+    let isSelected: Bool
+    let isEligible: Bool
+    let select: () -> Void
+    @State private var status: AddressUsageStatus = .checking
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Change Address #\(index + 1)")
+                        .foregroundStyle(.primary)
+                    Text(address)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                statusView
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(Color.accentColor)
+                }
+            }
+        }
+        .disabled(!isEligible || status != .fresh)
+        .task(id: address) {
+            do {
+                status = try await AddressUsageChecker.shared.status(for: address)
+            } catch {
+                status = .unavailable
+            }
+        }
+    }
+
+    @ViewBuilder private var statusView: some View {
+        switch status {
+        case .checking: ProgressView().controlSize(.mini)
+        case .fresh: Text("Fresh").foregroundStyle(.green)
+        case .used: Text("Used").foregroundStyle(.orange)
+        case .unavailable: Text("Unavailable").foregroundStyle(.secondary)
         }
     }
 }
