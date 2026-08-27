@@ -475,6 +475,7 @@ struct SendDestinationView: View {
                 throw SendVerificationError.invalidFeeArithmetic
             }
             let verifiedChangeSompi = afterFee.partialValue
+            var verifiedChangeAddress: String?
 
             if verifiedChangeSompi > 0 {
                 let expectedChangeAddress = selectedChangeAddress
@@ -491,6 +492,7 @@ struct SendDestinationView: View {
                     throw SendVerificationError.changeAddressMismatch
                 }
 
+                verifiedChangeAddress = expectedChangeAddress
             }
 
             unsignedPSKB = pskb
@@ -515,6 +517,7 @@ struct SendDestinationView: View {
                 amountSompi: verifiedAmountSompi,
                 feeSompi: reportedFee,
                 changeSompi: verifiedChangeSompi,
+                changeAddress: verifiedChangeAddress,
                 changeAddressIndex: selectedChangeIndex,
                 selectedInputCount: builtInputs.count,
                 selectedOutpoints: draft.selectedInputs.map { $0.outpointKey },
@@ -1012,6 +1015,7 @@ private struct VerifiedTransactionReview: Identifiable, Hashable {
     let amountSompi: UInt64
     let feeSompi: UInt64
     let changeSompi: UInt64
+    let changeAddress: String?
     let changeAddressIndex: Int
     let selectedInputCount: Int
     let selectedOutpoints: [String]
@@ -1201,6 +1205,13 @@ private struct VerifiedTransactionSummaryCards: View {
         VStack(spacing: 16) {
             transactionCard
             destinationCard
+            if let changeAddress = review.changeAddress {
+                addressCard(
+                    title: "Change Address",
+                    address: changeAddress,
+                    accessibilityLabel: "Copy change address"
+                )
+            }
             inputsCard
         }
     }
@@ -1225,25 +1236,37 @@ private struct VerifiedTransactionSummaryCards: View {
     }
 
     private var destinationCard: some View {
+        addressCard(
+            title: "Destination",
+            address: review.destination,
+            accessibilityLabel: "Copy destination"
+        )
+    }
+
+    private func addressCard(
+        title: String,
+        address: String,
+        accessibilityLabel: String
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Destination")
+                Text(title)
                     .font(.title3.weight(.semibold))
 
                 Spacer()
 
                 Button {
-                    UIPasteboard.general.string = review.destination
-                    copyFeedbackCenter.showCopied(review.destination)
+                    UIPasteboard.general.string = address
+                    copyFeedbackCenter.showCopied(address)
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.subheadline.weight(.semibold))
                 }
                 .buttonStyle(SubtlePressButtonStyle())
-                .accessibilityLabel("Copy destination")
+                .accessibilityLabel(accessibilityLabel)
             }
 
-            Text(review.destination)
+            Text(address)
                 .font(.body.monospaced())
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1791,6 +1814,8 @@ private struct VerifiedSigningPreparationView: View {
                     originalPSKBHex: review.unsignedPSKB
                 )
 
+                try await verifyFinalAddresses(in: mergedPSKB)
+
                 signedKSPTForBroadcast = signedKSPT
                 signedPayload = mergedPSKB
                 signedScanFeedback = .accepted
@@ -1852,6 +1877,43 @@ private struct VerifiedSigningPreparationView: View {
 
             // Permit the same displayed M5 frame to be retried after an error.
             lastScannedFrame = nil
+        }
+    }
+
+    @MainActor
+    private func verifyFinalAddresses(in mergedPSKB: String) async throws {
+        let summary = try await engine.summarizePSKB(mergedPSKB)
+        guard let outputs = summary.outputs else {
+            throw SendVerificationError.missingOutputs
+        }
+
+        let destination = review.destination.lowercased()
+        let destinationMatches = outputs.filter {
+            $0.address?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased() == destination
+                && $0.amountSompi == review.amountSompi
+        }
+        guard destinationMatches.count == 1 else {
+            throw SendVerificationError.destinationMismatch
+        }
+
+        if review.changeSompi > 0 {
+            guard let changeAddress = review.changeAddress else {
+                throw SendVerificationError.changeAddressMismatch
+            }
+            let normalizedChangeAddress = changeAddress.lowercased()
+            let changeMatches = outputs.filter {
+                $0.address?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased() == normalizedChangeAddress
+                    && $0.amountSompi == review.changeSompi
+            }
+            guard changeMatches.count == 1 else {
+                throw SendVerificationError.changeAddressMismatch
+            }
+        } else if review.changeAddress != nil {
+            throw SendVerificationError.changeAddressMismatch
         }
     }
 
