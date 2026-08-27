@@ -2210,6 +2210,11 @@ private struct ChangeAddressPickerView: View {
                             selectedAddress = address
                             dismiss()
                         }
+                        .listRowInsets(
+                            EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)
+                        )
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
 
                     Button {
@@ -2268,6 +2273,7 @@ private struct ChangeAddressSelectionRow: View {
     let isLocallyUsed: Bool
     let select: () -> Void
     @State private var status: AddressUsageStatus = .checking
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     var body: some View {
         Button(action: select) {
@@ -2283,12 +2289,25 @@ private struct ChangeAddressSelectionRow: View {
                 }
                 Spacer()
                 statusView
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .foregroundStyle(Color.accentColor)
-                }
             }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(
+                        isSelected
+                            ? accentColor.opacity(0.78)
+                            : Color.primary.opacity(0.03),
+                        lineWidth: isSelected ? 2 : 1
+                    )
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .disabled(isLocallyUsed || status != .fresh)
         .task(id: address) {
             guard !isLocallyUsed else {
