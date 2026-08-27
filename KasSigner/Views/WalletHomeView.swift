@@ -424,57 +424,35 @@ struct SendUTXOSelectionView: View {
     }
 
     private var selectionHeader: some View {
-        VStack(spacing: 11) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Selected")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("\(selectedUTXOs.count) UTXO\(selectedUTXOs.count == 1 ? "" : "s")")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Input total")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(
-                        selectedTotalSompi.map {
-                            formatKas(sompi: $0)
-                        } ?? "Invalid total"
-                    )
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                }
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(selectedUTXOs.count) of \(maximumSelectableCount) selected")
+                    .font(.headline)
+                Text(
+                    selectedTotalSompi.map {
+                        "\(formatKas(sompi: $0)) total"
+                    } ?? "Invalid total"
+                )
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 10) {
-                Button(selectedUTXOs.count == maximumSelectableCount
-                    ? "Clear All"
-                    : (utxos.count > UTXOCoinControlStore.maximumSelectedUTXOs
-                        ? "Select First 8"
-                        : "Select All")) {
-                    if selectedUTXOs.count == maximumSelectableCount {
-                        coinControlStore.clearSelection()
-                    } else {
-                        if coinControlStore.selectAll(utxos) > 0 {
-                            showingUTXOSelectionLimit = true
-                        }
+            Spacer(minLength: 8)
+
+            if selectedUTXOs.isEmpty {
+                Button("Select All") {
+                    if coinControlStore.selectAll(utxos) > 0 {
+                        showingUTXOSelectionLimit = true
                     }
                 }
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.bordered)
-
-                if !selectedUTXOs.isEmpty && selectedUTXOs.count != maximumSelectableCount {
-                    Button("Clear") {
-                        coinControlStore.clearSelection()
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.bordered)
+            } else {
+                Button("Clear All") {
+                    coinControlStore.clearSelection()
                 }
-
-                Spacer()
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.bordered)
             }
         }
         .padding(.horizontal, 13)
