@@ -11,6 +11,7 @@ struct ActivityView: View {
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @EnvironmentObject private var priceService: PriceService
     @Environment(\.openURL) private var openURL
@@ -50,10 +51,6 @@ struct ActivityView: View {
                                 )
                             } else {
                                 LazyVStack(spacing: 12) {
-                                    if let error = syncService.transactionHistoryError {
-                                        historyMessage(error)
-                                    }
-
                                     ForEach(transactions) { transaction in
                                         transactionCard(transaction)
                                     }
@@ -196,6 +193,7 @@ struct ActivityView: View {
             walletStore: walletStore,
             force: force
         )
+        await syncService.refreshVirtualBlueScore(force: force)
         walletStore.reloadCachedTransactions(profileID: profile.id)
     }
 
@@ -284,19 +282,6 @@ struct ActivityView: View {
         }
     }
 
-    private func historyMessage(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.arrow.triangle.2.circlepath")
-                .foregroundStyle(.orange)
-            Text(message)
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(12)
-        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
-    }
-
     private func transactionCard(_ transaction: WalletTransaction) -> some View {
         let label = coinControlStore.label(forTransactionID: transaction.transactionID)
 
@@ -320,8 +305,7 @@ struct ActivityView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 3) {
-                    statusLabel(transaction.status)
-                        .font(.body.weight(.semibold))
+                    statusLabel(transaction)
 
                     Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
@@ -440,12 +424,43 @@ struct ActivityView: View {
             && !value.contains(where: \Character.isWhitespace)
     }
 
-    private func statusLabel(_ status: WalletTransactionStatus) -> some View {
-        Text(status == .confirmed ? "Confirmed" : "Pending")
+    private func statusLabel(_ transaction: WalletTransaction) -> some View {
+        let currentBlueScore = [
+            liveRPCService.sinkBlueScore,
+            syncService.virtualBlueScore
+        ]
+            .compactMap { $0 }
+            .max()
+        let resolvedCount = transaction.confirmationCount(
+            currentBlueScore: currentBlueScore
+        )
+        let count = resolvedCount ?? 0
+        let isFullyConfirmed = count >= WalletTransaction.confirmationThreshold
+            && resolvedCount != nil
+        let isPending = resolvedCount == nil
+
+        let text: String
+        if isPending {
+            text = "Pending"
+        } else if isFullyConfirmed {
+            text = "Confirmed"
+        } else {
+            text = "\(count) confirmations"
+        }
+
+        return Text(text)
+            .font(
+                isFullyConfirmed || isPending
+                    ? .body.weight(.semibold)
+                    : .subheadline.weight(.regular)
+            )
+            .monospacedDigit()
             .foregroundStyle(
-                status == .confirmed
-                    ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                    : .orange
+                isPending
+                    ? Color.yellow
+                    : isFullyConfirmed
+                        ? Color(red: 0.18, green: 0.68, blue: 0.62)
+                        : Color.primary
             )
     }
 

@@ -17,6 +17,8 @@ enum WalletTransactionStatus: String, Codable, Equatable {
 }
 
 struct WalletTransaction: Identifiable, Codable, Equatable {
+    static let confirmationThreshold: UInt64 = 250
+
     let id: UUID
     let profileID: UUID
     let transactionID: String
@@ -27,6 +29,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     let direction: WalletTransactionDirection
     let kind: WalletTransactionKind
     let status: WalletTransactionStatus
+    let acceptingBlockBlueScore: UInt64?
 
     init(
         id: UUID = UUID(),
@@ -38,7 +41,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         broadcastAt: Date,
         direction: WalletTransactionDirection,
         kind: WalletTransactionKind? = nil,
-        status: WalletTransactionStatus
+        status: WalletTransactionStatus,
+        acceptingBlockBlueScore: UInt64? = nil
     ) {
         self.id = id
         self.profileID = profileID
@@ -50,6 +54,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         self.direction = direction
         self.kind = kind ?? (direction == .sent ? .sent : .received)
         self.status = status
+        self.acceptingBlockBlueScore = acceptingBlockBlueScore
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -63,6 +68,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         case direction
         case kind
         case status
+        case acceptingBlockBlueScore
     }
 
     init(from decoder: Decoder) throws {
@@ -86,6 +92,10 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             WalletTransactionStatus.self,
             forKey: .status
         ) ?? .pending
+        acceptingBlockBlueScore = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .acceptingBlockBlueScore
+        )
     }
 
     func preservingID(_ id: UUID) -> WalletTransaction {
@@ -99,7 +109,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             broadcastAt: broadcastAt,
             direction: direction,
             kind: kind,
-            status: status
+            status: status,
+            acceptingBlockBlueScore: acceptingBlockBlueScore
         )
     }
 
@@ -124,8 +135,26 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             broadcastAt: broadcastAt,
             direction: .sent,
             kind: .internalTransfer,
-            status: status
+            status: status,
+            acceptingBlockBlueScore: acceptingBlockBlueScore
         )
+    }
+
+    func confirmationCount(currentBlueScore: UInt64?) -> UInt64? {
+        guard let acceptingBlockBlueScore,
+              let currentBlueScore else {
+            return nil
+        }
+        guard currentBlueScore >= acceptingBlockBlueScore else { return 0 }
+        return currentBlueScore - acceptingBlockBlueScore
+    }
+
+    func needsConfirmationUpdates(currentBlueScore: UInt64?) -> Bool {
+        guard acceptingBlockBlueScore != nil else { return false }
+        guard let count = confirmationCount(currentBlueScore: currentBlueScore) else {
+            return true
+        }
+        return count < Self.confirmationThreshold
     }
 }
 
@@ -480,13 +509,18 @@ final class WalletStore: ObservableObject {
                     feeSompi: 0,
                     broadcastAt: Date(),
                     direction: .received,
-                    status: .confirmed
+                    // A UTXO notification proves the transaction is visible,
+                    // but it does not provide the accepting blue score needed
+                    // to calculate confirmations. Keep the card pending until
+                    // transaction reconciliation supplies that score.
+                    status: .pending
                 )
             )
         }
 
         guard !additions.isEmpty else { return }
         transactions = transactions + additions
+        pendingTransactions.append(contentsOf: additions)
         transactionRevision &+= 1
         save()
     }

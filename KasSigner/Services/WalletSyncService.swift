@@ -6,6 +6,7 @@ struct IndexedTransaction: Decodable, Sendable {
     let blockTime: Int64?
     let isAccepted: Bool?
     let acceptingBlockTime: Int64?
+    let acceptingBlockBlueScore: UInt64?
     let inputs: [IndexedTransactionInput]?
     let outputs: [IndexedTransactionOutput]?
 
@@ -14,9 +15,14 @@ struct IndexedTransaction: Decodable, Sendable {
         case blockTime = "block_time"
         case isAccepted = "is_accepted"
         case acceptingBlockTime = "accepting_block_time"
+        case acceptingBlockBlueScore = "accepting_block_blue_score"
         case inputs
         case outputs
     }
+}
+
+private struct VirtualBlueScoreResponse: Decodable {
+    let blueScore: UInt64
 }
 
 struct IndexedTransactionInput: Decodable, Sendable {
@@ -70,6 +76,17 @@ private enum TransactionHistoryError: LocalizedError {
 
 struct TransactionHistoryClient: Sendable {
     private let baseURL = URL(string: "https://api.kaspa.org")!
+
+    func virtualBlueScore() async throws -> UInt64 {
+        let request = URLRequest(
+            url: baseURL.appending(path: "info/virtual-chain-blue-score")
+        )
+        let (data, _) = try await data(for: request)
+        return try JSONDecoder().decode(
+            VirtualBlueScoreResponse.self,
+            from: data
+        ).blueScore
+    }
 
     func transactions(for profile: WalletProfile) async throws -> [WalletTransaction] {
         guard profile.network.lowercased() == "mainnet" else {
@@ -328,7 +345,11 @@ struct TransactionHistoryClient: Sendable {
                     : Date(),
                 direction: direction,
                 kind: kind,
-                status: transaction.isAccepted == false ? .pending : .confirmed
+                status: transaction.isAccepted == true
+                    && transaction.acceptingBlockBlueScore != nil
+                    ? .confirmed
+                    : .pending,
+                acceptingBlockBlueScore: transaction.acceptingBlockBlueScore
             )
         }
 
@@ -401,11 +422,14 @@ final class WalletSyncService: ObservableObject {
     @Published private(set) var isRefreshingTransactionHistory = false
     @Published private(set) var transactionHistoryError: String?
     @Published private(set) var transactionHistoryUpdatedAt: Date?
+    @Published private(set) var virtualBlueScore: UInt64?
 
     private var activeProfileID: UUID?
     private var lastRefreshAttempt: Date?
     private var lastTransactionHistoryAttempt: [UUID: Date] = [:]
     private var transactionHistoryProfilesInFlight = Set<UUID>()
+    private var virtualBlueScoreRefreshInFlight = false
+    private var lastVirtualBlueScoreAttempt: Date?
     private let transactionHistoryClient = TransactionHistoryClient()
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "org.kassigner.KasSigner.network-monitor")
@@ -417,9 +441,32 @@ final class WalletSyncService: ObservableObject {
         lastRefreshAttempt = nil
         transactionHistoryError = nil
         transactionHistoryUpdatedAt = nil
+        virtualBlueScore = nil
+        lastVirtualBlueScoreAttempt = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
 
         snapshot = WalletSnapshotCache.shared.load(profileID: profile.id)
+    }
+
+    func refreshVirtualBlueScore(force: Bool = false) async {
+        guard isNetworkAvailable else { return }
+        if virtualBlueScoreRefreshInFlight { return }
+        if !force,
+           let lastVirtualBlueScoreAttempt,
+           Date().timeIntervalSince(lastVirtualBlueScoreAttempt) < 0.20 {
+            return
+        }
+
+        lastVirtualBlueScoreAttempt = Date()
+        virtualBlueScoreRefreshInFlight = true
+
+        do {
+            virtualBlueScore = try await transactionHistoryClient.virtualBlueScore()
+        } catch {
+            // Keep the last node-driven score when a transient request fails.
+        }
+
+        virtualBlueScoreRefreshInFlight = false
     }
 
     init() {
@@ -568,7 +615,9 @@ final class WalletSyncService: ObservableObject {
                     id: transaction.transactionID,
                     for: profile
                 ) {
-                    resolved.append(indexed)
+                    if indexed.acceptingBlockBlueScore != nil {
+                        resolved.append(indexed)
+                    }
                 }
             } catch {
                 // The node/indexer may not expose a just-broadcast transaction yet.
@@ -602,7 +651,11 @@ final class WalletSyncService: ObservableObject {
                         id: transactionID,
                         for: profile
                     ) {
-                        resolved.append(indexed)
+                        if indexed.acceptingBlockBlueScore != nil {
+                            resolved.append(indexed)
+                        } else {
+                            stillUnresolved.append(transactionID)
+                        }
                     } else {
                         stillUnresolved.append(transactionID)
                     }

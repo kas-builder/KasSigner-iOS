@@ -12,6 +12,7 @@ final class KaspaLiveRPCService: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var notificationVersion = 0
+    @Published private(set) var sinkBlueScore: UInt64?
 
     private struct Configuration: Equatable {
         let profileID: UUID
@@ -20,7 +21,9 @@ final class KaspaLiveRPCService: ObservableObject {
     }
 
     private var socket: URLSessionWebSocketTask?
+    private var blueScoreSocket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
+    private var blueScoreReceiveTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var notificationTask: Task<Void, Never>?
     private var configuration: Configuration?
@@ -135,6 +138,10 @@ final class KaspaLiveRPCService: ObservableObject {
                 generation: connectionGeneration,
                 engine: engine
             )
+            startBlueScoreStream(
+                nodeURL: configuration.nodeURL,
+                generation: connectionGeneration
+            )
         } catch is CancellationError {
             return
         } catch {
@@ -202,6 +209,49 @@ final class KaspaLiveRPCService: ObservableObject {
         }
     }
 
+    private func startBlueScoreStream(
+        nodeURL: URL,
+        generation connectionGeneration: UUID
+    ) {
+        blueScoreReceiveTask?.cancel()
+        blueScoreSocket?.cancel(with: .goingAway, reason: nil)
+
+        let socket = URLSession.shared.webSocketTask(with: nodeURL)
+        blueScoreSocket = socket
+        socket.resume()
+
+        blueScoreReceiveTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let request = Self.sinkBlueScoreSubscriptionRequest(requestID: 1)
+                try await socket.send(.data(request))
+                self.debugLog("Sent isolated sink blue score subscription")
+
+                while !Task.isCancelled,
+                      self.generation == connectionGeneration {
+                    let message = try await socket.receive()
+                    guard self.generation == connectionGeneration else { return }
+                    if case .data(let data) = message,
+                       let score = Self.sinkBlueScore(from: data) {
+                        self.sinkBlueScore = score
+                        self.debugLog("Sink blue score changed to \(score)")
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.generation == connectionGeneration else { return }
+                self.debugLog(
+                    "Isolated sink blue score stream failed: \(error.localizedDescription)"
+                )
+                socket.cancel(with: .goingAway, reason: nil)
+                if self.blueScoreSocket === socket {
+                    self.blueScoreSocket = nil
+                }
+            }
+        }
+    }
+
     private func scheduleNotification() {
         notificationTask?.cancel()
         notificationTask = Task { @MainActor [weak self] in
@@ -220,21 +270,87 @@ final class KaspaLiveRPCService: ObservableObject {
         generation = UUID()
         receiveTask?.cancel()
         receiveTask = nil
+        blueScoreReceiveTask?.cancel()
+        blueScoreReceiveTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         notificationTask?.cancel()
         notificationTask = nil
         socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
+        blueScoreSocket?.cancel(with: .goingAway, reason: nil)
+        blueScoreSocket = nil
 
         if !preservingConfiguration {
             configuration = nil
+            sinkBlueScore = nil
         }
+    }
+
+    static func sinkBlueScoreSubscriptionRequest(
+        requestID: UInt64
+    ) -> Data {
+        var innerScope = Data()
+        innerScope.appendLittleEndian(UInt16(1))
+
+        var scope = Data()
+        scope.appendLittleEndian(UInt16(1))
+        scope.appendLittleEndian(UInt32(5))
+        scope.appendLengthPrefixed(innerScope)
+
+        var request = Data([1])
+        request.appendLittleEndian(requestID)
+        request.append(3)
+        request.appendLengthPrefixed(scope)
+        return request
+    }
+
+    static func sinkBlueScore(from data: Data) -> UInt64? {
+        let bytes = [UInt8](data)
+        guard bytes.count >= 18 else { return nil }
+
+        for index in 0...(bytes.count - 18) {
+            guard bytes[index] == 1,
+                  bytes[index + 1] == 0,
+                  bytes[index + 2] == 5,
+                  bytes[index + 3] == 0 else { continue }
+
+            let nestedLength = UInt32(littleEndianBytes: bytes, at: index + 4)
+            guard nestedLength >= 10,
+                  bytes[index + 8] == 1,
+                  bytes[index + 9] == 0 else { continue }
+
+            let score = UInt64(littleEndianBytes: bytes, at: index + 10)
+            if score > 0 { return score }
+        }
+        return nil
     }
 
     private func debugLog(_ message: String) {
 #if DEBUG
         print("[KasSigner Live RPC] \(message)")
 #endif
+    }
+}
+
+private extension Data {
+    mutating func appendLittleEndian<T: FixedWidthInteger>(_ value: T) {
+        var littleEndian = value.littleEndian
+        Swift.withUnsafeBytes(of: &littleEndian) { append(contentsOf: $0) }
+    }
+
+    mutating func appendLengthPrefixed(_ data: Data) {
+        appendLittleEndian(UInt32(data.count))
+        append(data)
+    }
+}
+
+private extension FixedWidthInteger {
+    init(littleEndianBytes bytes: [UInt8], at offset: Int) {
+        self = bytes[offset..<(offset + MemoryLayout<Self>.size)]
+            .enumerated()
+            .reduce(0) { partial, element in
+                partial | (Self(element.element) << (element.offset * 8))
+            }
     }
 }

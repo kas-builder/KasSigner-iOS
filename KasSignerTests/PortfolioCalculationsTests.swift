@@ -238,6 +238,9 @@ final class PortfolioCalculationsTests: XCTestCase {
         }
         XCTAssertEqual(transaction?.amountSompi, 100_000_000)
         XCTAssertEqual(transaction?.direction, .received)
+        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertNil(transaction?.acceptingBlockBlueScore)
+        XCTAssertEqual(store.pendingTransactions.map(\.transactionID), [transactionID])
     }
 
     func testMultipleBuysUseWeightedAverageCost() {
@@ -754,6 +757,87 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(decoded.direction, .sent)
         XCTAssertEqual(decoded.kind, .sent)
         XCTAssertEqual(decoded.status, .pending)
+        XCTAssertNil(decoded.acceptingBlockBlueScore)
+    }
+
+    func testTransactionConfirmationCountUsesTwoHundredFiftyConfirmationThreshold() {
+        let transaction = WalletTransaction(
+            profileID: UUID(),
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            broadcastAt: Date(),
+            direction: .sent,
+            status: .confirmed,
+            acceptingBlockBlueScore: 1_000
+        )
+
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_000), 0)
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_249), 249)
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_250), 250)
+        XCTAssertTrue(transaction.needsConfirmationUpdates(currentBlueScore: 1_249))
+        XCTAssertFalse(transaction.needsConfirmationUpdates(currentBlueScore: 1_250))
+    }
+
+    @MainActor
+    func testSinkBlueScoreSubscriptionAndNotificationParsing() {
+        let request = KaspaLiveRPCService.sinkBlueScoreSubscriptionRequest(
+            requestID: 7
+        )
+        XCTAssertEqual(
+            [UInt8](request),
+            [
+                1, 7, 0, 0, 0, 0, 0, 0, 0, 3,
+                12, 0, 0, 0,
+                1, 0, 5, 0, 0, 0,
+                2, 0, 0, 0, 1, 0
+            ]
+        )
+
+        let score: UInt64 = 521_833_464
+        var notification = Data([0, 0, 0, 1, 0, 5, 0, 10, 0, 0, 0, 1, 0])
+        withUnsafeBytes(of: score.littleEndian) {
+            notification.append(contentsOf: $0)
+        }
+        XCTAssertEqual(
+            KaspaLiveRPCService.sinkBlueScore(from: notification),
+            score
+        )
+    }
+
+    func testAcceptedHistoryWaitsForBlueScoreBeforeShowingConfirmed() {
+        let profileID = UUID()
+        let walletAddress = "kaspa:wallet"
+        let indexed = IndexedTransaction(
+            transactionID: String(repeating: "b", count: 64),
+            blockTime: 1_700_000_000_000,
+            isAccepted: true,
+            acceptingBlockTime: 1_700_000_001_000,
+            acceptingBlockBlueScore: nil,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: "kaspa:external",
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(
+                    amount: 1_000,
+                    scriptPublicKeyAddress: walletAddress
+                )
+            ]
+        )
+
+        let transaction = TransactionHistoryClient().mapTransactions(
+            [indexed],
+            profileID: profileID,
+            receiveAddresses: Set([walletAddress]),
+            changeAddresses: []
+        ).first
+
+        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertNil(transaction?.acceptingBlockBlueScore)
     }
 
     func testIndexedHistoryMapsIncomingAndOutgoingNetActivity() {
@@ -766,6 +850,7 @@ final class PortfolioCalculationsTests: XCTestCase {
             blockTime: 1_700_000_000_000,
             isAccepted: true,
             acceptingBlockTime: 1_700_000_001_000,
+            acceptingBlockBlueScore: 1_000,
             inputs: [
                 IndexedTransactionInput(
                     previousOutpointAddress: externalAddress,
@@ -782,6 +867,7 @@ final class PortfolioCalculationsTests: XCTestCase {
             blockTime: 1_700_000_002_000,
             isAccepted: true,
             acceptingBlockTime: nil,
+            acceptingBlockBlueScore: 1_010,
             inputs: [
                 IndexedTransactionInput(
                     previousOutpointAddress: walletAddress,
@@ -807,12 +893,14 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(received?.feeSompi, 0)
         XCTAssertEqual(received?.destination, externalAddress)
         XCTAssertEqual(received?.status, .confirmed)
+        XCTAssertEqual(received?.acceptingBlockBlueScore, 1_000)
 
         let sent = transactions.first { $0.direction == .sent }
         XCTAssertEqual(sent?.amountSompi, 600)
         XCTAssertEqual(sent?.feeSompi, 10)
         XCTAssertEqual(sent?.destination, externalAddress)
         XCTAssertEqual(sent?.status, .confirmed)
+        XCTAssertEqual(sent?.acceptingBlockBlueScore, 1_010)
     }
 
     func testIndexedHistoryMapsInternalDestinationSeparatelyFromChange() {
@@ -826,6 +914,7 @@ final class PortfolioCalculationsTests: XCTestCase {
             blockTime: 1_787_763_994_363,
             isAccepted: true,
             acceptingBlockTime: 1_787_763_994_583,
+            acceptingBlockBlueScore: 2_000,
             inputs: [
                 IndexedTransactionInput(
                     previousOutpointAddress: inputAddress,

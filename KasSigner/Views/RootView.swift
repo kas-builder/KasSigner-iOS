@@ -64,6 +64,8 @@ struct RootView: View {
     @State private var selectedTab: Tab = .wallet
     @State private var showingAddWallet = false
     @State private var notificationRefreshTask: Task<Void, Never>?
+    @State private var notificationRefreshRequested = false
+    @State private var confirmationResolutionTask: Task<Void, Never>?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -172,10 +174,17 @@ struct RootView: View {
         .onDisappear {
             notificationRefreshTask?.cancel()
             notificationRefreshTask = nil
+            confirmationResolutionTask?.cancel()
+            confirmationResolutionTask = nil
         }
     }
 
     private func selectWallet(_ profile: WalletProfile) {
+        notificationRefreshTask?.cancel()
+        notificationRefreshTask = nil
+        notificationRefreshRequested = false
+        confirmationResolutionTask?.cancel()
+        confirmationResolutionTask = nil
         walletStore.selectedProfileID = profile.id
         syncService.preload(profile: profile)
         selectedTab = .wallet
@@ -210,6 +219,7 @@ struct RootView: View {
             force: false,
             minimumInterval: 9
         )
+        await refreshConfirmationScoreIfNeeded(force: true)
 
         if let snapshot = syncService.snapshot,
            let currentProfile = walletStore.selectedProfile {
@@ -218,7 +228,22 @@ struct RootView: View {
                 nodeURL: snapshot.nodeURL,
                 engine: engine
             )
+            scheduleConfirmationResolution(profileID: currentProfile.id)
         }
+    }
+
+    private func refreshConfirmationScoreIfNeeded(
+        force: Bool = false
+    ) async {
+        guard let profileID = walletStore.selectedProfileID else { return }
+        let needsUpdates = walletStore.transactions.contains {
+            $0.profileID == profileID
+                && $0.needsConfirmationUpdates(
+                    currentBlueScore: syncService.virtualBlueScore
+                )
+        }
+        guard force || needsUpdates else { return }
+        await syncService.refreshVirtualBlueScore(force: force)
     }
 
     private func scheduleNotificationRefresh() {
@@ -228,59 +253,116 @@ struct RootView: View {
             return
         }
 
-        notificationRefreshTask?.cancel()
+        notificationRefreshRequested = true
+        guard notificationRefreshTask == nil else { return }
+
         notificationRefreshTask = Task { @MainActor in
-            // Match Kaspium's UTXO notification debounce window so a burst
-            // of added/removed outputs produces one wallet reconciliation.
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
+            defer {
+                notificationRefreshTask = nil
+                notificationRefreshRequested = false
+            }
 
-            // If another refresh is already committing a snapshot, wait for
-            // it and then reconcile once more so no later notification is lost.
-            while syncService.state == .syncing {
-                try? await Task.sleep(for: .milliseconds(150))
+            while !Task.isCancelled {
+                // Coalesce the current burst, but never cancel reconciliation
+                // that has already started. Notifications arriving during a
+                // refresh request one guaranteed follow-up pass.
+                try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
+                notificationRefreshRequested = false
+
+                await performNotificationRefresh(profileID: profileID)
+                guard notificationRefreshRequested else { return }
             }
+        }
+    }
 
-            guard scenePhase == .active,
-                  walletStore.selectedProfileID == profileID,
-                  let profile = walletStore.selectedProfile
-            else {
-                return
-            }
+    private func performNotificationRefresh(profileID: UUID) async {
+        // If another refresh is already committing a snapshot, wait for it
+        // and then reconcile once more so no notification is lost.
+        while syncService.state == .syncing {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+        }
 
-            let previousOutpoints = Set((syncService.snapshot?.utxos ?? []).map(\.id))
+        guard scenePhase == .active,
+              walletStore.selectedProfileID == profileID,
+              let profile = walletStore.selectedProfile
+        else {
+            return
+        }
 
-            await syncService.refresh(
-                profile: profile,
-                walletStore: walletStore,
-                engine: engine,
-                preferences: preferences,
-                force: true,
-                includeTransactionHistory: false
+        let previousOutpoints = Set((syncService.snapshot?.utxos ?? []).map(\.id))
+
+        await syncService.refresh(
+            profile: profile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true,
+            includeTransactionHistory: false
+        )
+        let currentUTXOs = syncService.snapshot?.utxos ?? []
+        let currentOutpoints = Set(currentUTXOs.map(\.id))
+        let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+        let addedUTXOs = currentUTXOs.filter {
+            !previousOutpoints.contains($0.id)
+        }
+        if removedOutpoints.isEmpty {
+            walletStore.recordObservedUTXOTransactions(
+                profileID: profile.id,
+                addedUTXOs: addedUTXOs
             )
-            let currentUTXOs = syncService.snapshot?.utxos ?? []
-            let currentOutpoints = Set(currentUTXOs.map(\.id))
-            let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
-            let addedUTXOs = currentUTXOs.filter {
-                !previousOutpoints.contains($0.id)
-            }
-            if removedOutpoints.isEmpty {
-                walletStore.recordObservedUTXOTransactions(
-                    profileID: profile.id,
-                    addedUTXOs: addedUTXOs
+        }
+        scheduleConfirmationResolution(profileID: profile.id)
+        await syncService.reconcilePendingTransactions(
+            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionIDs(
+            addedUTXOs.map(\.txID),
+            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
+        )
+        await refreshConfirmationScoreIfNeeded()
+        walletStore.reloadCachedTransactions(profileID: profile.id)
+    }
+
+    private func scheduleConfirmationResolution(profileID: UUID) {
+        guard confirmationResolutionTask == nil else { return }
+
+        confirmationResolutionTask = Task { @MainActor in
+            defer { confirmationResolutionTask = nil }
+
+            for _ in 0..<30 {
+                guard !Task.isCancelled,
+                      scenePhase == .active,
+                      walletStore.selectedProfileID == profileID,
+                      let profile = walletStore.selectedProfile
+                else {
+                    return
+                }
+
+                let hasUnresolved = walletStore.pendingTransactions.contains {
+                    $0.profileID == profileID
+                        && $0.acceptingBlockBlueScore == nil
+                }
+                guard hasUnresolved else { return }
+
+                await syncService.reconcilePendingTransactions(
+                    profile: profile,
+                    walletStore: walletStore
                 )
+
+                guard walletStore.pendingTransactions.contains(where: {
+                    $0.profileID == profileID
+                        && $0.acceptingBlockBlueScore == nil
+                }) else {
+                    await refreshConfirmationScoreIfNeeded(force: true)
+                    return
+                }
+
+                try? await Task.sleep(for: .seconds(1))
             }
-            await syncService.reconcilePendingTransactions(
-                profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
-                walletStore: walletStore
-            )
-            await syncService.reconcileTransactionIDs(
-                addedUTXOs.map(\.txID),
-                profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
-                walletStore: walletStore
-            )
-            walletStore.reloadCachedTransactions(profileID: profile.id)
         }
     }
 }
