@@ -1378,7 +1378,7 @@ private struct VerifiedSigningPreparationView: View {
     @State private var lastProgressCount = 0
 
     private let frameTimer = Timer.publish(
-        every: 0.75,
+        every: 3.5,
         on: .main,
         in: .common
     ).autoconnect()
