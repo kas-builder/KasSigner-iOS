@@ -288,12 +288,26 @@ struct ActivityView: View {
         return VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(amountText(transaction))
-                        .font(.body.weight(.regular).monospacedDigit())
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                        .allowsTightening(true)
-                        .foregroundStyle(.primary)
+                    HStack(alignment: .center, spacing: 5) {
+                        if transaction.kind == .internalTransfer {
+                            VStack(spacing: -3) {
+                                Image(systemName: "arrow.left")
+                                Image(systemName: "arrow.right")
+                            }
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 22, height: 28)
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: true, vertical: false)
+                        }
+
+                        Text(amountText(transaction))
+                            .font(.body.weight(.regular).monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .allowsTightening(true)
+                            .foregroundStyle(.primary)
+                    }
 
                     if let usdValue = usdValueText(transaction) {
                         Text(usdValue)
@@ -549,7 +563,7 @@ struct ActivityView: View {
         switch transaction.kind {
         case .sent: prefix = "−"
         case .received: prefix = "+"
-        case .internalTransfer: prefix = "↔ "
+        case .internalTransfer: prefix = ""
         }
         return prefix + formatKas(transaction.amountSompi)
     }
