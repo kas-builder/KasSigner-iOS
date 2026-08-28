@@ -26,12 +26,57 @@ private struct VirtualBlueScoreResponse: Decodable {
 }
 
 struct IndexedTransactionInput: Decodable, Sendable {
+    let previousOutpointHash: String?
+    let previousOutpointIndex: UInt32?
     let previousOutpointAddress: String?
     let previousOutpointAmount: UInt64?
 
     enum CodingKeys: String, CodingKey {
+        case previousOutpointHash = "previous_outpoint_hash"
+        case previousOutpointIndex = "previous_outpoint_index"
         case previousOutpointAddress = "previous_outpoint_address"
         case previousOutpointAmount = "previous_outpoint_amount"
+    }
+
+    init(
+        previousOutpointHash: String? = nil,
+        previousOutpointIndex: UInt32? = nil,
+        previousOutpointAddress: String?,
+        previousOutpointAmount: UInt64?
+    ) {
+        self.previousOutpointHash = previousOutpointHash
+        self.previousOutpointIndex = previousOutpointIndex
+        self.previousOutpointAddress = previousOutpointAddress
+        self.previousOutpointAmount = previousOutpointAmount
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        previousOutpointHash = try container.decodeIfPresent(
+            String.self,
+            forKey: .previousOutpointHash
+        )
+        if let numericIndex = try? container.decodeIfPresent(
+            UInt32.self,
+            forKey: .previousOutpointIndex
+        ) {
+            previousOutpointIndex = numericIndex
+        } else if let stringIndex = try? container.decodeIfPresent(
+            String.self,
+            forKey: .previousOutpointIndex
+        ) {
+            previousOutpointIndex = UInt32(stringIndex)
+        } else {
+            previousOutpointIndex = nil
+        }
+        previousOutpointAddress = try container.decodeIfPresent(
+            String.self,
+            forKey: .previousOutpointAddress
+        )
+        previousOutpointAmount = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .previousOutpointAmount
+        )
     }
 }
 
@@ -52,6 +97,10 @@ private struct ActiveAddressRequest: Encodable {
 private struct ActiveAddressResponse: Decodable {
     let address: String
     let active: Bool
+}
+
+private struct TransactionSearchRequest: Encodable {
+    let transactionIds: [String]
 }
 
 private enum TransactionHistoryError: LocalizedError {
@@ -157,6 +206,70 @@ struct TransactionHistoryClient: Sendable {
         ).first
     }
 
+    func transactions(
+        ids: [String],
+        for profile: WalletProfile
+    ) async throws -> [WalletTransaction] {
+        guard profile.network.lowercased() == "mainnet" else { return [] }
+        let uniqueIDs = Array(Set(ids.map { $0.lowercased() })).prefix(32)
+        guard !uniqueIDs.isEmpty else { return [] }
+
+        var components = URLComponents(
+            url: baseURL.appending(path: "transactions/search"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
+        ]
+        guard let url = components.url else {
+            throw TransactionHistoryError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(
+            TransactionSearchRequest(transactionIds: Array(uniqueIDs))
+        )
+        let (data, _) = try await data(for: request)
+        let indexed = try JSONDecoder().decode([IndexedTransaction].self, from: data)
+        return mapTransactions(
+            indexed,
+            profileID: profile.id,
+            receiveAddresses: Set(profile.receiveAddresses),
+            changeAddresses: Set(profile.changeAddresses)
+        )
+    }
+
+    func recentTransactions(
+        for addresses: [String],
+        spending outpointIDs: Set<String>,
+        profile: WalletProfile
+    ) async throws -> [WalletTransaction] {
+        guard profile.network.lowercased() == "mainnet" else { return [] }
+        let uniqueAddresses = Array(Set(addresses)).sorted()
+        guard !uniqueAddresses.isEmpty else { return [] }
+
+        var indexed: [IndexedTransaction] = []
+        for address in uniqueAddresses {
+            indexed.append(contentsOf: try await fetchRecentTransactions(for: address))
+        }
+        let matching = indexed.filter { transaction in
+            (transaction.inputs ?? []).contains { input in
+                guard let hash = input.previousOutpointHash?.lowercased(),
+                      let index = input.previousOutpointIndex else { return false }
+                return outpointIDs.contains("\(hash):\(index)")
+            }
+        }
+        return mapTransactions(
+            matching,
+            profileID: profile.id,
+            receiveAddresses: Set(profile.receiveAddresses),
+            changeAddresses: Set(profile.changeAddresses)
+        )
+    }
+
     private func fetchActiveAddresses(_ addresses: [String]) async throws -> [String] {
         var active: [String] = []
         for start in stride(from: 0, to: addresses.count, by: 250) {
@@ -219,6 +332,28 @@ struct TransactionHistoryClient: Sendable {
             before = next
         }
         return transactions
+    }
+
+    private func fetchRecentTransactions(for address: String) async throws -> [IndexedTransaction] {
+        var components = URLComponents(
+            url: baseURL
+                .appending(path: "addresses")
+                .appending(path: address)
+                .appending(path: "full-transactions-page"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "limit", value: "25"),
+            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
+        ]
+        guard let url = components.url else {
+            throw TransactionHistoryError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let (data, _) = try await data(for: request)
+        return try JSONDecoder().decode([IndexedTransaction].self, from: data)
     }
 
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -425,18 +560,22 @@ final class WalletSyncService: ObservableObject {
     @Published private(set) var virtualBlueScore: UInt64?
 
     private var activeProfileID: UUID?
+    private var activeProfileGeneration: UInt64 = 0
     private var lastRefreshAttempt: Date?
     private var lastTransactionHistoryAttempt: [UUID: Date] = [:]
-    private var transactionHistoryProfilesInFlight = Set<UUID>()
+    private var transactionHistoryProfilesInFlight: [UUID: UInt64] = [:]
     private var virtualBlueScoreRefreshInFlight = false
     private var lastVirtualBlueScoreAttempt: Date?
     private let transactionHistoryClient = TransactionHistoryClient()
+    private let outgoingReconciliationKeyPrefix =
+        "kassigner.outgoingReconciliation.v1."
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "org.kassigner.KasSigner.network-monitor")
 
     func preload(profile: WalletProfile) {
         guard activeProfileID != profile.id else { return }
 
+        activeProfileGeneration &+= 1
         activeProfileID = profile.id
         lastRefreshAttempt = nil
         transactionHistoryError = nil
@@ -499,6 +638,11 @@ final class WalletSyncService: ObservableObject {
             return
         }
 
+        if activeProfileID != profile.id {
+            preload(profile: profile)
+        }
+        let profileGeneration = activeProfileGeneration
+
         if case .syncing = state { return }
 
         if !force,
@@ -507,8 +651,6 @@ final class WalletSyncService: ObservableObject {
            Date().timeIntervalSince(lastRefreshAttempt) < minimumInterval {
             return
         }
-
-        activeProfileID = profile.id
 
         if snapshot == nil,
            let cached = WalletSnapshotCache.shared.load(profileID: profile.id) {
@@ -526,7 +668,8 @@ final class WalletSyncService: ObservableObject {
                 engine: engine,
                 preferences: preferences
             )
-            guard activeProfileID == profile.id else { return }
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
             if discoveredProfile != profile {
                 walletStore.update(discoveredProfile)
                 walletStore.setLastViewedReceiveIndex(
@@ -544,6 +687,9 @@ final class WalletSyncService: ObservableObject {
                 // Preserve the last valid estimate if a refresh temporarily fails.
             }
 
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
+
             WalletSnapshotCache.shared.save(
                 result,
                 profileID: profile.id
@@ -556,7 +702,8 @@ final class WalletSyncService: ObservableObject {
                 )
             }
         } catch {
-            guard activeProfileID == profile.id else { return }
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
             state = .failed(friendlyMessage(for: error, preferences: preferences))
         }
     }
@@ -566,7 +713,9 @@ final class WalletSyncService: ObservableObject {
         walletStore: WalletStore,
         force: Bool = false
     ) async {
-        if transactionHistoryProfilesInFlight.contains(profile.id) { return }
+        guard activeProfileID == profile.id else { return }
+        let profileGeneration = activeProfileGeneration
+        if transactionHistoryProfilesInFlight[profile.id] == profileGeneration { return }
         if !force,
            let lastAttempt = lastTransactionHistoryAttempt[profile.id],
            Date().timeIntervalSince(lastAttempt) < 30 {
@@ -574,21 +723,25 @@ final class WalletSyncService: ObservableObject {
         }
 
         lastTransactionHistoryAttempt[profile.id] = Date()
-        transactionHistoryProfilesInFlight.insert(profile.id)
+        transactionHistoryProfilesInFlight[profile.id] = profileGeneration
         isRefreshingTransactionHistory = true
         transactionHistoryError = nil
         defer {
-            transactionHistoryProfilesInFlight.remove(profile.id)
+            if transactionHistoryProfilesInFlight[profile.id] == profileGeneration {
+                transactionHistoryProfilesInFlight.removeValue(forKey: profile.id)
+            }
             isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
         }
 
         do {
             let transactions = try await transactionHistoryClient.transactions(for: profile)
-            guard activeProfileID == profile.id else { return }
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
             walletStore.mergeSyncedTransactions(transactions, profileID: profile.id)
             transactionHistoryUpdatedAt = Date()
         } catch {
-            guard activeProfileID == profile.id else { return }
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
             guard !Task.isCancelled,
                   !(error is CancellationError),
                   (error as? URLError)?.code != .cancelled else { return }
@@ -668,6 +821,112 @@ final class WalletSyncService: ObservableObject {
 
         guard !resolved.isEmpty else { return }
         walletStore.mergeResolvedTransactions(resolved, profileID: profile.id)
+    }
+
+    func reconcileRecentOutgoingTransactions(
+        removedOutpointIDs: Set<String> = [],
+        addresses: [String],
+        profile: WalletProfile,
+        walletStore: WalletStore
+    ) async {
+        var request = outgoingReconciliationRequest(for: profile.id)
+        request.outpointIDs.formUnion(removedOutpointIDs)
+        request.addresses.formUnion(addresses)
+        saveOutgoingReconciliationRequest(request, profileID: profile.id)
+
+        guard !request.outpointIDs.isEmpty,
+              !request.addresses.isEmpty else { return }
+
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                let delay = attempt == 1 ? 2.0 : 5.0
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+            }
+
+            do {
+                let transactions = try await transactionHistoryClient.recentTransactions(
+                    for: Array(request.addresses),
+                    spending: request.outpointIDs,
+                    profile: profile
+                )
+                guard !transactions.isEmpty else { continue }
+                walletStore.mergeResolvedTransactions(
+                    transactions,
+                    profileID: profile.id
+                )
+                clearOutgoingReconciliationRequest(profileID: profile.id)
+                return
+            } catch {
+                // The indexer may trail the node briefly. Retry this small,
+                // address-scoped lookup without starting a full history scan.
+            }
+        }
+    }
+
+    func reconcileTransactionsObservedByOtherWallets(
+        profile: WalletProfile,
+        walletStore: WalletStore
+    ) async {
+        let existingIDs = Set(walletStore.transactions.lazy
+            .filter { $0.profileID == profile.id }
+            .map { $0.transactionID.lowercased() })
+        let candidateIDs = walletStore.transactions
+            .filter {
+                $0.profileID != profile.id
+                    && !existingIDs.contains($0.transactionID.lowercased())
+            }
+            .sorted { $0.broadcastAt > $1.broadcastAt }
+            .prefix(16)
+            .map(\.transactionID)
+        guard !candidateIDs.isEmpty else { return }
+
+        do {
+            let related = try await transactionHistoryClient.transactions(
+                ids: candidateIDs,
+                for: profile
+            )
+            walletStore.mergeResolvedTransactions(related, profileID: profile.id)
+        } catch {
+            // This is a repair path. Normal node-driven refresh remains active
+            // and the next wallet selection or pull-to-refresh will retry.
+        }
+    }
+
+    private struct OutgoingReconciliationRequest: Codable {
+        var outpointIDs = Set<String>()
+        var addresses = Set<String>()
+    }
+
+    private func outgoingReconciliationRequest(
+        for profileID: UUID
+    ) -> OutgoingReconciliationRequest {
+        guard let data = UserDefaults.standard.data(
+            forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
+        ), let request = try? JSONDecoder().decode(
+            OutgoingReconciliationRequest.self,
+            from: data
+        ) else {
+            return OutgoingReconciliationRequest()
+        }
+        return request
+    }
+
+    private func saveOutgoingReconciliationRequest(
+        _ request: OutgoingReconciliationRequest,
+        profileID: UUID
+    ) {
+        guard let data = try? JSONEncoder().encode(request) else { return }
+        UserDefaults.standard.set(
+            data,
+            forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
+        )
+    }
+
+    private func clearOutgoingReconciliationRequest(profileID: UUID) {
+        UserDefaults.standard.removeObject(
+            forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
+        )
     }
 
     private func syncWithAddressDiscovery(
@@ -771,6 +1030,7 @@ final class WalletSyncService: ObservableObject {
     }
 
     func reset() {
+        activeProfileGeneration &+= 1
         activeProfileID = nil
         lastRefreshAttempt = nil
         snapshot = nil

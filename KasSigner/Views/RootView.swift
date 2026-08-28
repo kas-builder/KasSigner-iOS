@@ -186,6 +186,7 @@ struct RootView: View {
         confirmationResolutionTask?.cancel()
         confirmationResolutionTask = nil
         walletStore.selectedProfileID = profile.id
+        walletStore.reloadCachedTransactions(profileID: profile.id)
         syncService.preload(profile: profile)
         selectedTab = .wallet
     }
@@ -211,14 +212,66 @@ struct RootView: View {
         try? await Task.sleep(for: .milliseconds(0))
         guard !Task.isCancelled else { return }
 
+        let previousUTXOs = syncService.snapshot?.utxos ?? []
+        let previousOutpoints = Set(previousUTXOs.map(\.id))
         await syncService.refresh(
             profile: profile,
             walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: false,
-            minimumInterval: 9
+            minimumInterval: 9,
+            includeTransactionHistory: false
         )
+
+        guard !Task.isCancelled,
+              walletStore.selectedProfileID == profile.id else { return }
+
+        let currentUTXOs = syncService.snapshot?.utxos ?? []
+        let currentOutpoints = Set(currentUTXOs.map(\.id))
+        let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+        let addedUTXOs = currentUTXOs.filter {
+            !previousOutpoints.contains($0.id)
+        }
+        if removedOutpoints.isEmpty {
+            walletStore.recordObservedUTXOTransactions(
+                profileID: profile.id,
+                addedUTXOs: addedUTXOs
+            )
+        }
+        let currentProfile = walletStore.profiles.first(where: { $0.id == profile.id })
+            ?? profile
+        await syncService.reconcilePendingTransactions(
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionIDs(
+            addedUTXOs.map(\.txID),
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        if !removedOutpoints.isEmpty,
+           let spentAddresses = try? await engine.addressesOwningUTXOs(
+               previousUTXOs.filter { removedOutpoints.contains($0.id) },
+               profile: currentProfile
+           ) {
+            await syncService.reconcileRecentOutgoingTransactions(
+                removedOutpointIDs: removedOutpoints,
+                addresses: spentAddresses,
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+        }
+        await syncService.reconcileRecentOutgoingTransactions(
+            addresses: [],
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionsObservedByOtherWallets(
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        walletStore.reloadCachedTransactions(profileID: profile.id)
         await refreshConfirmationScoreIfNeeded(force: true)
 
         if let snapshot = syncService.snapshot,
@@ -291,7 +344,8 @@ struct RootView: View {
             return
         }
 
-        let previousOutpoints = Set((syncService.snapshot?.utxos ?? []).map(\.id))
+        let previousUTXOs = syncService.snapshot?.utxos ?? []
+        let previousOutpoints = Set(previousUTXOs.map(\.id))
 
         await syncService.refresh(
             profile: profile,
@@ -321,6 +375,27 @@ struct RootView: View {
         await syncService.reconcileTransactionIDs(
             addedUTXOs.map(\.txID),
             profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
+        )
+        if !removedOutpoints.isEmpty,
+           let spentAddresses = try? await engine.addressesOwningUTXOs(
+               previousUTXOs.filter { removedOutpoints.contains($0.id) },
+               profile: profile
+           ) {
+            await syncService.reconcileRecentOutgoingTransactions(
+                removedOutpointIDs: removedOutpoints,
+                addresses: spentAddresses,
+                profile: profile,
+                walletStore: walletStore
+            )
+        }
+        await syncService.reconcileRecentOutgoingTransactions(
+            addresses: [],
+            profile: profile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionsObservedByOtherWallets(
+            profile: profile,
             walletStore: walletStore
         )
         await refreshConfirmationScoreIfNeeded()

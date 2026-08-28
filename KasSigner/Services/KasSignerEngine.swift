@@ -411,6 +411,39 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return Data(values.map { UInt8(truncating: $0) })
     }
 
+    func addressesOwningUTXOs(
+        _ utxos: [WalletUTXO],
+        profile: WalletProfile
+    ) async throws -> [String] {
+        guard !utxos.isEmpty else { return [] }
+        try await ensureReady()
+
+        let scripts = utxos.map { utxo in
+            utxo.scriptPublicKey.map { String(format: "%02x", $0) }.joined()
+        }
+        let addresses = profile.receiveAddresses + profile.changeAddresses
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const targets = new Set(scripts.map(value => String(value).toLowerCase()));
+            return addresses.filter(address => {
+                const script = scriptKey(scriptPublicKeyForAddress(address));
+                return targets.has(script.toLowerCase());
+            });
+            """,
+            arguments: [
+                "scripts": scripts,
+                "addresses": addresses
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let matched = result as? [String] else {
+            throw EngineError.invalidResponse
+        }
+        return Array(Set(matched)).sorted()
+    }
+
     func importKpub(_ kpub: String) async throws -> WalletImportResult {
         try await ensureReady()
 

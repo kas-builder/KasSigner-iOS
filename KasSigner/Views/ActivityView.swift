@@ -9,6 +9,7 @@ struct ActivityView: View {
     }
 
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
@@ -96,7 +97,9 @@ struct ActivityView: View {
                 }
             }
             .task(id: walletStore.selectedProfileID) {
-                await refreshHistory(force: false)
+                guard let profileID = walletStore.selectedProfileID else { return }
+                walletStore.reloadCachedTransactions(profileID: profileID)
+                await syncService.refreshVirtualBlueScore(force: false)
             }
             .task {
                 await priceService.refresh(preferences: preferences)
@@ -188,13 +191,88 @@ struct ActivityView: View {
 
     private func refreshHistory(force: Bool) async {
         guard let profile = walletStore.selectedProfile else { return }
+        let profileID = profile.id
+
+        // Always display this wallet's durable cache immediately. The indexed
+        // history service can trail the node, especially just after broadcast.
+        walletStore.reloadCachedTransactions(profileID: profileID)
+
+        if force {
+            while syncService.state == .syncing {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled,
+                      walletStore.selectedProfileID == profileID else { return }
+            }
+
+            let previousUTXOs = syncService.snapshot?.utxos ?? []
+            let previousOutpoints = Set(previousUTXOs.map(\.id))
+            await syncService.refresh(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true,
+                includeTransactionHistory: false
+            )
+
+            guard !Task.isCancelled,
+                  walletStore.selectedProfileID == profileID else { return }
+
+            let currentUTXOs = syncService.snapshot?.utxos ?? []
+            let currentOutpoints = Set(currentUTXOs.map(\.id))
+            let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+            let addedUTXOs = currentUTXOs.filter {
+                !previousOutpoints.contains($0.id)
+            }
+            if removedOutpoints.isEmpty {
+                walletStore.recordObservedUTXOTransactions(
+                    profileID: profileID,
+                    addedUTXOs: addedUTXOs
+                )
+            }
+            let currentProfile = walletStore.profiles.first(where: { $0.id == profileID })
+                ?? profile
+            await syncService.reconcilePendingTransactions(
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+            await syncService.reconcileTransactionIDs(
+                addedUTXOs.map(\.txID),
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+            if !removedOutpoints.isEmpty,
+               let spentAddresses = try? await engine.addressesOwningUTXOs(
+                   previousUTXOs.filter { removedOutpoints.contains($0.id) },
+                   profile: currentProfile
+               ) {
+                await syncService.reconcileRecentOutgoingTransactions(
+                    removedOutpointIDs: removedOutpoints,
+                    addresses: spentAddresses,
+                    profile: currentProfile,
+                    walletStore: walletStore
+                )
+            }
+            await syncService.reconcileRecentOutgoingTransactions(
+                addresses: [],
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+            await syncService.reconcileTransactionsObservedByOtherWallets(
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+        }
+
         await syncService.refreshTransactionHistory(
             profile: profile,
             walletStore: walletStore,
             force: force
         )
+        guard !Task.isCancelled,
+              walletStore.selectedProfileID == profileID else { return }
         await syncService.refreshVirtualBlueScore(force: force)
-        walletStore.reloadCachedTransactions(profileID: profile.id)
+        walletStore.reloadCachedTransactions(profileID: profileID)
     }
 
     private func beginCSVExport() async {
