@@ -105,6 +105,24 @@ enum PortfolioTransactionPriceResolver {
 }
 
 enum PortfolioChartBuilder {
+    static func valueDomain(for points: [PortfolioChartPoint]) -> ClosedRange<Double> {
+        let values = points.map(\.valueUSD)
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
+
+        let spread = maximum - minimum
+        let reference = max(abs(maximum), abs(minimum), 0.01)
+        let padding: Double
+        if spread > 0 {
+            padding = max(spread * 0.12, reference * 0.0005)
+        } else {
+            padding = max(reference * 0.01, 0.0001)
+        }
+
+        let lower = max(0, minimum - padding)
+        let upper = max(lower + 0.0001, maximum + padding)
+        return lower...upper
+    }
+
     static func points(
         transactions: [PortfolioTransaction],
         prices: [HistoricalPricePoint]

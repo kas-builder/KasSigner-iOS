@@ -402,6 +402,31 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(points.map(\.valueUSD), [2, 3, 2.4])
     }
 
+    func testChartValueDomainFollowsRealSpreadInsteadOfPortfolioMagnitude() {
+        let points = [
+            PortfolioChartPoint(timestamp: baseDate, valueUSD: 1_000),
+            PortfolioChartPoint(timestamp: baseDate.addingTimeInterval(60), valueUSD: 1_010)
+        ]
+
+        let domain = PortfolioChartBuilder.valueDomain(for: points)
+
+        XCTAssertEqual(domain.lowerBound, 998.8, accuracy: 0.000_000_01)
+        XCTAssertEqual(domain.upperBound, 1_011.2, accuracy: 0.000_000_01)
+    }
+
+    func testChartValueDomainDoesNotForceOneDollarRangeForSmallPortfolio() {
+        let points = [
+            PortfolioChartPoint(timestamp: baseDate, valueUSD: 0.10),
+            PortfolioChartPoint(timestamp: baseDate.addingTimeInterval(60), valueUSD: 0.11)
+        ]
+
+        let domain = PortfolioChartBuilder.valueDomain(for: points)
+
+        XCTAssertLessThan(domain.upperBound - domain.lowerBound, 0.02)
+        XCTAssertGreaterThan(domain.upperBound, 0.11)
+        XCTAssertLessThan(domain.lowerBound, 0.10)
+    }
+
     func testDownsamplingPreservesEndpointsAndExtremes() {
         let points = (0..<20).map { index in
             PortfolioChartPoint(

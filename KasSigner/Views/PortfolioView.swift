@@ -436,6 +436,14 @@ struct PortfolioView: View {
                 }
             }
 
+            if let warning = priceService.historicalRefreshWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel(warning)
+            }
+
             Group {
                 if isLoadingChart && chartPoints.isEmpty {
                     ProgressView()
@@ -781,14 +789,7 @@ struct PortfolioView: View {
     }
 
     private func chartYDomain(for points: [PortfolioChartPoint]) -> ClosedRange<Double> {
-        let values = points.map(\.valueUSD)
-        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
-        let spread = maximum - minimum
-        let reference = max(abs(maximum), 1)
-        let padding = max(spread * 0.12, reference * 0.04)
-        let lower = max(0, minimum - padding)
-        let upper = max(lower + 1, maximum + padding)
-        return lower...upper
+        PortfolioChartBuilder.valueDomain(for: points)
     }
 
     private var chartRequestID: String {
