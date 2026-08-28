@@ -25,6 +25,7 @@ struct ActivityView: View {
     @State private var csvExportFileName = "KasSigner-Wallet-Transactions"
     @State private var csvExportAlert: ExportAlert?
     @State private var isPreparingCSVExport = false
+    @State private var pendingInternalTransferPresentations = Set<String>()
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -318,7 +319,12 @@ struct ActivityView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 3) {
-                    statusLabel(transaction)
+                    statusLabel(
+                        transaction,
+                        presentsPending: pendingInternalTransferPresentations.contains(
+                            transaction.transactionID.lowercased()
+                        )
+                    )
 
                     Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
@@ -402,6 +408,9 @@ struct ActivityView: View {
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
+        .onAppear {
+            presentPendingInternalTransferIfNeeded(transaction)
+        }
     }
 
     @ViewBuilder
@@ -437,7 +446,10 @@ struct ActivityView: View {
             && !value.contains(where: \Character.isWhitespace)
     }
 
-    private func statusLabel(_ transaction: WalletTransaction) -> some View {
+    private func statusLabel(
+        _ transaction: WalletTransaction,
+        presentsPending: Bool
+    ) -> some View {
         let currentBlueScore = [
             liveRPCService.sinkBlueScore,
             syncService.virtualBlueScore
@@ -450,7 +462,7 @@ struct ActivityView: View {
         let count = resolvedCount ?? 0
         let isFullyConfirmed = count >= WalletTransaction.confirmationThreshold
             && resolvedCount != nil
-        let isPending = resolvedCount == nil
+        let isPending = presentsPending || resolvedCount == nil
 
         let text: String
         if isPending {
@@ -475,6 +487,24 @@ struct ActivityView: View {
                         ? Color(red: 0.18, green: 0.68, blue: 0.62)
                         : Color.primary
             )
+    }
+
+    private func presentPendingInternalTransferIfNeeded(
+        _ transaction: WalletTransaction
+    ) {
+        let transactionID = transaction.transactionID.lowercased()
+        guard transaction.kind == .internalTransfer,
+              Date().timeIntervalSince(transaction.broadcastAt) < 30,
+              !pendingInternalTransferPresentations.contains(transactionID)
+        else {
+            return
+        }
+
+        pendingInternalTransferPresentations.insert(transactionID)
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1))
+            pendingInternalTransferPresentations.remove(transactionID)
+        }
     }
 
     private func beginEditingLabel(for transaction: WalletTransaction) {
