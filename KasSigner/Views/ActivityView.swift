@@ -63,7 +63,6 @@ struct ActivityView: View {
                         .refreshable {
                             await refreshHistory(force: true)
                         }
-                        .id(walletStore.transactionRevision)
                     }
                 }
             }
