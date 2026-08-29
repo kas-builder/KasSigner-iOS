@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 final class KaspaLiveRPCService: ObservableObject {
@@ -12,7 +13,8 @@ final class KaspaLiveRPCService: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var notificationVersion = 0
-    @Published private(set) var sinkBlueScore: UInt64?
+    private(set) var sinkBlueScore: UInt64?
+    let sinkBlueScorePublisher = CurrentValueSubject<UInt64?, Never>(nil)
 
     private struct Configuration: Equatable {
         let profileID: UUID
@@ -234,7 +236,7 @@ final class KaspaLiveRPCService: ObservableObject {
                     if case .data(let data) = message,
                        let score = Self.sinkBlueScore(from: data) {
                         self.sinkBlueScore = score
-                        self.debugLog("Sink blue score changed to \(score)")
+                        self.sinkBlueScorePublisher.send(score)
                     }
                 }
             } catch is CancellationError {
@@ -284,6 +286,7 @@ final class KaspaLiveRPCService: ObservableObject {
         if !preservingConfiguration {
             configuration = nil
             sinkBlueScore = nil
+            sinkBlueScorePublisher.send(nil)
         }
     }
 

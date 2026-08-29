@@ -27,6 +27,7 @@ struct ActivityView: View {
     @State private var csvExportAlert: ExportAlert?
     @State private var isPreparingCSVExport = false
     @State private var pendingInternalTransferPresentations = Set<String>()
+    @State private var liveSinkBlueScore: UInt64?
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -113,6 +114,9 @@ struct ActivityView: View {
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
                 coinControlStore.activate(profileID: newValue)
+            }
+            .onReceive(liveRPCService.sinkBlueScorePublisher) { score in
+                liveSinkBlueScore = score
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -529,7 +533,7 @@ struct ActivityView: View {
         presentsPending: Bool
     ) -> some View {
         let currentBlueScore = [
-            liveRPCService.sinkBlueScore,
+            liveSinkBlueScore,
             syncService.virtualBlueScore
         ]
             .compactMap { $0 }
