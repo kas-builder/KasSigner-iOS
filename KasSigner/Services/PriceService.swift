@@ -76,6 +76,7 @@ final class PriceService: ObservableObject {
     private var lastRefreshAttempt: Date?
     private var lastHistoricalRefreshFailure: Date?
     private var historicalRefreshAttempts: [Int: Date] = [:]
+    private var historicalRefreshTask: Task<Void, Never>?
     private var isHistoricalPrepared = false
     private var historicalDiskCache: HistoricalPriceDiskCache?
     private let historicalCacheURL = HistoricalPriceCacheStore.defaultCacheURL()
@@ -98,6 +99,23 @@ final class PriceService: ObservableObject {
         await prepareHistoricalPrices()
         let requestedDays = max(1, Int(days) ?? 1)
         await refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
+        return try historicalUSDPricesFromCache(requestedDays: requestedDays)
+    }
+
+    func cachedHistoricalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
+        await prepareHistoricalPrices()
+        let requestedDays = max(1, Int(days) ?? 1)
+        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays)
+
+        Task { @MainActor [weak self] in
+            await self?.refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
+        }
+        return points
+    }
+
+    private func historicalUSDPricesFromCache(
+        requestedDays: Int
+    ) throws -> [HistoricalPricePoint] {
         guard let historicalDiskCache else {
             throw PriceError.invalidResponse
         }
@@ -192,7 +210,12 @@ final class PriceService: ObservableObject {
 
     func refreshHistoricalPricesIfNeeded(requestedDays: Int = 1) async {
         await prepareHistoricalPrices()
-        guard var cache = historicalDiskCache else { return }
+        guard historicalDiskCache != nil else { return }
+
+        if let historicalRefreshTask {
+            await historicalRefreshTask.value
+            return
+        }
 
         let normalizedDays = normalizedHistoricalRange(requestedDays)
         let now = Date()
@@ -205,6 +228,18 @@ final class PriceService: ObservableObject {
            Date().timeIntervalSince(lastHistoricalRefreshFailure) < historicalRefreshRetryInterval {
             return
         }
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performHistoricalRefresh(normalizedDays: normalizedDays)
+        }
+        historicalRefreshTask = task
+        await task.value
+        historicalRefreshTask = nil
+    }
+
+    private func performHistoricalRefresh(normalizedDays: Int) async {
+        guard var cache = historicalDiskCache else { return }
 
         let missingHistoryDays = Int(historicalRefreshDays(for: cache)) ?? 2
         let fetchDays = normalizedDays <= 90

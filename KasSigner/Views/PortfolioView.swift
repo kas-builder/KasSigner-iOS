@@ -56,6 +56,18 @@ struct PortfolioView: View {
         let message: String
     }
 
+    private struct RenderSnapshot {
+        let transactions: [PortfolioTransaction]
+        let summary: PortfolioHoldingSummary
+    }
+
+    private struct ChartRequestID: Hashable {
+        let range: TimeRange
+        let portfolioID: String
+        let historyRevision: Int
+        let transactionRevision: Int
+    }
+
     @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var priceService: PriceService
@@ -74,13 +86,13 @@ struct PortfolioView: View {
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
-    @State private var showingHoldingDetail = false
     @State private var chartPoints: [PortfolioChartPoint] = []
     @State private var selectionChartPoints: [PortfolioChartPoint] = []
     @State private var chartValueDomain: ClosedRange<Double> = 0...1
     @State private var isLoadingChart = false
     @State private var chartLoadFailed = false
     @State private var selectedChartPoint: PortfolioChartPoint?
+    @State private var isSummaryExpanded = false
     @State private var showingCSVFileImporter = false
     @State private var csvImportPreview: PortfolioCSVImportPreview?
     @State private var csvImportAlert: CSVImportAlert?
@@ -91,12 +103,14 @@ struct PortfolioView: View {
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     var body: some View {
+        let snapshot = renderSnapshot
+
         NavigationStack {
             Group {
                 if accounts.isEmpty {
                     emptyState
                 } else {
-                    portfolioContent
+                    portfolioContent(snapshot: snapshot)
                 }
             }
             .navigationTitle(accounts.isEmpty ? "Portfolio" : "")
@@ -191,15 +205,6 @@ struct PortfolioView: View {
             .presentationDetents([.fraction(0.9)])
             .presentationDragIndicator(.visible)
         }
-        .sheet(isPresented: $showingHoldingDetail) {
-            PortfolioHoldingDetail(
-                summary: holdingSummary,
-                kasPriceUSD: priceService.price(for: .usd),
-                accentColor: activePortfolioColor
-            )
-            .presentationDetents([.fraction(0.9)])
-            .presentationDragIndicator(.visible)
-        }
         .fileImporter(
             isPresented: $showingCSVFileImporter,
             allowedContentTypes: [.commaSeparatedText, .plainText]
@@ -263,8 +268,8 @@ struct PortfolioView: View {
         .task {
             await priceService.refresh(preferences: preferences)
         }
-        .task(id: chartRequestID) {
-            await loadChartHistory()
+        .task(id: chartRequestID(for: snapshot.transactions)) {
+            await loadChartHistory(transactions: snapshot.transactions)
         }
     }
 
@@ -282,14 +287,14 @@ struct PortfolioView: View {
     }
 
     @ViewBuilder
-    private var portfolioContent: some View {
+    private func portfolioContent(snapshot: RenderSnapshot) -> some View {
         if selectedSection == .holdings {
             ScrollView {
                 VStack(spacing: 16) {
                     largePortfolioMenu
-                    valueCard
-                    chartCard
-                    holdingsSection
+                    valueCard(summary: snapshot.summary)
+                    chartCard(transactions: snapshot.transactions)
+                    holdingsSection(summary: snapshot.summary)
                 }
                 .padding()
             }
@@ -297,13 +302,13 @@ struct PortfolioView: View {
             VStack(spacing: 0) {
                 VStack(spacing: 16) {
                     largePortfolioMenu
-                    valueCard
+                    valueCard(summary: snapshot.summary)
                 }
                 .padding(.horizontal)
                 .padding(.top)
 
                 ScrollView {
-                    transactionsSection
+                    transactionsSection(displayedTransactions: snapshot.transactions)
                         .padding(.horizontal)
                         .padding(.top, 16)
                         .padding(.bottom)
@@ -358,21 +363,24 @@ struct PortfolioView: View {
         .accessibilityValue(selectedAccount?.name ?? "All Portfolios")
     }
 
-    private var valueCard: some View {
+    private func valueCard(summary: PortfolioHoldingSummary) -> some View {
         VStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Portfolio Value")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                Text(displayedPortfolioValueText)
+                Text(displayedPortfolioValueText(summary: summary))
                     .font(.system(.largeTitle, design: .rounded, weight: .semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.65)
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(
+                Color(uiColor: .secondarySystemBackground),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
 
             sectionSelector
         }
@@ -386,7 +394,10 @@ struct PortfolioView: View {
             }
         }
         .padding(.top, 2)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(
+            Color(uiColor: .secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
@@ -414,7 +425,9 @@ struct PortfolioView: View {
         .accessibilityAddTraits(selectedSection == section ? .isSelected : [])
     }
 
-    private var chartCard: some View {
+    private func chartCard(
+        transactions: [PortfolioTransaction]
+    ) -> some View {
         VStack(spacing: 16) {
             HStack(spacing: 4) {
                 ForEach(TimeRange.allCases) { range in
@@ -436,14 +449,6 @@ struct PortfolioView: View {
                 }
             }
 
-            if let warning = priceService.historicalRefreshWarning {
-                Label(warning, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityLabel(warning)
-            }
-
             Group {
                 if isLoadingChart && chartPoints.isEmpty {
                     ProgressView()
@@ -453,7 +458,7 @@ struct PortfolioView: View {
                         Label("Chart Unavailable", systemImage: "wifi.exclamationmark")
                     } actions: {
                         Button("Try Again") {
-                            Task { await loadChartHistory() }
+                            Task { await loadChartHistory(transactions: transactions) }
                         }
                     }
                     .frame(minHeight: 230)
@@ -466,7 +471,10 @@ struct PortfolioView: View {
             }
         }
         .padding()
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .background(
+            Color(uiColor: .secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
     }
 
     private var portfolioChart: some View {
@@ -576,17 +584,17 @@ struct PortfolioView: View {
             }
         }
         .frame(height: 250)
-        .animation(.easeInOut(duration: 0.2), value: selectedRange)
         .accessibilityLabel("Portfolio value chart")
     }
 
-    private var holdingsSection: some View {
+    private func holdingsSection(summary: PortfolioHoldingSummary) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Button {
-                showingHoldingDetail = true
-                Task {
-                    await priceService.refresh(preferences: preferences)
-                }
+            NavigationLink {
+                KaspaPriceDetail(
+                    priceService: priceService,
+                    preferences: preferences,
+                    accentColor: activePortfolioColor
+                )
             } label: {
                 HStack(spacing: 12) {
                     Image("KaspaLogo")
@@ -605,9 +613,9 @@ struct PortfolioView: View {
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text(holdingAmountText)
+                        Text(holdingAmountText(summary: summary))
                             .font(.subheadline.weight(.semibold))
-                        Text(holdingValueText)
+                        Text(holdingValueText(summary: summary))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -625,30 +633,77 @@ struct PortfolioView: View {
 
             Divider()
             newTransactionButton
+            holdingSummaryCard(summary: summary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 2)
         .padding(.vertical, 6)
     }
 
-    private var transactionsSection: some View {
-        let displayedTransactions = visibleTransactions
+    private func holdingSummaryCard(summary: PortfolioHoldingSummary) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            DisclosureGroup(isExpanded: $isSummaryExpanded) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Divider().padding(.vertical, 11)
+                    summaryRow("KAS Price", value: kasPriceText)
+                    Divider().padding(.vertical, 11)
+                    summaryRow(
+                        "Unrealized P/L",
+                        value: unrealizedProfitLossText(summary: summary),
+                        valueColor: unrealizedProfitLossColor(summary: summary)
+                    )
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Average Buy Price", value: averageCostText(summary: summary))
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Cost Basis", value: currency(summary.costBasis))
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Bought", value: kasAmount(summary.totalBought))
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Sold", value: kasAmount(summary.totalSold))
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Transferred In", value: kasAmount(summary.totalTransferredIn))
+                    Divider().padding(.vertical, 11)
+                    summaryRow("Transferred Out", value: kasAmount(summary.totalTransferredOut))
+                }
+            } label: {
+                Text("Summary")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+            }
+            .tint(.primary)
+        }
+        .padding()
+        .background(
+            Color(uiColor: .secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+    }
+
+    private func summaryRow(
+        _ title: String,
+        value: String,
+        valueColor: Color = .primary
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .foregroundStyle(valueColor)
+                .multilineTextAlignment(.trailing)
+        }
+        .font(.subheadline)
+    }
+
+    private func transactionsSection(
+        displayedTransactions: [PortfolioTransaction]
+    ) -> some View {
         let lastTransactionID = displayedTransactions.last?.id
 
         return VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Transactions")
                     .font(.headline)
-
-                Spacer()
-
-                Button(action: presentNewTransactionEditor) {
-                    Image(systemName: "plus")
-                        .font(.headline)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(activePortfolioColor)
-                .accessibilityLabel("New Portfolio Transaction")
             }
 
             if displayedTransactions.isEmpty {
@@ -751,13 +806,19 @@ struct PortfolioView: View {
         UUID(uuidString: selectedPortfolioID)
     }
 
-    private var visibleTransactions: [PortfolioTransaction] {
-        guard let selectedPortfolioUUID else { return transactions }
-        return transactions.filter { $0.portfolioID == selectedPortfolioUUID }
-    }
-
-    private var holdingSummary: PortfolioHoldingSummary {
-        PortfolioHoldingSummary(transactions: visibleTransactions)
+    private var renderSnapshot: RenderSnapshot {
+        let visibleTransactions: [PortfolioTransaction]
+        if let selectedPortfolioUUID {
+            visibleTransactions = transactions.filter {
+                $0.portfolioID == selectedPortfolioUUID
+            }
+        } else {
+            visibleTransactions = transactions
+        }
+        return RenderSnapshot(
+            transactions: visibleTransactions,
+            summary: PortfolioHoldingSummary(transactions: visibleTransactions)
+        )
     }
 
     private var availableHoldingsByPortfolio: [UUID: Double] {
@@ -772,19 +833,60 @@ struct PortfolioView: View {
         })
     }
 
-    private var holdingAmountText: String {
-        holdingSummary.holdings.formatted(
+    private func holdingAmountText(summary: PortfolioHoldingSummary) -> String {
+        summary.holdings.formatted(
             .number.grouping(.automatic).precision(.fractionLength(0...8))
         ) + " KAS"
     }
 
-    private var holdingValueText: String {
+    private func holdingValueText(summary: PortfolioHoldingSummary) -> String {
         guard let kasPriceUSD = priceService.price(for: .usd) else { return "—" }
-        return (holdingSummary.holdings * kasPriceUSD).formatted(.currency(code: "USD"))
+        return (summary.holdings * kasPriceUSD).formatted(.currency(code: "USD"))
     }
 
-    private var displayedPortfolioValueText: String {
-        guard let selectedChartPoint else { return holdingValueText }
+    private var kasPriceText: String {
+        guard let kasPriceUSD = priceService.price(for: .usd) else { return "—" }
+        return kasPriceUSD.formatted(
+            .currency(code: "USD").precision(.fractionLength(4))
+        )
+    }
+
+    private func averageCostText(summary: PortfolioHoldingSummary) -> String {
+        guard let averageCost = summary.averageCost else { return "—" }
+        return averageCost.formatted(
+            .currency(code: "USD").precision(.fractionLength(0...8))
+        )
+    }
+
+    private func unrealizedProfitLoss(summary: PortfolioHoldingSummary) -> Double? {
+        guard let kasPriceUSD = priceService.price(for: .usd) else { return nil }
+        return (summary.holdings * kasPriceUSD) - summary.remainingCostBasis
+    }
+
+    private func unrealizedProfitLossText(summary: PortfolioHoldingSummary) -> String {
+        guard let unrealizedProfitLoss = unrealizedProfitLoss(summary: summary) else { return "—" }
+        return currency(unrealizedProfitLoss)
+    }
+
+    private func unrealizedProfitLossColor(summary: PortfolioHoldingSummary) -> Color {
+        guard let unrealizedProfitLoss = unrealizedProfitLoss(summary: summary) else { return .secondary }
+        if unrealizedProfitLoss > 0 { return .green }
+        if unrealizedProfitLoss < 0 { return .red }
+        return .secondary
+    }
+
+    private func kasAmount(_ value: Double) -> String {
+        value.formatted(
+            .number.grouping(.automatic).precision(.fractionLength(0...8))
+        ) + " KAS"
+    }
+
+    private func currency(_ value: Double) -> String {
+        value.formatted(.currency(code: "USD"))
+    }
+
+    private func displayedPortfolioValueText(summary: PortfolioHoldingSummary) -> String {
+        guard let selectedChartPoint else { return holdingValueText(summary: summary) }
         return selectedChartPoint.valueUSD.formatted(.currency(code: "USD"))
     }
 
@@ -792,26 +894,39 @@ struct PortfolioView: View {
         PortfolioChartBuilder.valueDomain(for: points)
     }
 
-    private var chartRequestID: String {
-        let transactionState = visibleTransactions.map {
-            "\($0.id.uuidString):\($0.timestamp.timeIntervalSince1970):\($0.type):\($0.kasAmount)"
-        }.joined(separator: "|")
-        return "\(selectedRange.rawValue):\(selectedPortfolioID):\(priceService.historyRevision):\(transactionState)"
+    private func chartRequestID(
+        for visibleTransactions: [PortfolioTransaction]
+    ) -> ChartRequestID {
+        var hasher = Hasher()
+        for transaction in visibleTransactions {
+            hasher.combine(transaction.id)
+            hasher.combine(transaction.timestamp)
+            hasher.combine(transaction.type)
+            hasher.combine(transaction.kasAmount)
+        }
+        return ChartRequestID(
+            range: selectedRange,
+            portfolioID: selectedPortfolioID,
+            historyRevision: priceService.historyRevision,
+            transactionRevision: hasher.finalize()
+        )
     }
 
-    private func loadChartHistory() async {
+    private func loadChartHistory(
+        transactions visibleTransactions: [PortfolioTransaction]
+    ) async {
         isLoadingChart = true
         chartLoadFailed = false
         selectedChartPoint = nil
 
         do {
-            let days = selectedRange.days ?? allHistoryDays
-            let prices = try await priceService.historicalUSDPrices(days: days)
+            let days = selectedRange.days ?? allHistoryDays(for: visibleTransactions)
+            let prices = try await priceService.cachedHistoricalUSDPrices(days: days)
             guard !Task.isCancelled else { return }
             let applicableTransactions = visibleTransactions.sorted(
                 by: PortfolioTransactionOrder.ascending
             )
-            guard let firstTransactionDate = applicableTransactions.first?.timestamp else {
+            guard applicableTransactions.first?.timestamp != nil else {
                 chartPoints = []
                 selectionChartPoints = []
                 chartValueDomain = 0...1
@@ -827,7 +942,7 @@ struct PortfolioView: View {
             selectionChartPoints = fullResolutionPoints
             chartPoints = PortfolioChartBuilder.downsampled(
                 fullResolutionPoints,
-                maximumCount: 280
+                maximumCount: 90
             )
             chartValueDomain = chartYDomain(for: fullResolutionPoints)
             chartLoadFailed = false
@@ -841,7 +956,9 @@ struct PortfolioView: View {
         isLoadingChart = false
     }
 
-    private var allHistoryDays: String {
+    private func allHistoryDays(
+        for visibleTransactions: [PortfolioTransaction]
+    ) -> String {
         guard let earliest = visibleTransactions.map(\.timestamp).min() else { return "1" }
         let elapsedDays = Calendar.current.dateComponents([.day], from: earliest, to: Date()).day ?? 1
         return String(max(1, elapsedDays + 1))
@@ -1121,109 +1238,544 @@ struct PortfolioView: View {
     }
 }
 
-private struct PortfolioHoldingDetail: View {
-    @Environment(\.dismiss) private var dismiss
+private struct KaspaPriceDetail: View {
+    private enum ConverterPriceMode: String, CaseIterable, Identifiable {
+        case spot
+        case manual
 
-    let summary: PortfolioHoldingSummary
-    let kasPriceUSD: Double?
-    let accentColor: Color
+        var id: Self { self }
 
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    HStack(spacing: 14) {
-                        Image("KaspaLogo")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 48, height: 48)
-
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(kasAmount(summary.holdings))
-                                .font(.title2.weight(.semibold))
-                            Text(marketValueText)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-
-                Section("Market") {
-                    LabeledContent("KAS Price", value: kasPriceText)
-                    LabeledContent("Market Value", value: marketValueText)
-                    LabeledContent("Unrealized P/L") {
-                        Text(unrealizedProfitLossText)
-                            .foregroundStyle(unrealizedProfitLossColor)
-                    }
-                }
-
-                Section("Cost") {
-                    LabeledContent("Average Buy Price", value: averageCostText)
-                    LabeledContent("Cost Basis", value: currency(summary.costBasis))
-                }
-
-                Section("Activity") {
-                    LabeledContent("Bought", value: kasAmount(summary.totalBought))
-                    LabeledContent("Sold", value: kasAmount(summary.totalSold))
-                    LabeledContent("Transferred In", value: kasAmount(summary.totalTransferredIn))
-                    LabeledContent("Transferred Out", value: kasAmount(summary.totalTransferredOut))
-                }
+        var title: String {
+            switch self {
+            case .spot: "Spot Price"
+            case .manual: "Manual Price"
             }
-            .navigationTitle("Summary")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .tint(accentColor)
         }
     }
 
-    private var kasPriceText: String {
-        guard let kasPriceUSD else { return "—" }
-        return kasPriceUSD.formatted(
+    private enum TimeRange: String, CaseIterable, Identifiable {
+        case day = "24H"
+        case week = "7D"
+        case month = "30D"
+        case quarter = "90D"
+        case all = "All"
+
+        var id: Self { self }
+
+        var days: String {
+            switch self {
+            case .day: "1"
+            case .week: "7"
+            case .month: "30"
+            case .quarter: "90"
+            case .all: "3650"
+            }
+        }
+    }
+
+    @ObservedObject var priceService: PriceService
+    @ObservedObject var preferences: AppPreferences
+    let accentColor: Color
+
+    @State private var selectedRange: TimeRange = .day
+    @State private var points: [HistoricalPricePoint] = []
+    @State private var selectedPoint: HistoricalPricePoint?
+    @State private var isLoading = false
+    @State private var loadFailed = false
+    @State private var chartPriceDomain: ClosedRange<Double> = 0...1
+    @State private var rangeChange: Double?
+    @State private var converterPriceModeRaw = ConverterPriceMode.spot.rawValue
+    @State private var converterManualPrice = ""
+    @State private var converterKAS = "1"
+    @State private var converterUSD = ""
+    @State private var converterUpdating = false
+    @State private var converterSuppressUpdateFor: String?
+    @State private var manualRateKAS = "1"
+    @FocusState private var converterFieldFocused: Bool
+
+    private var displayedPrice: Double? {
+        selectedPoint?.priceUSD ?? priceService.price(for: .usd) ?? points.last?.priceUSD
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                HStack(spacing: 14) {
+                    Image("KaspaLogo")
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 48, height: 48)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Kaspa")
+                            .font(.headline)
+                        Text("KAS")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer()
+
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(priceText)
+                            .font(.title2.weight(.semibold))
+                            .contentTransition(.numericText())
+                        Text(changeText)
+                            .font(.subheadline)
+                            .foregroundStyle(changeColor)
+                    }
+                }
+                .padding()
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                VStack(spacing: 16) {
+                    HStack(spacing: 4) {
+                        ForEach(TimeRange.allCases) { range in
+                            Button {
+                                selectedRange = range
+                                selectedPoint = nil
+                            } label: {
+                                Text(range.rawValue)
+                                    .font(.caption.weight(.semibold))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 7)
+                                    .background(
+                                        selectedRange == range ? accentColor.opacity(0.18) : .clear,
+                                        in: Capsule()
+                                    )
+                                    .foregroundStyle(selectedRange == range ? accentColor : .secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    chartContent
+                }
+                .padding()
+                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                converterCard
+            }
+            .padding()
+        }
+        .navigationTitle("Kaspa")
+        .navigationBarTitleDisplayMode(.inline)
+        .tint(accentColor)
+        .task {
+            await priceService.refresh(preferences: preferences)
+        }
+        .task(id: "\(selectedRange.rawValue):\(priceService.historyRevision)") {
+            await loadHistory()
+        }
+    }
+
+    @ViewBuilder
+    private var chartContent: some View {
+        if isLoading && points.isEmpty {
+            ProgressView()
+                .frame(maxWidth: .infinity, minHeight: 260)
+        } else if loadFailed && points.isEmpty {
+            ContentUnavailableView {
+                Label("Chart Unavailable", systemImage: "wifi.exclamationmark")
+            } actions: {
+                Button("Try Again") {
+                    Task { await loadHistory() }
+                }
+            }
+            .frame(minHeight: 260)
+        } else if points.isEmpty {
+            ContentUnavailableView("No Chart Data", systemImage: "chart.xyaxis.line")
+                .frame(minHeight: 260)
+        } else {
+            priceChart
+        }
+    }
+
+    private var converterPriceMode: ConverterPriceMode {
+        ConverterPriceMode(rawValue: converterPriceModeRaw) ?? .spot
+    }
+
+    private var converterRate: Double? {
+        switch converterPriceMode {
+        case .spot:
+            return priceService.price(for: .usd) ?? points.last?.priceUSD
+        case .manual:
+            guard let value = Double(converterManualPrice.replacingOccurrences(of: ",", with: "")), value.isFinite, value > 0 else {
+                return nil
+            }
+            return value
+        }
+    }
+
+    private var converterCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Currency Converter")
+                    .font(.headline)
+                Spacer()
+                Picker("Price", selection: $converterPriceModeRaw) {
+                    ForEach(ConverterPriceMode.allCases) { mode in
+                        Text(mode.title).tag(mode.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            if converterPriceMode == .manual {
+                HStack(alignment: .bottom, spacing: 10) {
+                    converterRateField(title: "KAS", text: $manualRateKAS)
+                    Text("=")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 38, alignment: .center)
+                    converterRateField(title: "USD", text: $converterManualPrice)
+                }
+            }
+
+            HStack(alignment: .bottom, spacing: 10) {
+                converterField(title: "KAS", text: $converterKAS)
+                Image(systemName: "equal")
+                    .foregroundStyle(.secondary)
+                    .frame(width: 20, height: 38, alignment: .center)
+                converterField(title: "USD", text: $converterUSD)
+            }
+        }
+        .padding()
+        .background(
+            Color(uiColor: .secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .onAppear(perform: initializeConverter)
+        .onChange(of: converterPriceModeRaw) { _, _ in resetConverterFields() }
+        .onChange(of: priceService.prices[.usd]) { _, _ in
+            guard converterPriceMode == .spot else { return }
+            initializeConverter()
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") {
+                    converterFieldFocused = false
+                }
+            }
+        }
+    }
+
+    private func converterField(title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField(title, text: text)
+                .keyboardType(.decimalPad)
+                .textFieldStyle(.roundedBorder)
+                .focused($converterFieldFocused)
+                .onChange(of: text.wrappedValue) { _, newValue in
+                    if converterSuppressUpdateFor == title {
+                        converterSuppressUpdateFor = nil
+                        return
+                    }
+                    if let number = Double(newValue.replacingOccurrences(of: ",", with: "")), number.isFinite {
+                        text.wrappedValue = title == "USD"
+                            ? formatUSDConverterValue(number)
+                            : formatKASConverterValue(number)
+                    }
+                    updateConverter(from: title, value: newValue)
+                }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func converterRateField(title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField(title == "USD" ? "USD price" : "1", text: text)
+                .keyboardType(.decimalPad)
+                .textFieldStyle(.roundedBorder)
+                .focused($converterFieldFocused)
+                .disabled(title == "KAS")
+                .opacity(title == "KAS" ? 0.6 : 1)
+                .onChange(of: text.wrappedValue) { _, value in
+                    guard let number = Double(value.replacingOccurrences(of: ",", with: "")), number.isFinite else { return }
+                    text.wrappedValue = title == "USD"
+                        ? formatManualNumber(number)
+                        : formatKASConverterValue(number)
+                }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func initializeConverter() {
+        guard !converterUpdating, let rate = converterRate else {
+            if converterPriceMode == .manual { converterUSD = "" }
+            return
+        }
+        guard converterPriceMode == .spot else { return }
+        converterUpdating = true
+        let kas = Double(converterKAS.replacingOccurrences(of: ",", with: "")) ?? 1
+        converterSuppressUpdateFor = "USD"
+        converterUSD = formatUSDConverterValue(kas * rate)
+        converterUpdating = false
+    }
+
+    private func resetConverterFields() {
+        converterUpdating = true
+        converterKAS = "1"
+        converterUSD = ""
+        converterManualPrice = ""
+        converterSuppressUpdateFor = nil
+        converterUpdating = false
+    }
+
+    private func updateConverter(from title: String, value: String) {
+        guard !converterUpdating, let rate = converterRate, rate > 0,
+              let amount = Double(value.replacingOccurrences(of: ",", with: "")), amount.isFinite else { return }
+        converterUpdating = true
+        if title == "KAS" {
+            converterSuppressUpdateFor = "USD"
+            converterUSD = converterPriceMode == .manual
+                ? formatManualNumber(amount * rate)
+                : formatUSDConverterValue(amount * rate)
+        } else {
+            converterSuppressUpdateFor = "KAS"
+            converterKAS = formatKASConverterValue(amount / rate)
+        }
+        converterUpdating = false
+    }
+
+    private func formatKASConverterValue(_ value: Double) -> String {
+        value.formatted(.number.grouping(.automatic).precision(.fractionLength(0...8)))
+    }
+
+    private func formatUSDConverterValue(_ value: Double) -> String {
+        value.formatted(
+            .number.grouping(.automatic)
+                .precision(.fractionLength(preferences.kasBalanceDecimalPlaces.rawValue))
+        )
+    }
+
+    private func formatManualNumber(_ value: Double) -> String {
+        value.formatted(.number.grouping(.automatic).precision(.fractionLength(0...8)))
+    }
+
+    private var priceChart: some View {
+        Chart {
+            ForEach(points) { point in
+                AreaMark(
+                    x: .value("Time", point.timestamp),
+                    yStart: .value("Baseline", priceDomain.lowerBound),
+                    yEnd: .value("Price", point.priceUSD)
+                )
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [accentColor.opacity(0.28), accentColor.opacity(0.02)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+
+                LineMark(
+                    x: .value("Time", point.timestamp),
+                    y: .value("Price", point.priceUSD)
+                )
+                .foregroundStyle(accentColor)
+                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+            }
+
+            if let selectedPoint {
+                RuleMark(x: .value("Selected Time", selectedPoint.timestamp))
+                    .foregroundStyle(accentColor)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+
+                PointMark(
+                    x: .value("Selected Time", selectedPoint.timestamp),
+                    y: .value("Selected Price", selectedPoint.priceUSD)
+                )
+                .foregroundStyle(accentColor)
+                .symbolSize(55)
+                .annotation(
+                    position: .top,
+                    spacing: 10,
+                    overflowResolution: AnnotationOverflowResolution(
+                        x: .fit(to: .chart),
+                        y: .disabled
+                    )
+                ) {
+                    if selectedRange != .day {
+                        Text(selectedDate(selectedPoint.timestamp))
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                            .overlay {
+                                Capsule()
+                                    .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                            }
+                    }
+                }
+            }
+        }
+        .chartYScale(domain: priceDomain)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisValueLabel {
+                    if let date = value.as(Date.self) {
+                        Text(axisDate(date))
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisValueLabel {
+                    if let price = value.as(Double.self) {
+                        Text(price.formatted(
+                            .currency(code: "USD").precision(.fractionLength(2...4))
+                        ))
+                    }
+                }
+            }
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { gesture in
+                                guard let plotFrameAnchor = proxy.plotFrame else { return }
+                                let plotFrame = geometry[plotFrameAnchor]
+                                let xPosition = gesture.location.x - plotFrame.origin.x
+                                guard xPosition >= 0,
+                                      xPosition <= plotFrame.width,
+                                      let date: Date = proxy.value(atX: xPosition) else { return }
+                                let nearest = nearestPoint(to: date)
+                                if nearest != selectedPoint {
+                                    selectedPoint = nearest
+                                }
+                            }
+                            .onEnded { _ in selectedPoint = nil }
+                    )
+            }
+        }
+        .frame(height: 280)
+        .accessibilityLabel("Kaspa price chart")
+    }
+
+    private var priceText: String {
+        guard let displayedPrice else { return "—" }
+        return displayedPrice.formatted(
             .currency(code: "USD").precision(.fractionLength(4))
         )
     }
 
-    private var marketValueText: String {
-        guard let kasPriceUSD else { return "—" }
-        return currency(summary.holdings * kasPriceUSD)
+    private var change: Double? {
+        rangeChange
     }
 
-    private var averageCostText: String {
-        guard let averageCost = summary.averageCost else { return "—" }
-        return averageCost.formatted(
-            .currency(code: "USD").precision(.fractionLength(0...8))
-        )
+    private var changeText: String {
+        guard let change else { return "—" }
+        let prefix = change > 0 ? "+" : ""
+        return prefix + change.formatted(.number.precision(.fractionLength(2))) + "%"
     }
 
-    private var unrealizedProfitLossText: String {
-        guard let unrealizedProfitLoss else { return "—" }
-        return currency(unrealizedProfitLoss)
-    }
-
-    private var unrealizedProfitLoss: Double? {
-        guard let kasPriceUSD else { return nil }
-        return (summary.holdings * kasPriceUSD) - summary.remainingCostBasis
-    }
-
-    private var unrealizedProfitLossColor: Color {
-        guard let unrealizedProfitLoss else { return .secondary }
-        if unrealizedProfitLoss > 0 { return .green }
-        if unrealizedProfitLoss < 0 { return .red }
+    private var changeColor: Color {
+        guard let change else { return .secondary }
+        if change > 0 { return .green }
+        if change < 0 { return .red }
         return .secondary
     }
 
-    private func kasAmount(_ value: Double) -> String {
-        value.formatted(
-            .number.grouping(.automatic).precision(.fractionLength(0...8))
-        ) + " KAS"
+    private var priceDomain: ClosedRange<Double> {
+        chartPriceDomain
     }
 
-    private func currency(_ value: Double) -> String {
-        value.formatted(.currency(code: "USD"))
+    private func calculatedPriceDomain(
+        for points: [HistoricalPricePoint]
+    ) -> ClosedRange<Double> {
+        let values = points.map(\.priceUSD)
+        guard let minimum = values.min(), let maximum = values.max() else { return 0...1 }
+        if minimum == maximum {
+            let padding = max(abs(minimum) * 0.01, 0.0001)
+            return (minimum - padding)...(maximum + padding)
+        }
+        let padding = (maximum - minimum) * 0.08
+        return max(0, minimum - padding)...(maximum + padding)
+    }
+
+    private func loadHistory() async {
+        isLoading = true
+        loadFailed = false
+        selectedPoint = nil
+        do {
+            let loaded = try await priceService.cachedHistoricalUSDPrices(days: selectedRange.days)
+            guard !Task.isCancelled else { return }
+            let sampled = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
+            points = sampled
+            chartPriceDomain = calculatedPriceDomain(for: loaded)
+            if let first = loaded.first?.priceUSD,
+               let last = loaded.last?.priceUSD,
+               first > 0 {
+                rangeChange = ((last - first) / first) * 100
+            } else {
+                rangeChange = nil
+            }
+            loadFailed = false
+        } catch {
+            guard !Task.isCancelled else { return }
+            points = []
+            chartPriceDomain = 0...1
+            rangeChange = nil
+            loadFailed = true
+        }
+        isLoading = false
+    }
+
+    private func nearestPoint(to date: Date) -> HistoricalPricePoint? {
+        guard !points.isEmpty else { return nil }
+
+        var lowerBound = 0
+        var upperBound = points.count
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            if points[middle].timestamp < date {
+                lowerBound = middle + 1
+            } else {
+                upperBound = middle
+            }
+        }
+
+        if lowerBound == 0 { return points[0] }
+        if lowerBound == points.count { return points.last }
+
+        let previous = points[lowerBound - 1]
+        let next = points[lowerBound]
+        return abs(previous.timestamp.timeIntervalSince(date))
+            <= abs(next.timestamp.timeIntervalSince(date)) ? previous : next
+    }
+
+    private func axisDate(_ date: Date) -> String {
+        switch selectedRange {
+        case .day:
+            date.formatted(.dateTime.hour().minute())
+        case .week, .month:
+            date.formatted(.dateTime.month(.abbreviated).day())
+        case .quarter, .all:
+            date.formatted(.dateTime.month(.abbreviated).year(.twoDigits))
+        }
+    }
+
+    private func selectedDate(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .omitted)
     }
 }
 

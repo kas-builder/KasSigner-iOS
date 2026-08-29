@@ -133,36 +133,66 @@ enum PortfolioChartBuilder {
         let orderedPrices = prices.sorted { $0.timestamp < $1.timestamp }
         guard !orderedPrices.isEmpty else { return [] }
 
-        var applicablePrices = orderedPrices
-        var startingPoint: PortfolioChartPoint?
-        if let rangeStart = orderedPrices.first?.timestamp,
-           firstTransactionDate > rangeStart {
-            applicablePrices = orderedPrices.filter { $0.timestamp >= firstTransactionDate }
-            if let startingPrice = interpolatedPrice(at: firstTransactionDate, in: orderedPrices) {
-                let startingHoldings = PortfolioHoldingSummary(
-                    transactions: orderedTransactions.filter { $0.timestamp <= firstTransactionDate }
-                ).holdings
-                startingPoint = PortfolioChartPoint(
-                    timestamp: firstTransactionDate,
-                    valueUSD: startingHoldings * startingPrice
+        var transactionIndex = 0
+        var holdings = 0.0
+        var result: [PortfolioChartPoint] = []
+
+        func applyTransactions(through timestamp: Date) {
+            while transactionIndex < orderedTransactions.count,
+                  orderedTransactions[transactionIndex].timestamp <= timestamp {
+                holdings = holdingsAfterApplying(
+                    orderedTransactions[transactionIndex],
+                    to: holdings
                 )
+                transactionIndex += 1
             }
         }
 
-        var result = applicablePrices.map { pricePoint in
-            let holdings = PortfolioHoldingSummary(
-                transactions: orderedTransactions.filter { $0.timestamp <= pricePoint.timestamp }
-            ).holdings
-            return PortfolioChartPoint(
-                timestamp: pricePoint.timestamp,
-                valueUSD: holdings * pricePoint.priceUSD
-            )
+        var firstPriceIndex = 0
+        if firstTransactionDate > orderedPrices[0].timestamp {
+            applyTransactions(through: firstTransactionDate)
+            if let startingPrice = interpolatedPrice(at: firstTransactionDate, in: orderedPrices) {
+                result.append(PortfolioChartPoint(
+                    timestamp: firstTransactionDate,
+                    valueUSD: holdings * startingPrice
+                ))
+            }
+            firstPriceIndex = orderedPrices.partitioningIndex {
+                $0.timestamp >= firstTransactionDate
+            }
         }
 
-        if let startingPoint, result.first?.timestamp != startingPoint.timestamp {
-            result.insert(startingPoint, at: 0)
+        for pricePoint in orderedPrices[firstPriceIndex...] {
+            applyTransactions(through: pricePoint.timestamp)
+            if result.last?.timestamp == pricePoint.timestamp {
+                result[result.count - 1] = PortfolioChartPoint(
+                    timestamp: pricePoint.timestamp,
+                    valueUSD: holdings * pricePoint.priceUSD
+                )
+            } else {
+                result.append(PortfolioChartPoint(
+                    timestamp: pricePoint.timestamp,
+                    valueUSD: holdings * pricePoint.priceUSD
+                ))
+            }
         }
         return result
+    }
+
+    private static func holdingsAfterApplying(
+        _ transaction: PortfolioTransaction,
+        to holdings: Double
+    ) -> Double {
+        switch transaction.type {
+        case PortfolioTransactionType.buy.rawValue,
+             PortfolioTransactionType.transferIn.rawValue:
+            return holdings + transaction.kasAmount
+        case PortfolioTransactionType.sell.rawValue,
+             PortfolioTransactionType.transferOut.rawValue:
+            return holdings - min(transaction.kasAmount, max(holdings, 0))
+        default:
+            return holdings
+        }
     }
 
     static func interpolatedPrice(
@@ -222,5 +252,53 @@ enum PortfolioChartBuilder {
 
         result.append(points[points.count - 1])
         return result
+    }
+
+    static func downsampledPrices(
+        _ points: [HistoricalPricePoint],
+        maximumCount: Int
+    ) -> [HistoricalPricePoint] {
+        guard points.count > maximumCount, maximumCount >= 4 else { return points }
+
+        let interior = Array(points.dropFirst().dropLast())
+        let bucketCount = max(1, (maximumCount - 2) / 2)
+        let bucketSize = Int(ceil(Double(interior.count) / Double(bucketCount)))
+        var result = [points[0]]
+
+        for start in stride(from: 0, to: interior.count, by: bucketSize) {
+            let end = min(start + bucketSize, interior.count)
+            let bucket = interior[start..<end]
+            guard let minimum = bucket.min(by: { $0.priceUSD < $1.priceUSD }),
+                  let maximum = bucket.max(by: { $0.priceUSD < $1.priceUSD }) else {
+                continue
+            }
+
+            if minimum.timestamp <= maximum.timestamp {
+                result.append(minimum)
+                if maximum.id != minimum.id { result.append(maximum) }
+            } else {
+                result.append(maximum)
+                if minimum.id != maximum.id { result.append(minimum) }
+            }
+        }
+
+        result.append(points[points.count - 1])
+        return result
+    }
+}
+
+private extension Array {
+    func partitioningIndex(where belongsInSecondPartition: (Element) -> Bool) -> Int {
+        var lowerBound = 0
+        var upperBound = count
+        while lowerBound < upperBound {
+            let middle = (lowerBound + upperBound) / 2
+            if belongsInSecondPartition(self[middle]) {
+                upperBound = middle
+            } else {
+                lowerBound = middle + 1
+            }
+        }
+        return lowerBound
     }
 }
