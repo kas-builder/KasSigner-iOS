@@ -366,14 +366,32 @@ struct PortfolioView: View {
     private func valueCard(summary: PortfolioHoldingSummary) -> some View {
         VStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Portfolio Value")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                HStack {
+                    Text("Portfolio Value")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
 
-                Text(displayedPortfolioValueText(summary: summary))
-                    .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
+                    Spacer()
+
+                    Text(portfolioChangePeriodText)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+
+                HStack(alignment: .center, spacing: 10) {
+                    Text(displayedPortfolioValueText(summary: summary))
+                        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+
+                    Spacer(minLength: 4)
+
+                    Text(portfolioChangeText)
+                        .font(.title.weight(.semibold))
+                        .foregroundStyle(portfolioChangeColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -890,6 +908,39 @@ struct PortfolioView: View {
         return selectedChartPoint.valueUSD.formatted(.currency(code: "USD"))
     }
 
+    private var portfolioChange: Double? {
+        guard let firstValue = selectionChartPoints.first?.valueUSD,
+              let lastValue = selectionChartPoints.last?.valueUSD,
+              firstValue.isFinite,
+              lastValue.isFinite,
+              firstValue > 0 else {
+            return nil
+        }
+
+        let change = ((lastValue - firstValue) / firstValue) * 100
+        return change.isFinite ? change : nil
+    }
+
+    private var portfolioChangeText: String {
+        guard let portfolioChange else { return "—" }
+        return portfolioChange.formatted(
+            .number
+                .sign(strategy: .always())
+                .precision(.fractionLength(2))
+        ) + "%"
+    }
+
+    private var portfolioChangeColor: Color {
+        guard let portfolioChange else { return .secondary }
+        if portfolioChange > 0 { return .green }
+        if portfolioChange < 0 { return .red }
+        return .secondary
+    }
+
+    private var portfolioChangePeriodText: String {
+        selectedRange == .all ? "All-Time Change" : "\(selectedRange.rawValue) Change"
+    }
+
     private func chartYDomain(for points: [PortfolioChartPoint]) -> ClosedRange<Double> {
         PortfolioChartBuilder.valueDomain(for: points)
     }
@@ -1292,6 +1343,9 @@ private struct KaspaPriceDetail: View {
     @State private var converterSuppressUpdateFor: String?
     @State private var manualRateKAS = "1"
     @FocusState private var converterFieldFocused: Bool
+    @State private var showingConverter = false
+    @State private var activeConverterInput = "KAS"
+    @State private var converterInputPrimed = true
 
     private var displayedPrice: Double? {
         selectedPoint?.priceUSD ?? priceService.price(for: .usd) ?? points.last?.priceUSD
@@ -1300,33 +1354,45 @@ private struct KaspaPriceDetail: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
-                HStack(spacing: 14) {
-                    Image("KaspaLogo")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 48, height: 48)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        HStack(spacing: 8) {
+                            Image("KaspaLogo")
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 32, height: 32)
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Kaspa")
-                            .font(.headline)
-                        Text("KAS")
-                            .font(.subheadline)
+                            Text("Kaspa")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text(changePeriodText)
+                            .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
 
-                    Spacer()
-
-                    VStack(alignment: .trailing, spacing: 3) {
+                    HStack(alignment: .center, spacing: 10) {
                         Text(priceText)
-                            .font(.title2.weight(.semibold))
+                            .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.65)
                             .contentTransition(.numericText())
+
+                        Spacer(minLength: 4)
+
                         Text(changeText)
-                            .font(.subheadline)
+                            .font(.title.weight(.semibold))
                             .foregroundStyle(changeColor)
                     }
                 }
-                .padding()
-                .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .padding(.horizontal)
+                .padding(.vertical, 12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    Color(uiColor: .secondarySystemBackground),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
 
                 VStack(spacing: 16) {
                     HStack(spacing: 4) {
@@ -1354,13 +1420,27 @@ private struct KaspaPriceDetail: View {
                 .padding()
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                converterCard
+                Button {
+                    showingConverter = true
+                } label: {
+                    converterSummaryCard
+                }
+                .buttonStyle(.plain)
             }
             .padding()
         }
-        .navigationTitle("Kaspa")
-        .navigationBarTitleDisplayMode(.inline)
         .tint(accentColor)
+        .sheet(isPresented: $showingConverter) {
+            NavigationStack {
+                VStack(spacing: 18) {
+                    converterCard
+                    converterKeypad
+                }
+                .padding(.horizontal)
+            }
+            .presentationDetents([.fraction(0.62)])
+            .presentationDragIndicator(.visible)
+        }
         .task {
             await priceService.refresh(preferences: preferences)
         }
@@ -1431,6 +1511,18 @@ private struct KaspaPriceDetail: View {
                         .frame(width: 20, height: 38, alignment: .center)
                     converterRateField(title: "USD", text: $converterManualPrice)
                 }
+            } else {
+                HStack(alignment: .bottom, spacing: 10) {
+                    converterStaticRateField(title: "KAS", value: "1")
+                    Text("=")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 20, height: 38, alignment: .center)
+                    converterStaticRateField(
+                        title: "USD Price",
+                        value: converterRate.map(formatUSDConverterValue) ?? "—"
+                    )
+                }
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -1462,50 +1554,141 @@ private struct KaspaPriceDetail: View {
         }
     }
 
+    private var converterSummaryCard: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Currency Converter")
+                    .font(.headline)
+                Text(converterPriceMode == .spot ? "Spot Price" : "Manual Price")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.headline)
+                .foregroundStyle(accentColor)
+        }
+        .padding()
+        .background(
+            Color(uiColor: .secondarySystemBackground),
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+    }
+
+    private var converterKeypad: some View {
+        let keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "⌫"]
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 12), count: 3), spacing: 12) {
+            ForEach(keys, id: \.self) { key in
+                Button { handleConverterKey(key) } label: {
+                    Text(key)
+                        .font(.title2.weight(.medium))
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.bottom)
+    }
+
+    private func handleConverterKey(_ key: String) {
+        let binding: Binding<String>
+        switch activeConverterInput {
+        case "USD": binding = $converterUSD
+        case "manualUSD": binding = $converterManualPrice
+        default: binding = $converterKAS
+        }
+        var value = converterInputPrimed && key != "⌫" ? "" : binding.wrappedValue
+        converterInputPrimed = false
+        if key == "⌫" { if !value.isEmpty { value.removeLast() } }
+        else if key == "." { guard !value.contains(".") else { return }; value.append(key) }
+        else { value.append(key) }
+        if activeConverterInput == "KAS", converterPriceMode == .spot, value.isEmpty {
+            value = "1"
+            converterInputPrimed = true
+        }
+        value = formatTypedConverterValue(value)
+        binding.wrappedValue = value
+        if activeConverterInput == "manualUSD" {
+            updateManualConversion()
+            return
+        }
+        updateConverter(from: activeConverterInput, value: value)
+    }
+
     private func converterField(title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title)
+            Text(title == "USD" ? "USD Value" : title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            TextField(title, text: text)
-                .keyboardType(.decimalPad)
-                .textFieldStyle(.roundedBorder)
-                .focused($converterFieldFocused)
-                .onChange(of: text.wrappedValue) { _, newValue in
-                    if converterSuppressUpdateFor == title {
-                        converterSuppressUpdateFor = nil
-                        return
-                    }
-                    if let number = Double(newValue.replacingOccurrences(of: ",", with: "")), number.isFinite {
-                        text.wrappedValue = title == "USD"
-                            ? formatUSDConverterValue(number)
-                            : formatKASConverterValue(number)
-                    }
-                    updateConverter(from: title, value: newValue)
-                }
+            HStack(spacing: 0) {
+                Text(text.wrappedValue.isEmpty ? (title == "KAS" ? "1" : "") : text.wrappedValue)
+                    .foregroundStyle(text.wrappedValue.isEmpty ? .secondary : .primary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                converterCursor(for: title)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 38)
+            .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                activeConverterInput = title
+                converterInputPrimed = true
+            }
         }
         .frame(maxWidth: .infinity)
     }
 
     private func converterRateField(title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
+            Text(title == "USD" ? "USD Price" : title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 0) {
+                Text(text.wrappedValue.isEmpty ? (title == "USD" ? "" : "1") : text.wrappedValue)
+                    .foregroundStyle(text.wrappedValue.isEmpty ? .secondary : .primary)
+                if title == "USD" {
+                    converterCursor(for: "manualUSD")
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 8)
+            .frame(height: 38)
+            .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .contentShape(Rectangle())
+            .onTapGesture { if title == "USD" { activeConverterInput = "manualUSD"; converterInputPrimed = false } }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func converterStaticRateField(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            TextField(title == "USD" ? "USD price" : "1", text: text)
-                .keyboardType(.decimalPad)
-                .textFieldStyle(.roundedBorder)
-                .focused($converterFieldFocused)
-                .disabled(title == "KAS")
-                .opacity(title == "KAS" ? 0.6 : 1)
-                .onChange(of: text.wrappedValue) { _, value in
-                    guard let number = Double(value.replacingOccurrences(of: ",", with: "")), number.isFinite else { return }
-                    text.wrappedValue = title == "USD"
-                        ? formatManualNumber(number)
-                        : formatKASConverterValue(number)
-                }
+            Text(value)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 8)
+                .frame(height: 38)
+                .background(Color(uiColor: .tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func converterCursor(for input: String) -> some View {
+        if activeConverterInput == input {
+            TimelineView(.periodic(from: .now, by: 0.55)) { context in
+                Rectangle()
+                    .fill(accentColor)
+                    .frame(width: 2, height: 21)
+                    .opacity(Int(context.date.timeIntervalSinceReferenceDate / 0.55).isMultiple(of: 2) ? 1 : 0)
+            }
+        }
     }
 
     private func initializeConverter() {
@@ -1527,6 +1710,8 @@ private struct KaspaPriceDetail: View {
         converterUSD = ""
         converterManualPrice = ""
         converterSuppressUpdateFor = nil
+        activeConverterInput = converterPriceMode == .manual ? "manualUSD" : "KAS"
+        converterInputPrimed = true
         converterUpdating = false
     }
 
@@ -1546,6 +1731,21 @@ private struct KaspaPriceDetail: View {
         converterUpdating = false
     }
 
+    private func updateManualConversion() {
+        guard converterPriceMode == .manual,
+              let rate = converterRate,
+              rate > 0,
+              let kas = Double(converterKAS.replacingOccurrences(of: ",", with: "")),
+              kas.isFinite else {
+            converterUSD = ""
+            return
+        }
+        converterUpdating = true
+        converterSuppressUpdateFor = "USD"
+        converterUSD = formatManualNumber(kas * rate)
+        converterUpdating = false
+    }
+
     private func formatKASConverterValue(_ value: Double) -> String {
         value.formatted(.number.grouping(.automatic).precision(.fractionLength(0...8)))
     }
@@ -1553,12 +1753,38 @@ private struct KaspaPriceDetail: View {
     private func formatUSDConverterValue(_ value: Double) -> String {
         value.formatted(
             .number.grouping(.automatic)
-                .precision(.fractionLength(preferences.kasBalanceDecimalPlaces.rawValue))
+                .precision(.fractionLength(5))
         )
     }
 
     private func formatManualNumber(_ value: Double) -> String {
         value.formatted(.number.grouping(.automatic).precision(.fractionLength(0...8)))
+    }
+
+    private func formatTypedConverterValue(_ value: String) -> String {
+        let raw = value.replacingOccurrences(of: ",", with: "")
+        guard !raw.isEmpty else { return "" }
+
+        let components = raw.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false)
+        let rawInteger = String(components[0])
+        guard rawInteger.allSatisfy({ $0.isNumber }) else { return value }
+
+        let trimmedInteger = rawInteger.drop(while: { $0 == "0" })
+        let integer = trimmedInteger.isEmpty ? "0" : String(trimmedInteger)
+        let groupedInteger = stride(from: integer.count, to: 0, by: -3)
+            .reversed()
+            .map { end -> String in
+                let start = max(0, end - 3)
+                let startIndex = integer.index(integer.startIndex, offsetBy: start)
+                let endIndex = integer.index(integer.startIndex, offsetBy: end)
+                return String(integer[startIndex..<endIndex])
+            }
+            .joined(separator: ",")
+
+        guard components.count == 2 else { return groupedInteger }
+        let fraction = String(components[1].prefix(8))
+        guard fraction.allSatisfy({ $0.isNumber }) else { return value }
+        return "\(groupedInteger).\(fraction)"
     }
 
     private var priceChart: some View {
@@ -1583,6 +1809,15 @@ private struct KaspaPriceDetail: View {
                 )
                 .foregroundStyle(accentColor)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+            }
+
+            if let latestPoint = points.last {
+                PointMark(
+                    x: .value("Latest Time", latestPoint.timestamp),
+                    y: .value("Latest Price", latestPoint.priceUSD)
+                )
+                .foregroundStyle(accentColor)
+                .symbolSize(34)
             }
 
             if let selectedPoint {
@@ -1622,8 +1857,10 @@ private struct KaspaPriceDetail: View {
         .chartYScale(domain: priceDomain)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
-                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.4, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.14))
+                AxisTick(length: 4, stroke: StrokeStyle(lineWidth: 0.8))
+                    .foregroundStyle(.secondary.opacity(0.32))
                 AxisValueLabel {
                     if let date = value.as(Date.self) {
                         Text(axisDate(date))
@@ -1633,8 +1870,10 @@ private struct KaspaPriceDetail: View {
         }
         .chartYAxis {
             AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { value in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
-                    .foregroundStyle(.secondary.opacity(0.25))
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.7, dash: [2, 3]))
+                    .foregroundStyle(.secondary.opacity(0.30))
+                AxisTick(length: 4, stroke: StrokeStyle(lineWidth: 0.8))
+                    .foregroundStyle(.secondary.opacity(0.32))
                 AxisValueLabel {
                     if let price = value.as(Double.self) {
                         Text(price.formatted(
@@ -1680,6 +1919,10 @@ private struct KaspaPriceDetail: View {
 
     private var change: Double? {
         rangeChange
+    }
+
+    private var changePeriodText: String {
+        selectedRange == .all ? "All-Time Change" : "\(selectedRange.rawValue) Change"
     }
 
     private var changeText: String {
@@ -1791,6 +2034,7 @@ private struct PortfolioTransactionDraft {
 
 private struct PortfolioTransactionDetail: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var priceService: PriceService
     @State private var showingDeleteConfirmation = false
 
     let transaction: PortfolioTransaction
@@ -1811,6 +2055,14 @@ private struct PortfolioTransactionDetail: View {
                     }
                     LabeledContent("Fee", value: feeText)
                     LabeledContent("Total Value", value: totalValueText)
+                }
+
+                Section("Performance") {
+                    LabeledContent("Current Value", value: currentValueText)
+                    LabeledContent("Percent Change") {
+                        Text(percentChangeText)
+                            .foregroundStyle(percentChangeColor)
+                    }
                 }
 
                 Section("Date & Time") {
@@ -1877,6 +2129,48 @@ private struct PortfolioTransactionDetail: View {
 
     private var totalValueText: String {
         (transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD"))
+    }
+
+    private var currentValue: Double? {
+        guard let currentPrice = priceService.price(for: .usd),
+              currentPrice.isFinite,
+              currentPrice > 0 else {
+            return nil
+        }
+        return transaction.kasAmount * currentPrice
+    }
+
+    private var currentValueText: String {
+        guard let currentValue else { return "—" }
+        return currentValue.formatted(.currency(code: "USD"))
+    }
+
+    private var percentChange: Double? {
+        let originalValue = transaction.kasAmount * transaction.kasPriceUSD
+        guard originalValue.isFinite,
+              originalValue > 0,
+              let currentValue else {
+            return nil
+        }
+
+        let change = ((currentValue - originalValue) / originalValue) * 100
+        return change.isFinite ? change : nil
+    }
+
+    private var percentChangeText: String {
+        guard let percentChange else { return "—" }
+        return percentChange.formatted(
+            .number
+                .sign(strategy: .always())
+                .precision(.fractionLength(2))
+        ) + "%"
+    }
+
+    private var percentChangeColor: Color {
+        guard let percentChange else { return .secondary }
+        if percentChange > 0 { return .green }
+        if percentChange < 0 { return .red }
+        return .secondary
     }
 
     private var transactionType: PortfolioTransactionType? {
