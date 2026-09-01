@@ -324,6 +324,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
     @Published private(set) var statusText = "Starting KasSigner…"
 
     private let schemeHandler = KasSignerSchemeHandler()
+    private let bridgeLoadToken = UUID().uuidString
     private var hasStarted = false
     private var desiredRuntimeActive = true
 
@@ -714,6 +715,88 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return merged
     }
 
+    func verifyAndMergeSignedKSPTIntoPSKB(
+        signedKSPTHex: String,
+        originalRelayKSPTHex: String,
+        originalPSKBHex: String
+    ) async throws -> String {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return window.kaspi.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex,
+                originalRelayKSPTHex,
+                originalPSKBHex
+            );
+            """,
+            arguments: [
+                "signedKSPTHex": signedKSPTHex,
+                "originalRelayKSPTHex": originalRelayKSPTHex,
+                "originalPSKBHex": originalPSKBHex
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let responseJSON = result as? String,
+              let responseData = responseJSON.data(using: .utf8),
+              let response = try JSONSerialization.jsonObject(
+                with: responseData
+              ) as? [String: Any]
+        else {
+            throw EngineError.invalidResponse
+        }
+
+        if let message = response["error"] as? String {
+            throw EngineError.javascript(message)
+        }
+
+        guard let merged = response["value"] as? String else {
+            throw EngineError.invalidResponse
+        }
+
+        let normalized = merged.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalized.isEmpty,
+              normalized.count.isMultiple(of: 2),
+              normalized.allSatisfy({ $0.isHexDigit })
+        else {
+            throw EngineError.javascript(
+                "Verified signed PSKB was not valid hexadecimal."
+            )
+        }
+        return normalized.lowercased()
+    }
+
+    func finalizeAndBroadcastPSKB(
+        _ wireHex: String,
+        wsURL: String
+    ) async throws -> String {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return window.kaspi.finalizeAndBroadcastPSKB(
+                wireHex,
+                wsURL
+            );
+            """,
+            arguments: [
+                "wireHex": wireHex,
+                "wsURL": wsURL
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let transactionID = result as? String else {
+            throw EngineError.invalidResponse
+        }
+        return transactionID
+    }
+
     func broadcastSignedKSPT(
         signedKSPTHex: String,
         wsURL: String
@@ -1096,7 +1179,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
         guard let url = URL(
             string:
                 "\(KasSignerSchemeHandler.scheme)://engine/bridge.html"
-                + "?runtime=9942e6e152b814d4"
+                + "?load=\(bridgeLoadToken)"
         ) else {
             statusText = "KasSigner startup URL invalid"
             return

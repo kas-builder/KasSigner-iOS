@@ -597,6 +597,23 @@ pub fn pskt_merge_signed_kspt_v2(
         .map_err(|e| JsValue::from_str(&e))
 }
 
+/// Strict signed-return boundary for the iOS signing flow. Requires the
+/// returned KSPT to match the exact relay emitted for approval and verifies
+/// every returned Schnorr signature before merging into the original PSKB.
+#[wasm_bindgen]
+pub fn pskt_verify_and_merge_signed_kspt(
+    signed_kspt_hex: &str,
+    original_relay_kspt_hex: &str,
+    original_pskb_hex: &str,
+) -> Result<String, JsValue> {
+    pskt::verify_and_merge_signed_kspt_into_pskb(
+        signed_kspt_hex,
+        original_relay_kspt_hex,
+        original_pskb_hex,
+    )
+    .map_err(|e| JsValue::from_str(&e))
+}
+
 /// PSKT-native finalize + broadcast. Walks the PSKB JSON once,
 /// assembles a consensus Transaction directly (sig_scripts per input,
 /// with partial sigs + redeem script for P2SH multisig), and submits

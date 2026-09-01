@@ -3935,6 +3935,7 @@ pub fn merge_signed_kspt_v2_into_pskb(
         }
 
         for (i, sigs_at_input) in per_input.iter().enumerate() {
+            #[cfg(target_arch = "wasm32")]
             web_sys::console::log_1(
                 &format!(
                     "[KasSee] merge input[{}]: {} sigs in KSPT v2",
@@ -4058,11 +4059,487 @@ pub fn merge_signed_kspt_v2_into_pskb(
     Ok(hex::encode(&wire_bytes))
 }
 
+/// Verify that a device-returned signed KSPT is the exact transaction emitted
+/// for review, verify every returned signature against that transaction, and
+/// only then merge the signatures into the original PSKB.
+///
+/// The returned KSPT is never a source of transaction fields. The original
+/// PSKB remains canonical and is the only payload eligible for finalization.
+pub fn verify_and_merge_signed_kspt_into_pskb(
+    signed_kspt_hex: &str,
+    original_relay_kspt_hex: &str,
+    original_pskb_hex: &str,
+) -> Result<String, String> {
+    let signed_bytes =
+        hex::decode(signed_kspt_hex).map_err(|e| format!("signed KSPT hex: {}", e))?;
+    let relay_bytes = hex::decode(original_relay_kspt_hex)
+        .map_err(|e| format!("original relay KSPT hex: {}", e))?;
+
+    let signed = if signed_bytes.get(4) == Some(&0x01) {
+        parse_kspt_v1_transaction(&signed_bytes)?
+    } else {
+        parse_kspt_transaction(&signed_bytes)?
+    };
+    let relay = parse_kspt_transaction(&relay_bytes)?;
+
+    if relay.flags & 0x01 != 0 {
+        return Err("original relay KSPT is unexpectedly marked signed".into());
+    }
+    if signed.flags & 0x01 == 0 {
+        return Err("returned KSPT is not marked signed".into());
+    }
+    if signed.flags & !0x01 != relay.flags & !0x01 {
+        return Err("signed KSPT changed transaction flag bits".into());
+    }
+    if !kspt_transaction_fields_match(&signed.identity, &relay.identity) {
+        return Err("signed transaction does not match the approved transaction".into());
+    }
+
+    verify_returned_signatures(&signed)?;
+    merge_signed_kspt_v2_into_pskb(signed_kspt_hex, original_pskb_hex)
+}
+
+fn kspt_transaction_fields_match(
+    signed: &KsptTransactionIdentity,
+    relay: &KsptTransactionIdentity,
+) -> bool {
+    signed.tx_version == relay.tx_version
+        && signed.locktime == relay.locktime
+        && signed.subnetwork_id == relay.subnetwork_id
+        && signed.gas == relay.gas
+        && signed.payload == relay.payload
+        && signed.inputs == relay.inputs
+        && signed.outputs == relay.outputs
+        && signed.trailer == relay.trailer
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KsptTransactionIdentity {
+    wire_version: u8,
+    tx_version: u16,
+    locktime: u64,
+    subnetwork_id: [u8; 20],
+    gas: u64,
+    payload: Vec<u8>,
+    inputs: Vec<KsptInputIdentity>,
+    outputs: Vec<KsptOutputIdentity>,
+    trailer: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KsptInputIdentity {
+    previous_transaction_id: [u8; 32],
+    previous_output_index: u32,
+    amount: u64,
+    sequence: u64,
+    sig_op_count: u8,
+    script_public_key_version: u16,
+    script_public_key: Vec<u8>,
+    redeem_script: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KsptOutputIdentity {
+    amount: u64,
+    script_public_key_version: u16,
+    script_public_key: Vec<u8>,
+}
+
+#[derive(Clone, Debug)]
+struct ParsedKsptTransaction {
+    flags: u8,
+    identity: KsptTransactionIdentity,
+    signatures: Vec<Vec<KsptSigRecord>>,
+}
+
+fn read_kspt_length(r: &mut KsptReader<'_>) -> Result<usize, String> {
+    let first = r.u8()?;
+    if first == 0xff {
+        Ok(r.u16_le()? as usize)
+    } else {
+        Ok(first as usize)
+    }
+}
+
+fn parse_kspt_transaction(data: &[u8]) -> Result<ParsedKsptTransaction, String> {
+    let mut r = KsptReader::new(data);
+    if r.bytes(4)? != b"KSPT" {
+        return Err("not a KSPT blob".into());
+    }
+
+    let wire_version = r.u8()?;
+    if wire_version != 0x02 && wire_version != 0x03 {
+        return Err(format!(
+            "unsupported signed-return KSPT version: 0x{:02x}",
+            wire_version
+        ));
+    }
+    let flags = r.u8()?;
+    let tx_version = r.u16_le()?;
+    if tx_version > 1 {
+        return Err(format!(
+            "unsupported signed-return transaction version: {}",
+            tx_version
+        ));
+    }
+
+    let input_count = r.u8()? as usize;
+    let output_count = r.u8()? as usize;
+    let locktime = r.u64_le()?;
+    let mut subnetwork_id = [0u8; 20];
+    subnetwork_id.copy_from_slice(r.bytes(20)?);
+    let gas = r.u64_le()?;
+    let payload_length = r.u16_le()? as usize;
+    let payload = r.bytes(payload_length)?.to_vec();
+
+    let mut inputs = Vec::with_capacity(input_count);
+    let mut signatures = Vec::with_capacity(input_count);
+    for _ in 0..input_count {
+        let mut previous_transaction_id = [0u8; 32];
+        previous_transaction_id.copy_from_slice(r.bytes(32)?);
+        let previous_output_index = r.u32_le()?;
+        let amount = r.u64_le()?;
+        let sequence = r.u64_le()?;
+        let sig_op_count = r.u8()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+
+        let signature_count = r.u8()? as usize;
+        let mut input_signatures = Vec::with_capacity(signature_count);
+        for _ in 0..signature_count {
+            let pubkey_pos = r.u8()?;
+            let sighash_type = r.u8()?;
+            let mut sig = [0u8; 64];
+            sig.copy_from_slice(r.bytes(64)?);
+            input_signatures.push(KsptSigRecord {
+                pubkey_pos,
+                sighash_type,
+                sig,
+            });
+        }
+
+        let redeem_script_length = if wire_version == 0x03 {
+            r.u16_le()? as usize
+        } else {
+            r.u8()? as usize
+        };
+        let redeem_script = r.bytes(redeem_script_length)?.to_vec();
+
+        inputs.push(KsptInputIdentity {
+            previous_transaction_id,
+            previous_output_index,
+            amount,
+            sequence,
+            sig_op_count,
+            script_public_key_version,
+            script_public_key,
+            redeem_script,
+        });
+        signatures.push(input_signatures);
+    }
+
+    let mut outputs = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        let amount = r.u64_le()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+        outputs.push(KsptOutputIdentity {
+            amount,
+            script_public_key_version,
+            script_public_key,
+        });
+    }
+
+    let trailer = r.remaining().to_vec();
+    validate_kspt_trailer(&trailer, output_count)?;
+
+    Ok(ParsedKsptTransaction {
+        flags,
+        identity: KsptTransactionIdentity {
+            wire_version,
+            tx_version,
+            locktime,
+            subnetwork_id,
+            gas,
+            payload,
+            inputs,
+            outputs,
+            trailer,
+        },
+        signatures,
+    })
+}
+
+fn parse_kspt_v1_transaction(data: &[u8]) -> Result<ParsedKsptTransaction, String> {
+    let mut r = KsptReader::new(data);
+    if r.bytes(4)? != b"KSPT" {
+        return Err("not a KSPT blob".into());
+    }
+    let wire_version = r.u8()?;
+    if wire_version != 0x01 {
+        return Err(format!(
+            "expected signed-return KSPT v1, got 0x{wire_version:02x}"
+        ));
+    }
+    let flags = r.u8()?;
+    if flags != 0x01 {
+        return Err(format!(
+            "unsupported signed-return KSPT v1 flags: 0x{flags:02x}"
+        ));
+    }
+    let tx_version = r.u16_le()?;
+    if tx_version > 1 {
+        return Err(format!(
+            "unsupported signed-return transaction version: {tx_version}"
+        ));
+    }
+    let input_count = r.u8()? as usize;
+    let output_count = r.u8()? as usize;
+    let locktime = r.u64_le()?;
+    let mut subnetwork_id = [0u8; 20];
+    subnetwork_id.copy_from_slice(r.bytes(20)?);
+    let gas = r.u64_le()?;
+    let payload_length = r.u16_le()? as usize;
+    let payload = r.bytes(payload_length)?.to_vec();
+
+    let mut inputs = Vec::with_capacity(input_count);
+    let mut signatures = Vec::with_capacity(input_count);
+    for input_index in 0..input_count {
+        let mut previous_transaction_id = [0u8; 32];
+        previous_transaction_id.copy_from_slice(r.bytes(32)?);
+        let previous_output_index = r.u32_le()?;
+        let amount = r.u64_le()?;
+        let sequence = r.u64_le()?;
+        let sig_op_count = r.u8()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+        let signature_length = r.u8()? as usize;
+        let input_signatures = match signature_length {
+            0 => Vec::new(),
+            64 => {
+                let mut sig = [0u8; 64];
+                sig.copy_from_slice(r.bytes(64)?);
+                let sighash_type = r.u8()?;
+                vec![KsptSigRecord {
+                    pubkey_pos: 0,
+                    sighash_type,
+                    sig,
+                }]
+            }
+            length => {
+                return Err(format!(
+                    "input[{input_index}] has invalid KSPT v1 signature length {length}"
+                ));
+            }
+        };
+        inputs.push(KsptInputIdentity {
+            previous_transaction_id,
+            previous_output_index,
+            amount,
+            sequence,
+            sig_op_count,
+            script_public_key_version,
+            script_public_key,
+            redeem_script: Vec::new(),
+        });
+        signatures.push(input_signatures);
+    }
+
+    let mut outputs = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        let amount = r.u64_le()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+        outputs.push(KsptOutputIdentity {
+            amount,
+            script_public_key_version,
+            script_public_key,
+        });
+    }
+    if !r.remaining().is_empty() {
+        return Err("unexpected trailing bytes in signed-return KSPT v1".into());
+    }
+
+    Ok(ParsedKsptTransaction {
+        flags,
+        identity: KsptTransactionIdentity {
+            wire_version,
+            tx_version,
+            locktime,
+            subnetwork_id,
+            gas,
+            payload,
+            inputs,
+            outputs,
+            trailer: Vec::new(),
+        },
+        signatures,
+    })
+}
+
+fn validate_kspt_trailer(trailer: &[u8], output_count: usize) -> Result<(), String> {
+    let mut pos = 0usize;
+    if trailer.first() == Some(&0x53) {
+        if trailer.len() < 33 {
+            return Err("truncated stealth trailer".into());
+        }
+        pos = 33;
+    }
+
+    while pos < trailer.len() {
+        if trailer[pos] != 0x43 {
+            return Err(format!("unexpected KSPT trailer marker at byte {}", pos));
+        }
+        let end = pos
+            .checked_add(36)
+            .filter(|end| *end <= trailer.len())
+            .ok_or_else(|| "truncated covenant trailer".to_string())?;
+        let output_index = trailer[pos + 1] as usize;
+        if output_index >= output_count {
+            return Err(format!(
+                "covenant trailer output index {} is out of range",
+                output_index
+            ));
+        }
+        pos = end;
+    }
+    Ok(())
+}
+
+fn covenant_bindings_from_trailer(
+    trailer: &[u8],
+    output_count: usize,
+) -> Result<Vec<Option<(u16, [u8; 32])>>, String> {
+    validate_kspt_trailer(trailer, output_count)?;
+    let mut bindings = vec![None; output_count];
+    let mut pos = if trailer.first() == Some(&0x53) {
+        33
+    } else {
+        0
+    };
+    while pos < trailer.len() {
+        let output_index = trailer[pos + 1] as usize;
+        let authorizing_input = u16::from_le_bytes([trailer[pos + 2], trailer[pos + 3]]);
+        let mut covenant_id = [0u8; 32];
+        covenant_id.copy_from_slice(&trailer[pos + 4..pos + 36]);
+        if bindings[output_index].is_some() {
+            return Err(format!(
+                "duplicate covenant binding for output {}",
+                output_index
+            ));
+        }
+        bindings[output_index] = Some((authorizing_input, covenant_id));
+        pos += 36;
+    }
+    Ok(bindings)
+}
+
+fn verify_returned_signatures(transaction: &ParsedKsptTransaction) -> Result<(), String> {
+    let identity = &transaction.identity;
+    if transaction.signatures.len() != identity.inputs.len() {
+        return Err("signature/input count mismatch".into());
+    }
+
+    let input_refs: Vec<(&[u8; 32], u32, u64, u8)> = identity
+        .inputs
+        .iter()
+        .map(|input| {
+            (
+                &input.previous_transaction_id,
+                input.previous_output_index,
+                input.sequence,
+                input.sig_op_count,
+            )
+        })
+        .collect();
+    let covenant_bindings =
+        covenant_bindings_from_trailer(&identity.trailer, identity.outputs.len())?;
+    let outputs: Vec<crate::rpc::SighashOutput> = identity
+        .outputs
+        .iter()
+        .zip(covenant_bindings)
+        .map(|(output, covenant)| crate::rpc::SighashOutput {
+            value: output.amount,
+            spk_version: output.script_public_key_version,
+            spk_script: output.script_public_key.clone(),
+            covenant,
+        })
+        .collect();
+
+    for (input_index, (input, signatures)) in identity
+        .inputs
+        .iter()
+        .zip(transaction.signatures.iter())
+        .enumerate()
+    {
+        if signatures.is_empty() {
+            return Err(format!("input[{}] has no returned signature", input_index));
+        }
+        let sighash = crate::rpc::compute_sighash_all(
+            identity.tx_version,
+            &input_refs,
+            input_index,
+            input.script_public_key_version,
+            &input.script_public_key,
+            input.amount,
+            &outputs,
+            identity.locktime,
+            &identity.payload,
+            &identity.subnetwork_id,
+            identity.gas,
+        );
+
+        for record in signatures {
+            if record.sighash_type != 0x01 {
+                return Err(format!(
+                    "input[{}] uses unsupported sighash type 0x{:02x}",
+                    input_index, record.sighash_type
+                ));
+            }
+            let public_key = expected_signing_key(input, record.pubkey_pos).ok_or_else(|| {
+                format!(
+                    "input[{}] signature position {} has no matching public key",
+                    input_index, record.pubkey_pos
+                )
+            })?;
+            let valid = crate::adaptor::bip340_verify(&public_key, &sighash, &record.sig)
+                .map_err(|e| format!("input[{}] signature parse failed: {}", input_index, e))?;
+            if !valid {
+                return Err(format!(
+                    "input[{}] contains an invalid signature",
+                    input_index
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expected_signing_key(input: &KsptInputIdentity, position: u8) -> Option<[u8; 32]> {
+    if input.redeem_script.is_empty() {
+        if position != 0
+            || input.script_public_key.len() != 34
+            || input.script_public_key[0] != 0x20
+            || input.script_public_key[33] != 0xac
+        {
+            return None;
+        }
+        let mut public_key = [0u8; 32];
+        public_key.copy_from_slice(&input.script_public_key[1..33]);
+        Some(public_key)
+    } else {
+        xonly_at_position(&input.redeem_script, position)
+    }
+}
+
 /// One sig record as parsed from a KSPT v2 input section.
+#[derive(Clone, Debug)]
 struct KsptSigRecord {
     pubkey_pos: u8,
-    // Kept: retained for future use; not currently wired.
-    #[allow(dead_code)]
     sighash_type: u8,
     sig: [u8; 64],
 }
@@ -4396,6 +4873,358 @@ impl<'a> KsptReader<'a> {
         let mut a = [0u8; 8];
         a.copy_from_slice(b);
         Ok(u64::from_le_bytes(a))
+    }
+    fn remaining(&self) -> &'a [u8] {
+        &self.buf[self.pos..]
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod signed_return_tests {
+    use super::*;
+    use k256::Scalar;
+    use serde_json::json;
+
+    fn pskb_wire(value: Value) -> String {
+        let json = serde_json::to_vec(&value).unwrap();
+        let mut wire = b"PSKB".to_vec();
+        wire.extend_from_slice(hex::encode(json).as_bytes());
+        hex::encode(wire)
+    }
+
+    fn fixture() -> (String, String, ParsedKsptTransaction, Scalar) {
+        let secret = crate::adaptor::scalar_from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000003",
+        )
+        .unwrap();
+        let public_key = crate::adaptor::pubkey_from_secret(&secret);
+        let mut p2pk = vec![0x20];
+        p2pk.extend_from_slice(&public_key);
+        p2pk.push(0xac);
+        let spk = format!("0000{}", hex::encode(&p2pk));
+        let pskb = pskb_wire(json!([{
+            "global": {
+                "version": 0,
+                "txVersion": 0,
+                "fallbackLockTime": 17,
+                "inputsModifiable": false,
+                "outputsModifiable": false,
+                "inputCount": 1,
+                "outputCount": 1,
+                "xpubs": {},
+                "id": null,
+                "proprietaries": {}
+            },
+            "inputs": [{
+                "utxoEntry": {
+                    "amount": 50_000,
+                    "scriptPublicKey": spk,
+                    "blockDaaScore": 1,
+                    "isCoinbase": false
+                },
+                "previousOutpoint": {
+                    "transactionId": "11".repeat(32),
+                    "index": 2
+                },
+                "sequence": 7,
+                "minTime": null,
+                "partialSigs": {},
+                "sighashType": 1,
+                "redeemScript": null,
+                "sigOpCount": 1,
+                "bip32Derivations": {},
+                "finalScriptSig": null,
+                "proprietaries": {}
+            }],
+            "outputs": [{
+                "amount": 49_000,
+                "scriptPublicKey": spk,
+                "redeemScript": null,
+                "bip32Derivations": {},
+                "proprietaries": {}
+            }]
+        }]));
+        let relay = relay_pskb_as_kspt_v2_hex(&pskb).unwrap();
+        let parsed = parse_kspt_transaction(&hex::decode(&relay).unwrap()).unwrap();
+        (pskb, relay, parsed, secret)
+    }
+
+    fn sign_transaction(
+        parsed: &ParsedKsptTransaction,
+        secret: &Scalar,
+        sighash_type: u8,
+    ) -> Vec<Vec<KsptSigRecord>> {
+        let identity = &parsed.identity;
+        let input_refs: Vec<(&[u8; 32], u32, u64, u8)> = identity
+            .inputs
+            .iter()
+            .map(|input| {
+                (
+                    &input.previous_transaction_id,
+                    input.previous_output_index,
+                    input.sequence,
+                    input.sig_op_count,
+                )
+            })
+            .collect();
+        let outputs: Vec<crate::rpc::SighashOutput> = identity
+            .outputs
+            .iter()
+            .map(|output| crate::rpc::SighashOutput {
+                value: output.amount,
+                spk_version: output.script_public_key_version,
+                spk_script: output.script_public_key.clone(),
+                covenant: None,
+            })
+            .collect();
+        identity
+            .inputs
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                let sighash = crate::rpc::compute_sighash_all(
+                    identity.tx_version,
+                    &input_refs,
+                    index,
+                    input.script_public_key_version,
+                    &input.script_public_key,
+                    input.amount,
+                    &outputs,
+                    identity.locktime,
+                    &identity.payload,
+                    &identity.subnetwork_id,
+                    identity.gas,
+                );
+                vec![KsptSigRecord {
+                    pubkey_pos: 0,
+                    sighash_type,
+                    sig: crate::adaptor::bip340_sign(secret, &sighash).unwrap(),
+                }]
+            })
+            .collect()
+    }
+
+    fn serialize_signed(
+        identity: &KsptTransactionIdentity,
+        signatures: &[Vec<KsptSigRecord>],
+    ) -> String {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"KSPT");
+        buf.push(identity.wire_version);
+        buf.push(0x01);
+        buf.extend_from_slice(&identity.tx_version.to_le_bytes());
+        buf.push(identity.inputs.len() as u8);
+        buf.push(identity.outputs.len() as u8);
+        buf.extend_from_slice(&identity.locktime.to_le_bytes());
+        buf.extend_from_slice(&identity.subnetwork_id);
+        buf.extend_from_slice(&identity.gas.to_le_bytes());
+        buf.extend_from_slice(&(identity.payload.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&identity.payload);
+        for (input, input_signatures) in identity.inputs.iter().zip(signatures) {
+            buf.extend_from_slice(&input.previous_transaction_id);
+            buf.extend_from_slice(&input.previous_output_index.to_le_bytes());
+            buf.extend_from_slice(&input.amount.to_le_bytes());
+            buf.extend_from_slice(&input.sequence.to_le_bytes());
+            buf.push(input.sig_op_count);
+            buf.extend_from_slice(&input.script_public_key_version.to_le_bytes());
+            push_spk_len(&mut buf, input.script_public_key.len());
+            buf.extend_from_slice(&input.script_public_key);
+            buf.push(input_signatures.len() as u8);
+            for signature in input_signatures {
+                buf.push(signature.pubkey_pos);
+                buf.push(signature.sighash_type);
+                buf.extend_from_slice(&signature.sig);
+            }
+            if identity.wire_version == 0x03 {
+                buf.extend_from_slice(&(input.redeem_script.len() as u16).to_le_bytes());
+            } else {
+                buf.push(input.redeem_script.len() as u8);
+            }
+            buf.extend_from_slice(&input.redeem_script);
+        }
+        for output in &identity.outputs {
+            buf.extend_from_slice(&output.amount.to_le_bytes());
+            buf.extend_from_slice(&output.script_public_key_version.to_le_bytes());
+            push_spk_len(&mut buf, output.script_public_key.len());
+            buf.extend_from_slice(&output.script_public_key);
+        }
+        buf.extend_from_slice(&identity.trailer);
+        hex::encode(buf)
+    }
+
+    fn serialize_signed_v1(
+        identity: &KsptTransactionIdentity,
+        signatures: &[Vec<KsptSigRecord>],
+    ) -> String {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"KSPT");
+        buf.push(0x01);
+        buf.push(0x01);
+        buf.extend_from_slice(&identity.tx_version.to_le_bytes());
+        buf.push(identity.inputs.len() as u8);
+        buf.push(identity.outputs.len() as u8);
+        buf.extend_from_slice(&identity.locktime.to_le_bytes());
+        buf.extend_from_slice(&identity.subnetwork_id);
+        buf.extend_from_slice(&identity.gas.to_le_bytes());
+        buf.extend_from_slice(&(identity.payload.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&identity.payload);
+        for (input, input_signatures) in identity.inputs.iter().zip(signatures) {
+            buf.extend_from_slice(&input.previous_transaction_id);
+            buf.extend_from_slice(&input.previous_output_index.to_le_bytes());
+            buf.extend_from_slice(&input.amount.to_le_bytes());
+            buf.extend_from_slice(&input.sequence.to_le_bytes());
+            buf.push(input.sig_op_count);
+            buf.extend_from_slice(&input.script_public_key_version.to_le_bytes());
+            push_spk_len(&mut buf, input.script_public_key.len());
+            buf.extend_from_slice(&input.script_public_key);
+            let signature = &input_signatures[0];
+            buf.push(64);
+            buf.extend_from_slice(&signature.sig);
+            buf.push(signature.sighash_type);
+        }
+        for output in &identity.outputs {
+            buf.extend_from_slice(&output.amount.to_le_bytes());
+            buf.extend_from_slice(&output.script_public_key_version.to_le_bytes());
+            push_spk_len(&mut buf, output.script_public_key.len());
+            buf.extend_from_slice(&output.script_public_key);
+        }
+        hex::encode(buf)
+    }
+
+    #[test]
+    fn valid_signed_return_merges_into_original_pskb() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let signed = serialize_signed(&parsed.identity, &signatures);
+        let merged = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap();
+        assert_ne!(merged, pskb);
+        let merged_wire = hex::decode(merged).unwrap();
+        let merged_json = hex::decode(&merged_wire[4..]).unwrap();
+        assert!(String::from_utf8(merged_json)
+            .unwrap()
+            .contains(&hex::encode(signatures[0][0].sig)));
+    }
+
+    #[test]
+    fn valid_m5_p2pk_v1_signed_return_merges_into_original_pskb() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let signed = serialize_signed_v1(&parsed.identity, &signatures);
+        let merged = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap();
+        assert_ne!(merged, pskb);
+    }
+
+    #[test]
+    fn mutated_m5_p2pk_v1_signed_return_is_rejected() {
+        let (pskb, relay, mut parsed, secret) = fixture();
+        parsed.identity.outputs[0].amount += 1;
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let signed = serialize_signed_v1(&parsed.identity, &signatures);
+        let error = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap_err();
+        assert_eq!(
+            error,
+            "signed transaction does not match the approved transaction"
+        );
+    }
+
+    #[test]
+    fn invalid_m5_p2pk_v1_signature_is_rejected() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let mut signatures = sign_transaction(&parsed, &secret, 0x01);
+        signatures[0][0].sig[63] ^= 0x01;
+        let signed = serialize_signed_v1(&parsed.identity, &signatures);
+        let error = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap_err();
+        assert!(error.contains("invalid signature"));
+    }
+
+    #[test]
+    fn stale_or_mutated_transaction_fields_are_rejected() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let mut mutations: Vec<(&str, KsptTransactionIdentity)> = Vec::new();
+
+        let mut value = parsed.identity.clone();
+        value.tx_version = 2;
+        mutations.push(("transaction version", value));
+        let mut value = parsed.identity.clone();
+        value.locktime += 1;
+        mutations.push(("locktime", value));
+        let mut value = parsed.identity.clone();
+        value.subnetwork_id[0] = 1;
+        mutations.push(("subnetwork", value));
+        let mut value = parsed.identity.clone();
+        value.gas += 1;
+        mutations.push(("gas", value));
+        let mut value = parsed.identity.clone();
+        value.payload.push(1);
+        mutations.push(("payload", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].previous_transaction_id[0] ^= 1;
+        mutations.push(("input outpoint", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].previous_output_index += 1;
+        mutations.push(("input index", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].amount += 1;
+        mutations.push(("input amount", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].sequence += 1;
+        mutations.push(("sequence", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].sig_op_count += 1;
+        mutations.push(("sig-op count", value));
+        let mut value = parsed.identity.clone();
+        value.inputs[0].script_public_key[1] ^= 1;
+        mutations.push(("input script", value));
+        let mut value = parsed.identity.clone();
+        value.outputs[0].amount += 1;
+        mutations.push(("output amount", value));
+        let mut value = parsed.identity.clone();
+        value.outputs[0].script_public_key[1] ^= 1;
+        mutations.push(("output script", value));
+
+        for (name, identity) in mutations {
+            let signed = serialize_signed(&identity, &signatures);
+            let error =
+                verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).expect_err(name);
+            assert!(
+                error.contains("does not match")
+                    || error.contains("unsupported signed-return transaction version"),
+                "{name} returned unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_signature_is_rejected_before_merge() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let mut signatures = sign_transaction(&parsed, &secret, 0x01);
+        signatures[0][0].sig[63] ^= 1;
+        let signed = serialize_signed(&parsed.identity, &signatures);
+        let error = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap_err();
+        assert!(error.contains("invalid signature"));
+    }
+
+    #[test]
+    fn unsupported_sighash_type_is_rejected() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x02);
+        let signed = serialize_signed(&parsed.identity, &signatures);
+        let error = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap_err();
+        assert!(error.contains("unsupported sighash type"));
+    }
+
+    #[test]
+    fn unexpected_or_truncated_trailers_are_rejected() {
+        let (pskb, relay, parsed, secret) = fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        for trailer in [vec![0x99], vec![0x53, 0x01], vec![0x43, 0x00]] {
+            let mut identity = parsed.identity.clone();
+            identity.trailer = trailer;
+            let signed = serialize_signed(&identity, &signatures);
+            assert!(verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).is_err());
+        }
     }
 }
 

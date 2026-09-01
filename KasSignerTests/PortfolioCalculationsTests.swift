@@ -2,6 +2,79 @@ import XCTest
 @testable import KasSigner
 
 final class PortfolioCalculationsTests: XCTestCase {
+    @MainActor
+    func testStrictSignedReturnVerifierIsAvailableThroughBundledWebAssembly() async {
+        let engine = KasSignerEngine()
+        let firstWebView = engine.attachedWebView()
+
+        do {
+            _ = try await engine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "00",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Malformed KSPT input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 4 bytes at pos 0, only 1 remain"
+            )
+        }
+
+        do {
+            _ = try await engine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "4b5350540101",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Truncated M5 KSPT v1 input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 2 bytes at pos 6, only 0 remain"
+            )
+        }
+
+        let secondEngine = KasSignerEngine()
+        let secondWebView = secondEngine.attachedWebView()
+        do {
+            _ = try await secondEngine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "00",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Malformed KSPT input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 4 bytes at pos 0, only 1 remain"
+            )
+        }
+
+        XCTAssertNotEqual(firstWebView.url, secondWebView.url)
+    }
+
+    func testVerifiedSignedPSKBGateArmsOnlyAfterAcceptance() {
+        var gate = VerifiedSignedPSKBGate()
+        XCTAssertFalse(gate.isArmed)
+        XCTAssertNil(gate.payload)
+
+        gate.accept("verified-pskb")
+
+        XCTAssertTrue(gate.isArmed)
+        XCTAssertEqual(gate.payload, "verified-pskb")
+    }
+
+    func testVerifiedSignedPSKBGateClearsPreviouslyAcceptedPayload() {
+        var gate = VerifiedSignedPSKBGate()
+        gate.accept("previously-verified-pskb")
+
+        gate.clear()
+
+        XCTAssertFalse(gate.isArmed)
+        XCTAssertNil(gate.payload)
+    }
+
     private let portfolioID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
 

@@ -1793,6 +1793,218 @@ pub struct SighashOutput {
     pub covenant: Option<(u16, [u8; 32])>, // (authorizing_input, covenant_id)
 }
 
+/// Compute the Kaspa SIGHASH_ALL digest for transaction versions 0 and 1.
+/// Version 0 commits sig-op counts; version 1 omits them and commits output
+/// covenant bindings. This mirrors the firmware's version-aware signer.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_sighash_all(
+    tx_version: u16,
+    inputs: &[(&[u8; 32], u32, u64, u8)],
+    input_index: usize,
+    input_utxo_spk_version: u16,
+    input_utxo_spk_script: &[u8],
+    input_utxo_amount: u64,
+    outputs: &[SighashOutput],
+    locktime: u64,
+    payload: &[u8],
+    subnetwork_id: &[u8; 20],
+    gas: u64,
+) -> [u8; 32] {
+    let bparams = blake2b_simd::Params::new()
+        .hash_length(32)
+        .key(b"TransactionSigningHash")
+        .clone();
+
+    let prev_outputs_hash = {
+        let mut h = bparams.to_state();
+        for (txid, index, _, _) in inputs {
+            h.update(txid.as_ref());
+            h.update(&index.to_le_bytes());
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        out
+    };
+    let sequences_hash = {
+        let mut h = bparams.to_state();
+        for (_, _, sequence, _) in inputs {
+            h.update(&sequence.to_le_bytes());
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        out
+    };
+    let sig_op_counts_hash = if tx_version < 1 {
+        let mut h = bparams.to_state();
+        for (_, _, _, sig_op_count) in inputs {
+            h.update(&[*sig_op_count]);
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        Some(out)
+    } else {
+        None
+    };
+    let outputs_hash = {
+        let mut h = bparams.to_state();
+        for output in outputs {
+            h.update(&output.value.to_le_bytes());
+            h.update(&output.spk_version.to_le_bytes());
+            h.update(&(output.spk_script.len() as u64).to_le_bytes());
+            h.update(&output.spk_script);
+            if tx_version >= 1 {
+                match &output.covenant {
+                    None => {
+                        h.update(&[0u8]);
+                    }
+                    Some((authorizing_input, covenant_id)) => {
+                        h.update(&[1u8]);
+                        h.update(&authorizing_input.to_le_bytes());
+                        h.update(covenant_id);
+                    }
+                };
+            }
+        }
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        out
+    };
+    let payload_hash = if subnetwork_id == &[0u8; 20] && payload.is_empty() {
+        [0u8; 32]
+    } else {
+        let mut h = bparams.to_state();
+        h.update(&(payload.len() as u64).to_le_bytes());
+        h.update(payload);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(h.finalize().as_bytes());
+        out
+    };
+
+    let mut h = bparams.to_state();
+    h.update(&tx_version.to_le_bytes());
+    h.update(&prev_outputs_hash);
+    h.update(&sequences_hash);
+    if let Some(hash) = sig_op_counts_hash {
+        h.update(&hash);
+    }
+    let (txid, index, sequence, sig_op_count) = inputs[input_index];
+    h.update(txid.as_ref());
+    h.update(&index.to_le_bytes());
+    h.update(&input_utxo_spk_version.to_le_bytes());
+    h.update(&(input_utxo_spk_script.len() as u64).to_le_bytes());
+    h.update(input_utxo_spk_script);
+    h.update(&input_utxo_amount.to_le_bytes());
+    h.update(&sequence.to_le_bytes());
+    if tx_version < 1 {
+        h.update(&[sig_op_count]);
+    }
+    h.update(&outputs_hash);
+    h.update(&locktime.to_le_bytes());
+    h.update(subnetwork_id);
+    h.update(&gas.to_le_bytes());
+    h.update(&payload_hash);
+    h.update(&[0x01]);
+
+    let mut result = [0u8; 32];
+    result.copy_from_slice(h.finalize().as_bytes());
+    result
+}
+
+#[cfg(test)]
+mod versioned_sighash_tests {
+    use super::*;
+
+    #[test]
+    fn version_zero_matches_official_rusty_kaspa_vector() {
+        let txid: [u8; 32] =
+            hex::decode("880eb9819a31821d9d2399e2f35e2433b72637e393d71ecc9b8d0250f49153c3")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let script_1 =
+            hex::decode("208325613d2eeaf7176ac6c670b13c0043156c427438ed72d74b7800862ad884e8ac")
+                .unwrap();
+        let script_2 =
+            hex::decode("20fcef4c106cf11135bbd70f02a726a92162d2fb8b22f0469126f800862ad884e8ac")
+                .unwrap();
+        let inputs = [(&txid, 0, 0, 0), (&txid, 1, 1, 0), (&txid, 2, 2, 0)];
+        let outputs = [
+            SighashOutput {
+                value: 300,
+                spk_version: 0,
+                spk_script: script_2.clone(),
+                covenant: None,
+            },
+            SighashOutput {
+                value: 300,
+                spk_version: 0,
+                spk_script: script_1.clone(),
+                covenant: None,
+            },
+        ];
+        let digest = compute_sighash_all(
+            0,
+            &inputs,
+            0,
+            0,
+            &script_1,
+            100,
+            &outputs,
+            1_615_462_089_000,
+            &[],
+            &[0u8; 20],
+            0,
+        );
+        assert_eq!(
+            hex::encode(digest),
+            "03b7ac6927b2b67100734c3cc313ff8c2e8b3ce3e746d46dd660b706a916b1f5"
+        );
+    }
+
+    #[test]
+    fn version_one_matches_existing_subnetwork_sighash_path() {
+        let txid = [0x42u8; 32];
+        let script = vec![0x20; 34];
+        let versioned_inputs = [(&txid, 3, 9, 1)];
+        let legacy_inputs = [(&txid, 3, 9)];
+        let outputs = [SighashOutput {
+            value: 1234,
+            spk_version: 0,
+            spk_script: script.clone(),
+            covenant: Some((0, [0x77; 32])),
+        }];
+        let subnetwork = [0x33; 20];
+        let payload = [0x55; 8];
+        assert_eq!(
+            compute_sighash_all(
+                1,
+                &versioned_inputs,
+                0,
+                0,
+                &script,
+                5678,
+                &outputs,
+                11,
+                &payload,
+                &subnetwork,
+                12,
+            ),
+            compute_sighash_v1_subnet(
+                &legacy_inputs,
+                0,
+                0,
+                &script,
+                5678,
+                &outputs,
+                11,
+                &payload,
+                &subnetwork,
+                12,
+            )
+        );
+    }
+}
+
 /// Compute the Kaspa Schnorr sighash for a TX version 1 input (SIGHASH_ALL).
 ///
 /// Replicates consensus/core/src/hashing/sighash.rs::calc_schnorr_signature_hash

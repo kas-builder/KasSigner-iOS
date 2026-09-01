@@ -1347,6 +1347,22 @@ private struct VerifiedTransactionSummaryCards: View {
 }
 
 
+struct VerifiedSignedPSKBGate {
+    private(set) var payload: String?
+
+    var isArmed: Bool {
+        payload != nil
+    }
+
+    mutating func accept(_ verifiedPSKB: String) {
+        payload = verifiedPSKB
+    }
+
+    mutating func clear() {
+        payload = nil
+    }
+}
+
 private struct VerifiedSigningPreparationView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
@@ -1366,7 +1382,8 @@ private struct VerifiedSigningPreparationView: View {
     @State private var decoderProgressTotal = 0
     @State private var decoderBits: [Bool] = []
     @State private var signedPayload: String?
-    @State private var signedKSPTForBroadcast: String?
+    @State private var originalRelayKSPT: String?
+    @State private var signedBroadcastGate = VerifiedSignedPSKBGate()
     @State private var isBroadcastingSignedTransaction = false
     @State private var broadcastTransactionID: String?
     @State private var showingBroadcastSuccess = false
@@ -1542,6 +1559,7 @@ private struct VerifiedSigningPreparationView: View {
                     if isStartingScanner {
                         ProgressView()
                             .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
                     } else {
                         Label(
                             "Scan Signed QR",
@@ -1549,6 +1567,7 @@ private struct VerifiedSigningPreparationView: View {
                         )
                         .font(.headline)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1639,7 +1658,7 @@ private struct VerifiedSigningPreparationView: View {
         isStartingScanner = true
         scanErrorMessage = nil
         signedPayload = nil
-        signedKSPTForBroadcast = nil
+        signedBroadcastGate.clear()
         broadcastTransactionID = nil
         isBroadcastingSignedTransaction = false
         decoderProgressCount = 0
@@ -1663,7 +1682,7 @@ private struct VerifiedSigningPreparationView: View {
 
     @ViewBuilder
     private var broadcastButton: some View {
-        if signedKSPTForBroadcast != nil &&
+        if signedBroadcastGate.isArmed &&
             broadcastTransactionID == nil {
             Button {
                 Task {
@@ -1686,6 +1705,7 @@ private struct VerifiedSigningPreparationView: View {
                     .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent)
             .disabled(isBroadcastingSignedTransaction)
@@ -1716,7 +1736,7 @@ private struct VerifiedSigningPreparationView: View {
 
     @MainActor
     private func broadcastSignedTransaction() async {
-        guard let signedKSPTForBroadcast,
+        guard let verifiedSignedPSKBForBroadcast = signedBroadcastGate.payload,
               !isBroadcastingSignedTransaction
         else {
             return
@@ -1745,8 +1765,8 @@ private struct VerifiedSigningPreparationView: View {
         }
 
         do {
-            let transactionID = try await engine.broadcastSignedKSPT(
-                signedKSPTHex: signedKSPTForBroadcast,
+            let transactionID = try await engine.finalizeAndBroadcastPSKB(
+                verifiedSignedPSKBForBroadcast,
                 wsURL: wsURL
             )
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -1805,18 +1825,31 @@ private struct VerifiedSigningPreparationView: View {
             if let completedPayload = try await engine.decodeQRFrame(
                 frameHex
             ) {
+                signedBroadcastGate.clear()
                 let signedKSPT = completedPayload
                     .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
+                let currentDigest = SHA256.hash(
+                    data: Data(review.unsignedPSKB.utf8)
+                )
+                .map { String(format: "%02x", $0) }
+                .joined()
+                guard currentDigest == review.verifiedDigest else {
+                    throw SendVerificationError.integrityCheckFailed
+                }
+                guard let originalRelayKSPT else {
+                    throw SendVerificationError.missingOriginalRelay
+                }
 
-                let mergedPSKB = try await engine.mergeSignedKSPTIntoPSKB(
+                let mergedPSKB = try await engine.verifyAndMergeSignedKSPTIntoPSKB(
                     signedKSPTHex: signedKSPT,
+                    originalRelayKSPTHex: originalRelayKSPT,
                     originalPSKBHex: review.unsignedPSKB
                 )
 
                 try await verifyFinalAddresses(in: mergedPSKB)
 
-                signedKSPTForBroadcast = signedKSPT
+                signedBroadcastGate.accept(mergedPSKB)
                 signedPayload = mergedPSKB
                 signedScanFeedback = .accepted
 
@@ -1871,6 +1904,8 @@ private struct VerifiedSigningPreparationView: View {
             }
 
         } catch {
+            signedBroadcastGate.clear()
+            signedPayload = nil
             signedScanFeedback = .rejected
             scanErrorMessage = error.localizedDescription
 
@@ -1940,6 +1975,7 @@ private struct VerifiedSigningPreparationView: View {
             let compactKSPT = try await engine.relayPSKBToKSPT(
                 review.unsignedPSKB
             )
+            originalRelayKSPT = compactKSPT
 
             let generatedFrames = try await engine.generateQRFrames(
                 from: compactKSPT
@@ -1955,6 +1991,7 @@ private struct VerifiedSigningPreparationView: View {
             loading = false
         } catch {
             qrFrames = []
+            originalRelayKSPT = nil
             loading = false
             errorMessage = error.localizedDescription
         }
@@ -1982,7 +2019,7 @@ private struct BroadcastSuccessView: View {
                     )
 
                 VStack(spacing: 10) {
-                    Text("Transaction Broadcasted Successfully")
+                    Text("Transaction Broadcasted")
                         .font(.title2.weight(.bold))
 
                     Text(
@@ -2147,6 +2184,8 @@ private enum SendVerificationError: LocalizedError {
     case changeAddressUnavailable
     case changeAddressMismatch
     case walletStateChanged
+    case integrityCheckFailed
+    case missingOriginalRelay
 
     var errorDescription: String? {
         switch self {
@@ -2174,6 +2213,10 @@ private enum SendVerificationError: LocalizedError {
             return "The transaction did not use the expected unused change address."
         case .walletStateChanged:
             return "The wallet address state changed. Return to the wallet and try again."
+        case .integrityCheckFailed:
+            return "The verified transaction changed before the signed response was accepted."
+        case .missingOriginalRelay:
+            return "The approved signing request is no longer available. Generate it again."
         }
     }
 }
