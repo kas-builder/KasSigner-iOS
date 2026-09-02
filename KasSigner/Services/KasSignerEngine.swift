@@ -953,6 +953,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
     private struct QRFrameDecodeResult: Decodable {
         let complete: Bool
         let payload: String?
+        let jsError: String?
     }
 
     func decodeQRFrame(
@@ -989,6 +990,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
                 "QR decoder response could not be decoded: "
                     + error.localizedDescription
             )
+        }
+
+        if let jsError = decoded.jsError,
+           !jsError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw EngineError.javascript(jsError)
         }
 
         guard decoded.complete,

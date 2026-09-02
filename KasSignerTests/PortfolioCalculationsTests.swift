@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import KasSigner
 
@@ -73,11 +74,23 @@ final class PortfolioCalculationsTests: XCTestCase {
             String(repeating: "01", count: 32) +
             "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
         let payloadHex = "01" + rawHex
-        let splitIndex = payloadHex.index(payloadHex.startIndex, offsetBy: 80)
-        let firstFragment = String(payloadHex[..<splitIndex])
-        let secondFragment = String(payloadHex[splitIndex...])
-        let firstFrame = "000228" + firstFragment
-        let secondFrame = "010227" + secondFragment
+        let payload = stride(from: 0, to: payloadHex.count, by: 2).map { offset in
+            let start = payloadHex.index(payloadHex.startIndex, offsetBy: offset)
+            let end = payloadHex.index(start, offsetBy: 2)
+            return UInt8(payloadHex[start..<end], radix: 16)!
+        }
+        let digest = Array(SHA256.hash(data: Data(payload)))
+        func frame(index: UInt8, fragment: ArraySlice<UInt8>) -> String {
+            var bytes: [UInt8] = [0x4b, 0x51, 0x02, 0x02]
+            bytes += digest[16..<24]
+            bytes += [UInt8(payload.count >> 8), UInt8(payload.count & 0xff)]
+            bytes += digest[0..<16]
+            bytes += [index, 0x02, UInt8(fragment.count)]
+            bytes += fragment
+            return bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        let firstFrame = frame(index: 0, fragment: payload[0..<40])
+        let secondFrame = frame(index: 1, fragment: payload[40..<79])
 
         try await engine.resetQRDecoder()
         let incomplete = try await engine.decodeQRFrame(secondFrame)
