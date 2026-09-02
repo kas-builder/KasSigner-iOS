@@ -1,4 +1,18 @@
 import Foundation
+import UIKit
+import UniformTypeIdentifiers
+
+enum PrivatePasteboard {
+    static func copy(_ value: String, expiresAfter: TimeInterval = 120) {
+        UIPasteboard.general.setItems(
+            [[UTType.utf8PlainText.identifier: value]],
+            options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(expiresAfter)
+            ]
+        )
+    }
+}
 
 struct WalletBalanceInfo: Codable, Equatable {
     let totalSompi: UInt64
@@ -65,7 +79,17 @@ final class UTXOCoinControlStore: ObservableObject {
 
     private let selectedPrefix = "kassigner.utxoSelection.v1."
     private let labelsPrefix = "kassigner.utxoLabels.v1."
+    private let protectedStorage: ProtectedWalletStorage
+    private let defaults: UserDefaults
     private var activeProfileID: UUID?
+
+    init(
+        protectedStorage: ProtectedWalletStorage = .shared,
+        defaults: UserDefaults = .standard
+    ) {
+        self.protectedStorage = protectedStorage
+        self.defaults = defaults
+    }
 
     func activate(profileID: UUID?) {
         guard activeProfileID != profileID else { return }
@@ -87,7 +111,6 @@ final class UTXOCoinControlStore: ObservableObject {
             }
             selectedOutpoints.insert(utxo.id)
         }
-        saveSelection()
         return true
     }
 
@@ -95,13 +118,11 @@ final class UTXOCoinControlStore: ObservableObject {
     func selectAll(_ utxos: [WalletUTXO]) -> Int {
         let selected = utxos.prefix(Self.maximumSelectedUTXOs)
         selectedOutpoints = Set(selected.map(\.id))
-        saveSelection()
         return utxos.count - selected.count
     }
 
     func clearSelection() {
         selectedOutpoints.removeAll()
-        saveSelection()
     }
 
     func label(for utxo: WalletUTXO) -> String {
@@ -138,9 +159,9 @@ final class UTXOCoinControlStore: ObservableObject {
     }
 
     func removeData(profileID: UUID) {
-        let defaults = UserDefaults.standard
         defaults.removeObject(forKey: selectedPrefix + profileID.uuidString)
         defaults.removeObject(forKey: labelsPrefix + profileID.uuidString)
+        protectedStorage.remove(fileName: labelsFileName(profileID: profileID))
 
         if activeProfileID == profileID {
             activeProfileID = nil
@@ -156,36 +177,44 @@ final class UTXOCoinControlStore: ObservableObject {
             return
         }
 
-        let defaults = UserDefaults.standard
-        let selectedKey = selectedPrefix + profileID.uuidString
         let labelsKey = labelsPrefix + profileID.uuidString
 
-        selectedOutpoints = Set(defaults.stringArray(forKey: selectedKey) ?? [])
+        // UTXO selection belongs to the current in-memory send attempt only.
+        selectedOutpoints = []
+        defaults.removeObject(forKey: selectedPrefix + profileID.uuidString)
 
-        if let data = defaults.data(forKey: labelsKey),
-           let decoded = try? JSONDecoder().decode([String: String].self, from: data) {
+        if let protectedLabels = protectedStorage.load(
+            [String: String].self,
+            fileName: labelsFileName(profileID: profileID)
+        ) {
+            labels = protectedLabels
+        } else if let data = defaults.data(forKey: labelsKey),
+                  let decoded = try? JSONDecoder().decode(
+                      [String: String].self,
+                      from: data
+                  ) {
             labels = decoded
+            if protectedStorage.save(
+                decoded,
+                fileName: labelsFileName(profileID: profileID)
+            ) {
+                defaults.removeObject(forKey: labelsKey)
+            }
         } else {
             labels = [:]
         }
     }
 
-    private func saveSelection() {
+    private func saveLabels() {
         guard let profileID = activeProfileID else { return }
-        UserDefaults.standard.set(
-            Array(selectedOutpoints).sorted(),
-            forKey: selectedPrefix + profileID.uuidString
+        _ = protectedStorage.save(
+            labels,
+            fileName: labelsFileName(profileID: profileID)
         )
     }
 
-    private func saveLabels() {
-        guard let profileID = activeProfileID,
-              let data = try? JSONEncoder().encode(labels)
-        else { return }
-        UserDefaults.standard.set(
-            data,
-            forKey: labelsPrefix + profileID.uuidString
-        )
+    private func labelsFileName(profileID: UUID) -> String {
+        "utxo-labels-\(profileID.uuidString.lowercased()).json"
     }
 
     private func transactionLabelKey(_ transactionID: String) -> String {

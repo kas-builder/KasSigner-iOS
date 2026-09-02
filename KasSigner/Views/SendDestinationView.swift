@@ -8,6 +8,7 @@ struct SendDestinationView: View {
     @Environment(\.dismiss) private var dismiss
     let profile: WalletProfile
     let selectedUTXOs: [WalletUTXO]
+    let sessionID: UUID
     @Binding var showingSendFlow: Bool
 
     @State private var destinationAddress = ""
@@ -24,11 +25,13 @@ struct SendDestinationView: View {
     @State private var selectedChangeIndex = 0
     @State private var selectedChangeAddress = ""
     @State private var showingChangeAddressPicker = false
+    @State private var showingCancelConfirmation = false
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @State private var addressValidation: AddressValidationResult?
     @State private var isValidatingAddress = false
     @State private var addressValidationTask: Task<Void, Never>?
@@ -231,6 +234,16 @@ struct SendDestinationView: View {
         }
         .navigationTitle("Destination & Amount")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showingCancelConfirmation = true
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+            }
+        }
         .background(Color(.systemGroupedBackground))
         .onAppear {
             restoreSendSession()
@@ -274,6 +287,17 @@ struct SendDestinationView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(buildErrorMessage)
+        }
+        .alert("Cancel transaction?", isPresented: $showingCancelConfirmation) {
+            Button("Keep Editing", role: .cancel) {}
+            Button("Cancel Transaction", role: .destructive) {
+                cancelTransactionAndReturnToWallet()
+            }
+        } message: {
+            Text(
+                "This signing session and any unsigned transaction data "
+                + "will be discarded. You’ll need to start over."
+            )
         }
         .navigationDestination(item: $verifiedReview) { review in
             VerifiedTransactionReviewView(
@@ -496,7 +520,10 @@ struct SendDestinationView: View {
             }
 
             unsignedPSKB = pskb
-            if var session = walletStore.sendSession(profileID: activeProfile.id) {
+            if var session = walletStore.sendSession(
+                id: sessionID,
+                profileID: activeProfile.id
+            ) {
                 session.destination = normalizedDestination
                 session.amountText = amountText
                 session.sendMax = sendMax
@@ -544,7 +571,10 @@ struct SendDestinationView: View {
     }
 
     private func restoreSendSession() {
-        guard let session = walletStore.sendSession(profileID: profile.id) else { return }
+        guard let session = walletStore.sendSession(
+            id: sessionID,
+            profileID: profile.id
+        ) else { return }
         destinationAddress = session.destination
         amountText = session.amountText
         sendMax = session.sendMax
@@ -558,7 +588,10 @@ struct SendDestinationView: View {
     }
 
     private func persistSendSession() {
-        guard var session = walletStore.sendSession(profileID: profile.id) else { return }
+        guard var session = walletStore.sendSession(
+            id: sessionID,
+            profileID: profile.id
+        ) else { return }
         session.destination = destinationAddress
         session.amountText = amountText
         session.sendMax = sendMax
@@ -567,6 +600,18 @@ struct SendDestinationView: View {
         session.changeAddressIndex = selectedChangeIndex
         session.changeAddress = selectedChangeAddress
         walletStore.updateSendSession(session)
+    }
+
+    private func cancelTransactionAndReturnToWallet() {
+        addressValidationTask?.cancel()
+        walletStore.cancelSendSession(id: sessionID, profileID: profile.id)
+        coinControlStore.clearSelection()
+        unsignedPSKB = nil
+        verifiedReview = nil
+        destinationAddress = ""
+        amountText = ""
+        customFeeText = ""
+        showingSendFlow = false
     }
 
     private var changeAddressCard: some View {
@@ -1256,7 +1301,7 @@ private struct VerifiedTransactionSummaryCards: View {
                 Spacer()
 
                 Button {
-                    UIPasteboard.general.string = address
+                    PrivatePasteboard.copy(address)
                     copyFeedbackCenter.showCopied(address)
                 } label: {
                     Image(systemName: "doc.on.doc")

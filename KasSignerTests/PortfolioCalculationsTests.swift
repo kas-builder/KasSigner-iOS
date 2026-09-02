@@ -1179,6 +1179,172 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(resolvedPrice!, 0.0255, accuracy: 0.000_000_01)
     }
 
+    func testProtectedWalletStorageUsesCompleteProtectionAndBackupExclusion() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let payload = ["kaspa:receive", "kaspa:change"]
+
+        XCTAssertTrue(storage.save(payload, fileName: "test.json"))
+        XCTAssertEqual(
+            storage.load([String].self, fileName: "test.json"),
+            payload
+        )
+
+        let fileURL = root.appending(path: "test.json")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        )
+        #if targetEnvironment(simulator)
+        // CoreSimulator does not expose NSFileProtection attributes even when
+        // the write and setAttributes calls succeed. The device build verifies
+        // the actual protection class; here we still verify the protected write.
+        XCTAssertEqual(try Data(contentsOf: fileURL), try JSONEncoder().encode(payload))
+        #else
+        XCTAssertEqual(
+            attributes[.protectionKey] as? FileProtectionType,
+            .complete
+        )
+        #endif
+        XCTAssertEqual(
+            try fileURL.resourceValues(
+                forKeys: [.isExcludedFromBackupKey]
+            ).isExcludedFromBackup,
+            true
+        )
+    }
+
+    @MainActor
+    func testLegacyWalletMigratesButLegacySigningDraftIsPurged() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let profile = WalletProfile(
+            name: "Migrated Wallet",
+            kpub: "kpub-migration-test",
+            receiveAddresses: ["kaspa:receive"],
+            changeAddresses: ["kaspa:change"]
+        )
+        defaults.set(
+            try JSONEncoder().encode([profile]),
+            forKey: "kassigner.walletProfiles.v1"
+        )
+        defaults.set(profile.id.uuidString, forKey: "kassigner.selectedWalletProfile.v1")
+        defaults.set(Data("legacy-draft".utf8), forKey: "kassigner.sendSessions.v1")
+
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertTrue(store.sendSessions.isEmpty)
+        XCTAssertTrue(storage.contains(fileName: "wallet-state.json"))
+        XCTAssertNil(defaults.object(forKey: "kassigner.walletProfiles.v1"))
+        XCTAssertNil(defaults.object(forKey: "kassigner.sendSessions.v1"))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedStore.profiles, [profile])
+        XCTAssertTrue(relaunchedStore.sendSessions.isEmpty)
+    }
+
+    @MainActor
+    func testFailedProtectedMigrationDoesNotDeleteLegacyWallet() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("blocks-directory-creation".utf8).write(to: root)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profile = WalletProfile(
+            name: "Legacy Wallet",
+            kpub: "kpub-preserved-after-failed-migration"
+        )
+        defaults.set(
+            try JSONEncoder().encode([profile]),
+            forKey: "kassigner.walletProfiles.v1"
+        )
+
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        )
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertNotNil(defaults.object(forKey: "kassigner.walletProfiles.v1"))
+    }
+
+    @MainActor
+    func testSendSessionsAreFreshMemoryOnlyAndRejectStaleUpdates() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "Session Wallet",
+            kpub: "kpub-session-test",
+            changeAddresses: ["kaspa:change"]
+        )
+        store.add(profile)
+        let utxo = WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: 0,
+            amount: 100_000_000,
+            scriptPublicKey: [0x20],
+            blockDAAScore: 1,
+            covenantID: nil
+        )
+
+        var first = try XCTUnwrap(
+            store.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo])
+        )
+        let second = try XCTUnwrap(
+            store.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo])
+        )
+        XCTAssertNotEqual(first.id, second.id)
+
+        first.destination = "kaspa:stale-destination"
+        store.updateSendSession(first)
+        XCTAssertEqual(
+            store.sendSession(id: second.id, profileID: profile.id)?.destination,
+            ""
+        )
+
+        store.cancelSendSession(id: second.id, profileID: profile.id)
+        XCTAssertNil(store.sendSession(id: second.id, profileID: profile.id))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertTrue(relaunchedStore.sendSessions.isEmpty)
+        XCTAssertEqual(relaunchedStore.profiles, [profile])
+    }
+
     private var utcCalendar: Calendar {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!

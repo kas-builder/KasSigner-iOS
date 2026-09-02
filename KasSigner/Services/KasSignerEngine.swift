@@ -330,10 +330,9 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
-        // The engine contains no private keys. Using the default store allows
-        // WebKit to cache the local WASM module instead of recompiling it on
-        // every launch.
-        configuration.websiteDataStore = .default()
+        // The engine is fully bundled and does not need persistent website
+        // storage. Keep transaction and wallet bridge state memory-only.
+        configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(self, name: "kaspi")
         configuration.setURLSchemeHandler(

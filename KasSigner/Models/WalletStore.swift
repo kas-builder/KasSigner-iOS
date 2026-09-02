@@ -1,5 +1,99 @@
 import Foundation
 
+final class ProtectedWalletStorage {
+    static let shared = ProtectedWalletStorage()
+
+    private let fileManager: FileManager
+    let directoryURL: URL
+
+    init(
+        fileManager: FileManager = .default,
+        directoryURL: URL? = nil
+    ) {
+        self.fileManager = fileManager
+        self.directoryURL = directoryURL ?? fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+            .appending(path: "KasSigner", directoryHint: .isDirectory)
+            .appending(path: "ProtectedWalletData", directoryHint: .isDirectory)
+    }
+
+    func load<Value: Decodable>(
+        _ type: Value.Type,
+        fileName: String
+    ) -> Value? {
+        guard let data = try? Data(contentsOf: fileURL(fileName)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    @discardableResult
+    func save<Value: Encodable>(
+        _ value: Value,
+        fileName: String
+    ) -> Bool {
+        do {
+            try prepareDirectory()
+            let data = try JSONEncoder().encode(value)
+            let url = fileURL(fileName)
+            try data.write(
+                to: url,
+                options: [.atomic, .completeFileProtection]
+            )
+            try protectAndExcludeFromBackup(url)
+
+            // Legacy data is removed only after an exact read-after-write check.
+            guard try Data(contentsOf: url) == data else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func remove(fileName: String) {
+        try? fileManager.removeItem(at: fileURL(fileName))
+    }
+
+    func contains(fileName: String) -> Bool {
+        fileManager.fileExists(atPath: fileURL(fileName).path)
+    }
+
+    private func fileURL(_ fileName: String) -> URL {
+        directoryURL.appending(path: fileName, directoryHint: .notDirectory)
+    }
+
+    private func prepareDirectory() throws {
+        try fileManager.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.complete]
+        )
+        try protectAndExcludeFromBackup(directoryURL)
+    }
+
+    private func protectAndExcludeFromBackup(_ url: URL) throws {
+        try fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: url.path
+        )
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+    }
+}
+
+private struct WalletPersistentState: Codable {
+    var profiles: [WalletProfile] = []
+    var selectedProfileID: UUID?
+    var receiveIndices: [String: Int] = [:]
+    var changeIndices: [String: Int] = [:]
+    var usedChangeAddresses: [String: [String]] = [:]
+    var usedReceiveAddresses: [String: [String]] = [:]
+}
+
 enum WalletTransactionDirection: String, Codable, Equatable {
     case sent
     case received
@@ -158,14 +252,14 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     }
 }
 
-enum SendSessionStage: String, Codable, Equatable {
+enum SendSessionStage: String, Equatable {
     case draft
     case verified
     case signing
     case signed
 }
 
-struct SendSession: Identifiable, Codable, Equatable {
+struct SendSession: Identifiable, Equatable {
     let id: UUID
     let profileID: UUID
     var selectedUTXOs: [WalletUTXO]
@@ -187,9 +281,9 @@ private final class WalletTransactionCache {
     private let fileManager: FileManager
     private let directoryURL: URL?
 
-    init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default, directoryURL: URL? = nil) {
         self.fileManager = fileManager
-        directoryURL = fileManager.urls(
+        self.directoryURL = directoryURL ?? fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first?
@@ -207,7 +301,13 @@ private final class WalletTransactionCache {
             return nil
         }
 
-        return transactions.filter { $0.profileID == profileID }
+        let profileTransactions = transactions.filter { $0.profileID == profileID }
+        // Rewriting on read upgrades any cache created by an older release to
+        // complete file protection and applies the backup exclusion before use.
+        guard save(profileTransactions, profileID: profileID) else {
+            return nil
+        }
+        return profileTransactions
     }
 
     @discardableResult
@@ -223,9 +323,30 @@ private final class WalletTransactionCache {
         do {
             try fileManager.createDirectory(
                 at: directoryURL,
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete]
             )
-            try data.write(to: fileURL, options: .atomic)
+            try data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtection]
+            )
+            try fileManager.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: directoryURL.path
+            )
+            try fileManager.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: fileURL.path
+            )
+            var directoryValues = URLResourceValues()
+            directoryValues.isExcludedFromBackup = true
+            var mutableDirectoryURL = directoryURL
+            try mutableDirectoryURL.setResourceValues(directoryValues)
+            var fileValues = URLResourceValues()
+            fileValues.isExcludedFromBackup = true
+            var mutableFileURL = fileURL
+            try mutableFileURL.setResourceValues(fileValues)
+            guard try Data(contentsOf: fileURL) == data else { return false }
             return true
         } catch {
             return false
@@ -267,10 +388,22 @@ final class WalletStore: ObservableObject {
     private let changeIndexKeyPrefix = "kassigner.lastViewedChangeIndex.v1."
     private let usedChangeAddressesKeyPrefix = "kassigner.usedChangeAddresses.v1."
     private let usedReceiveAddressesKeyPrefix = "kassigner.usedReceiveAddresses.v1."
-    private let transactionCache = WalletTransactionCache()
+    private let protectedStorage: ProtectedWalletStorage
+    private let defaults: UserDefaults
+    private let transactionCache: WalletTransactionCache
+    private var persistentState = WalletPersistentState()
     private var isLoading = true
 
-    init() {
+    init(
+        protectedStorage: ProtectedWalletStorage = .shared,
+        defaults: UserDefaults = .standard,
+        transactionCacheDirectoryURL: URL? = nil
+    ) {
+        self.protectedStorage = protectedStorage
+        self.defaults = defaults
+        transactionCache = WalletTransactionCache(
+            directoryURL: transactionCacheDirectoryURL
+        )
         load()
         isLoading = false
     }
@@ -299,13 +432,6 @@ final class WalletStore: ObservableObject {
               profile.changeAddresses.indices.contains(profile.nextChangeIndex)
         else { return nil }
 
-        if var existing = sendSessions.first(where: { $0.profileID == profileID }) {
-            existing.selectedUTXOs = selectedUTXOs
-            existing.updatedAt = Date()
-            replaceSendSession(existing)
-            return existing
-        }
-
         let now = Date()
         let session = SendSession(
             id: UUID(),
@@ -326,7 +452,6 @@ final class WalletStore: ObservableObject {
         )
         sendSessions.removeAll { $0.profileID == profileID }
         sendSessions.append(session)
-        saveSendSessions()
         return session
     }
 
@@ -334,8 +459,15 @@ final class WalletStore: ObservableObject {
         sendSessions.first { $0.profileID == profileID }
     }
 
+    func sendSession(id: UUID, profileID: UUID) -> SendSession? {
+        sendSessions.first { $0.id == id && $0.profileID == profileID }
+    }
+
     func updateSendSession(_ session: SendSession) {
-        guard profiles.contains(where: { $0.id == session.profileID }) else { return }
+        guard profiles.contains(where: { $0.id == session.profileID }),
+              sendSessions.contains(where: {
+                  $0.id == session.id && $0.profileID == session.profileID
+              }) else { return }
         var updated = session
         updated.updatedAt = Date()
         replaceSendSession(updated)
@@ -343,7 +475,10 @@ final class WalletStore: ObservableObject {
 
     func cancelSendSession(profileID: UUID) {
         sendSessions.removeAll { $0.profileID == profileID }
-        saveSendSessions()
+    }
+
+    func cancelSendSession(id: UUID, profileID: UUID) {
+        sendSessions.removeAll { $0.id == id && $0.profileID == profileID }
     }
 
     @discardableResult
@@ -361,36 +496,28 @@ final class WalletStore: ObservableObject {
 
     func lastViewedReceiveIndex(for profileID: UUID, addressCount: Int) -> Int {
         guard addressCount > 0 else { return 0 }
-        let stored = UserDefaults.standard.integer(
-            forKey: receiveIndexKeyPrefix + profileID.uuidString
-        )
+        let stored = persistentState.receiveIndices[profileID.uuidString] ?? 0
         return min(max(0, stored), addressCount - 1)
     }
 
     func setLastViewedReceiveIndex(_ index: Int, for profileID: UUID, addressCount: Int) {
         guard addressCount > 0 else { return }
         let clamped = min(max(0, index), addressCount - 1)
-        UserDefaults.standard.set(
-            clamped,
-            forKey: receiveIndexKeyPrefix + profileID.uuidString
-        )
+        persistentState.receiveIndices[profileID.uuidString] = clamped
+        persistProtectedState()
     }
 
     func lastViewedChangeIndex(for profileID: UUID, addressCount: Int) -> Int {
         guard addressCount > 0 else { return 0 }
-        let stored = UserDefaults.standard.integer(
-            forKey: changeIndexKeyPrefix + profileID.uuidString
-        )
+        let stored = persistentState.changeIndices[profileID.uuidString] ?? 0
         return min(max(0, stored), addressCount - 1)
     }
 
     func setLastViewedChangeIndex(_ index: Int, for profileID: UUID, addressCount: Int) {
         guard addressCount > 0 else { return }
         let clamped = min(max(0, index), addressCount - 1)
-        UserDefaults.standard.set(
-            clamped,
-            forKey: changeIndexKeyPrefix + profileID.uuidString
-        )
+        persistentState.changeIndices[profileID.uuidString] = clamped
+        persistProtectedState()
     }
 
     func isChangeAddressLocallyUsed(_ address: String, profileID: UUID) -> Bool {
@@ -605,18 +732,11 @@ final class WalletStore: ObservableObject {
         }
 
         for profileID in removedProfileIDs {
-            UserDefaults.standard.removeObject(
-                forKey: receiveIndexKeyPrefix + profileID.uuidString
-            )
-            UserDefaults.standard.removeObject(
-                forKey: changeIndexKeyPrefix + profileID.uuidString
-            )
-            UserDefaults.standard.removeObject(
-                forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
-            )
-            UserDefaults.standard.removeObject(
-                forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
-            )
+            let key = profileID.uuidString
+            persistentState.receiveIndices.removeValue(forKey: key)
+            persistentState.changeIndices.removeValue(forKey: key)
+            persistentState.usedChangeAddresses.removeValue(forKey: key)
+            persistentState.usedReceiveAddresses.removeValue(forKey: key)
             transactionCache.remove(profileID: profileID)
         }
 
@@ -633,20 +753,31 @@ final class WalletStore: ObservableObject {
     }
 
     private func load() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data) {
-            profiles = decoded
-            if let raw = UserDefaults.standard.string(forKey: selectionKey),
-               let id = UUID(uuidString: raw),
-               decoded.contains(where: { $0.id == id }) {
-                selectedProfileID = id
-            } else {
-                selectedProfileID = decoded.first?.id
+        if let protectedState = protectedStorage.load(
+            WalletPersistentState.self,
+            fileName: "wallet-state.json"
+        ) {
+            persistentState = protectedState
+        } else {
+            persistentState = legacyPersistentState()
+            if protectedStorage.save(
+                persistentState,
+                fileName: "wallet-state.json"
+            ) {
+                removeLegacyWalletState()
             }
         }
 
+        profiles = persistentState.profiles
+        if let selectedID = persistentState.selectedProfileID,
+           profiles.contains(where: { $0.id == selectedID }) {
+            selectedProfileID = selectedID
+        } else {
+            selectedProfileID = profiles.first?.id
+        }
+
         let legacyTransactions: [WalletTransaction]
-        if let data = UserDefaults.standard.data(forKey: transactionsStorageKey),
+        if let data = defaults.data(forKey: transactionsStorageKey),
            let decoded = try? JSONDecoder().decode([WalletTransaction].self, from: data) {
             legacyTransactions = decoded
         } else {
@@ -669,82 +800,118 @@ final class WalletStore: ObservableObject {
         }
         pendingTransactions = transactions.filter { $0.status == .pending }
 
-        if let data = UserDefaults.standard.data(forKey: sendSessionsKey),
-           let decoded = try? JSONDecoder().decode([SendSession].self, from: data) {
-            let profileIDs = Set(profiles.map(\.id))
-            sendSessions = decoded.filter { profileIDs.contains($0.profileID) }
-        }
+        // Signing drafts are intentionally never restored. Existing persisted
+        // drafts are purged during the upgrade to memory-only sessions.
+        defaults.removeObject(forKey: sendSessionsKey)
+        sendSessions = []
 
         if migratedLegacyHistory {
-            persistTransactionCache()
+            if persistTransactionCache() {
+                defaults.removeObject(forKey: transactionsStorageKey)
+            }
         }
     }
 
     private func save() {
-        if let data = try? JSONEncoder().encode(profiles) {
-            UserDefaults.standard.set(data, forKey: storageKey)
-        }
+        persistentState.profiles = profiles
+        persistentState.selectedProfileID = selectedProfileID
+        persistProtectedState()
         persistTransactionCache()
-        saveSendSessions()
-        UserDefaults.standard.set(selectedProfileID?.uuidString, forKey: selectionKey)
     }
 
     private func replaceSendSession(_ session: SendSession) {
         sendSessions.removeAll { $0.profileID == session.profileID }
         sendSessions.append(session)
-        saveSendSessions()
-    }
-
-    private func saveSendSessions() {
-        if let data = try? JSONEncoder().encode(sendSessions) {
-            UserDefaults.standard.set(data, forKey: sendSessionsKey)
-        }
     }
 
     private func locallyUsedChangeAddresses(for profileID: UUID) -> Set<String> {
-        Set(
-            UserDefaults.standard.stringArray(
-                forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
-            ) ?? []
-        )
+        Set(persistentState.usedChangeAddresses[profileID.uuidString] ?? [])
     }
 
     private func markChangeAddressLocallyUsed(_ address: String, profileID: UUID) {
         var addresses = locallyUsedChangeAddresses(for: profileID)
         addresses.insert(normalizedWalletAddress(address))
-        UserDefaults.standard.set(
-            addresses.sorted(),
-            forKey: usedChangeAddressesKeyPrefix + profileID.uuidString
-        )
+        persistentState.usedChangeAddresses[profileID.uuidString] = addresses.sorted()
+        persistProtectedState()
     }
 
     private func locallyUsedReceiveAddresses(for profileID: UUID) -> Set<String> {
-        Set(
-            UserDefaults.standard.stringArray(
-                forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
-            ) ?? []
-        )
+        Set(persistentState.usedReceiveAddresses[profileID.uuidString] ?? [])
     }
 
     private func markReceiveAddressLocallyUsed(_ address: String, profileID: UUID) {
         var addresses = locallyUsedReceiveAddresses(for: profileID)
         addresses.insert(normalizedWalletAddress(address))
-        UserDefaults.standard.set(
-            addresses.sorted(),
-            forKey: usedReceiveAddressesKeyPrefix + profileID.uuidString
-        )
+        persistentState.usedReceiveAddresses[profileID.uuidString] = addresses.sorted()
+        persistProtectedState()
     }
 
     private func normalizedWalletAddress(_ address: String) -> String {
         address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func persistTransactionCache() {
-        for profile in profiles {
+    @discardableResult
+    private func persistTransactionCache() -> Bool {
+        guard !profiles.isEmpty || transactions.isEmpty else { return false }
+        return profiles.allSatisfy { profile in
             transactionCache.save(
                 transactions.filter { $0.profileID == profile.id },
                 profileID: profile.id
             )
+        }
+    }
+
+    private func persistProtectedState() {
+        persistentState.profiles = profiles
+        persistentState.selectedProfileID = selectedProfileID
+        _ = protectedStorage.save(
+            persistentState,
+            fileName: "wallet-state.json"
+        )
+    }
+
+    private func legacyPersistentState() -> WalletPersistentState {
+        let legacyProfiles: [WalletProfile]
+        if let data = defaults.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data) {
+            legacyProfiles = decoded
+        } else {
+            legacyProfiles = []
+        }
+
+        let selectedID = defaults.string(forKey: selectionKey)
+            .flatMap(UUID.init(uuidString:))
+        var state = WalletPersistentState(
+            profiles: legacyProfiles,
+            selectedProfileID: selectedID
+        )
+        for profile in legacyProfiles {
+            let id = profile.id.uuidString
+            state.receiveIndices[id] = defaults.integer(
+                forKey: receiveIndexKeyPrefix + id
+            )
+            state.changeIndices[id] = defaults.integer(
+                forKey: changeIndexKeyPrefix + id
+            )
+            state.usedChangeAddresses[id] = defaults.stringArray(
+                forKey: usedChangeAddressesKeyPrefix + id
+            ) ?? []
+            state.usedReceiveAddresses[id] = defaults.stringArray(
+                forKey: usedReceiveAddressesKeyPrefix + id
+            ) ?? []
+        }
+        return state
+    }
+
+    private func removeLegacyWalletState() {
+        defaults.removeObject(forKey: storageKey)
+        defaults.removeObject(forKey: selectionKey)
+        for profile in persistentState.profiles {
+            let id = profile.id.uuidString
+            defaults.removeObject(forKey: receiveIndexKeyPrefix + id)
+            defaults.removeObject(forKey: changeIndexKeyPrefix + id)
+            defaults.removeObject(forKey: usedChangeAddressesKeyPrefix + id)
+            defaults.removeObject(forKey: usedReceiveAddressesKeyPrefix + id)
         }
     }
 

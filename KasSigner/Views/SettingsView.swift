@@ -363,7 +363,7 @@ struct SettingsView: View {
     }
 
     private func copyKpub(_ profile: WalletProfile) {
-        UIPasteboard.general.string = profile.kpub
+        PrivatePasteboard.copy(profile.kpub)
         copyFeedbackCenter.showCopied(profile.kpub, label: "kpub")
     }
 

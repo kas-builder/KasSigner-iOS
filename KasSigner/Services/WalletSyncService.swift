@@ -497,38 +497,52 @@ final class WalletSnapshotCache {
 
     static let shared = WalletSnapshotCache()
 
-    private let prefix = "kassigner.walletSnapshot.v1."
+    private let legacyPrefix = "kassigner.walletSnapshot.v1."
+    private let protectedStorage: ProtectedWalletStorage
+    private let defaults: UserDefaults
 
-    private init() {}
+    init(
+        protectedStorage: ProtectedWalletStorage = .shared,
+        defaults: UserDefaults = .standard
+    ) {
+        self.protectedStorage = protectedStorage
+        self.defaults = defaults
+    }
 
     func load(profileID: UUID) -> WalletSyncPayload? {
-        let key = prefix + profileID.uuidString
-
-        guard
-            let data = UserDefaults.standard.data(forKey: key),
-            let snapshot = try? JSONDecoder().decode(WalletSyncPayload.self, from: data)
-        else {
-            return nil
+        let fileName = snapshotFileName(profileID: profileID)
+        if let snapshot = protectedStorage.load(
+            WalletSyncPayload.self,
+            fileName: fileName
+        ) {
+            return snapshot
         }
-
+        let legacyKey = legacyPrefix + profileID.uuidString
+        guard let data = defaults.data(forKey: legacyKey),
+              let snapshot = try? JSONDecoder().decode(
+                  WalletSyncPayload.self,
+                  from: data
+              ) else { return nil }
+        if protectedStorage.save(snapshot, fileName: fileName) {
+            defaults.removeObject(forKey: legacyKey)
+        }
         return snapshot
     }
 
     func save(_ snapshot: WalletSyncPayload, profileID: UUID) {
-        guard let data = try? JSONEncoder().encode(snapshot) else {
-            return
-        }
-
-        UserDefaults.standard.set(
-            data,
-            forKey: prefix + profileID.uuidString
+        _ = protectedStorage.save(
+            snapshot,
+            fileName: snapshotFileName(profileID: profileID)
         )
     }
 
     func remove(profileID: UUID) {
-        UserDefaults.standard.removeObject(
-            forKey: prefix + profileID.uuidString
-        )
+        protectedStorage.remove(fileName: snapshotFileName(profileID: profileID))
+        defaults.removeObject(forKey: legacyPrefix + profileID.uuidString)
+    }
+
+    private func snapshotFileName(profileID: UUID) -> String {
+        "wallet-snapshot-\(profileID.uuidString.lowercased()).json"
     }
 }
 
@@ -901,13 +915,21 @@ final class WalletSyncService: ObservableObject {
     private func outgoingReconciliationRequest(
         for profileID: UUID
     ) -> OutgoingReconciliationRequest {
-        guard let data = UserDefaults.standard.data(
-            forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
-        ), let request = try? JSONDecoder().decode(
+        let fileName = outgoingReconciliationFileName(profileID: profileID)
+        if let request = ProtectedWalletStorage.shared.load(
             OutgoingReconciliationRequest.self,
-            from: data
-        ) else {
-            return OutgoingReconciliationRequest()
+            fileName: fileName
+        ) {
+            return request
+        }
+        let legacyKey = outgoingReconciliationKeyPrefix + profileID.uuidString
+        guard let data = UserDefaults.standard.data(forKey: legacyKey),
+              let request = try? JSONDecoder().decode(
+                  OutgoingReconciliationRequest.self,
+                  from: data
+              ) else { return OutgoingReconciliationRequest() }
+        if ProtectedWalletStorage.shared.save(request, fileName: fileName) {
+            UserDefaults.standard.removeObject(forKey: legacyKey)
         }
         return request
     }
@@ -916,17 +938,23 @@ final class WalletSyncService: ObservableObject {
         _ request: OutgoingReconciliationRequest,
         profileID: UUID
     ) {
-        guard let data = try? JSONEncoder().encode(request) else { return }
-        UserDefaults.standard.set(
-            data,
-            forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
+        _ = ProtectedWalletStorage.shared.save(
+            request,
+            fileName: outgoingReconciliationFileName(profileID: profileID)
         )
     }
 
     private func clearOutgoingReconciliationRequest(profileID: UUID) {
+        ProtectedWalletStorage.shared.remove(
+            fileName: outgoingReconciliationFileName(profileID: profileID)
+        )
         UserDefaults.standard.removeObject(
             forKey: outgoingReconciliationKeyPrefix + profileID.uuidString
         )
+    }
+
+    private func outgoingReconciliationFileName(profileID: UUID) -> String {
+        "outgoing-reconciliation-\(profileID.uuidString.lowercased()).json"
     }
 
     private func syncWithAddressDiscovery(

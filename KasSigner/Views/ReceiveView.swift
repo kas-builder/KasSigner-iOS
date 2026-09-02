@@ -520,7 +520,7 @@ struct ReceiveView: View {
 
     private func copyCurrentAddress() {
         guard !currentAddress.isEmpty else { return }
-        UIPasteboard.general.string = currentAddress
+        PrivatePasteboard.copy(currentAddress)
         copyFeedbackCenter.showCopied(currentAddress)
         if addressChain == .change {
             showingChangeAddressWarning = true

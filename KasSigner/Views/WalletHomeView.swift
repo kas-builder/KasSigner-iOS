@@ -212,6 +212,7 @@ struct WalletHomeView: View {
         .onChange(of: showingSendFlow) { _, isShowing in
             if !isShowing {
                 walletStore.cancelSendSession(profileID: profile.id)
+                coinControlStore.clearSelection()
             }
         }
     }
@@ -232,7 +233,7 @@ struct WalletHomeView: View {
     private func copyWalletHomeReceiveAddress(for profile: WalletProfile) {
         guard !profile.receiveAddresses.isEmpty else { return }
         let address = walletHomeReceiveAddress(for: profile)
-        UIPasteboard.general.string = address
+        PrivatePasteboard.copy(address)
         copyFeedbackCenter.showCopied(address)
     }
 
@@ -314,6 +315,7 @@ struct SendUTXOSelectionView: View {
     @State private var showingUTXOSelectionLimit = false
     @State private var showingDestination = false
     @State private var showingSessionError = false
+    @State private var activeSessionID: UUID?
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -345,13 +347,14 @@ struct SendUTXOSelectionView: View {
                     .background(Color(.systemGroupedBackground))
 
                     Button {
-                        guard walletStore.beginSendSession(
+                        guard let session = walletStore.beginSendSession(
                             profileID: profile.id,
                             selectedUTXOs: selectedUTXOs
-                        ) != nil else {
+                        ) else {
                             showingSessionError = true
                             return
                         }
+                        activeSessionID = session.id
                         showingDestination = true
                     } label: {
                         Text(selectedUTXOs.count == 1 ? "Send UTXO" : "Send UTXOs")
@@ -371,11 +374,18 @@ struct SendUTXOSelectionView: View {
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
         .navigationDestination(isPresented: $showingDestination) {
-            SendDestinationView(
-                profile: profile,
-                selectedUTXOs: selectedUTXOs,
-                showingSendFlow: $showingSendFlow
-            )
+            if let activeSessionID,
+               let session = walletStore.sendSession(
+                   id: activeSessionID,
+                   profileID: profile.id
+               ) {
+                SendDestinationView(
+                    profile: profile,
+                    selectedUTXOs: session.selectedUTXOs,
+                    sessionID: activeSessionID,
+                    showingSendFlow: $showingSendFlow
+                )
+            }
         }
         .onAppear {
             coinControlStore.activate(profileID: profile.id)
