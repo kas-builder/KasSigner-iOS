@@ -2,6 +2,98 @@ import XCTest
 @testable import KasSigner
 
 final class PortfolioCalculationsTests: XCTestCase {
+    func testCompactKpubPayloadAcceptsExactM5Format() throws {
+        var raw = [UInt8](repeating: 0, count: 78)
+        raw.replaceSubrange(0..<4, with: [0x03, 0x8f, 0x33, 0x2e])
+        raw[4] = 3
+        raw.replaceSubrange(9..<13, with: [0x80, 0x00, 0x00, 0x00])
+        raw[45] = 0x02
+        let payload = [UInt8(0x01)] + raw
+        let payloadHex = payload.map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(
+            try KpubQRPayload.rawKpubHex(from: payloadHex),
+            raw.map { String(format: "%02x", $0) }.joined()
+        )
+    }
+
+    func testCompactKpubPayloadRejectsPrivateOrUnknownFormats() {
+        var raw = [UInt8](repeating: 0, count: 78)
+        raw.replaceSubrange(0..<4, with: [0x03, 0x8f, 0x33, 0x2e])
+        raw[4] = 3
+        raw.replaceSubrange(9..<13, with: [0x80, 0x00, 0x00, 0x00])
+        raw[45] = 0x02
+
+        func hex(_ bytes: [UInt8]) -> String {
+            bytes.map { String(format: "%02x", $0) }.joined()
+        }
+
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(from: hex([0x02] + raw))
+        )
+
+        var wrongVersion = raw
+        wrongVersion[0] = 0x04
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(from: hex([0x01] + wrongVersion))
+        )
+
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(
+                from: hex([0x01] + Array(raw.dropLast()))
+            )
+        )
+    }
+
+    @MainActor
+    func testCompactKpubUsesStandardBundledImporter() async throws {
+        let engine = KasSignerEngine()
+        _ = engine.attachedWebView()
+        let raw =
+            "038f332e" + "03" + "00000000" + "80000000" +
+            String(repeating: "01", count: 32) +
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        let canonicalKpub = try KpubQRPayload.canonicalKpub(
+            from: "01" + raw
+        )
+        let imported = try await engine.importKpub(canonicalKpub)
+
+        XCTAssertTrue(canonicalKpub.hasPrefix("kpub"))
+        XCTAssertTrue(imported.kpub.hasPrefix("kpub"))
+        XCTAssertFalse(imported.receiveAddresses.isEmpty)
+        XCTAssertFalse(imported.changeAddresses.isEmpty)
+    }
+
+    @MainActor
+    func testCompactKpubFramesReassembleOutOfOrderWithoutEarlyImport() async throws {
+        let engine = KasSignerEngine()
+        _ = engine.attachedWebView()
+        let rawHex =
+            "038f332e" + "03" + "00000000" + "80000000" +
+            String(repeating: "01", count: 32) +
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        let payloadHex = "01" + rawHex
+        let splitIndex = payloadHex.index(payloadHex.startIndex, offsetBy: 80)
+        let firstFragment = String(payloadHex[..<splitIndex])
+        let secondFragment = String(payloadHex[splitIndex...])
+        let firstFrame = "000228" + firstFragment
+        let secondFrame = "010227" + secondFragment
+
+        try await engine.resetQRDecoder()
+        let incomplete = try await engine.decodeQRFrame(secondFrame)
+        XCTAssertNil(incomplete)
+        let duplicate = try await engine.decodeQRFrame(secondFrame)
+        XCTAssertNil(duplicate)
+        let completed = try await engine.decodeQRFrame(firstFrame)
+
+        XCTAssertEqual(completed, payloadHex)
+        let canonical = try KpubQRPayload.canonicalKpub(
+            from: XCTUnwrap(completed)
+        )
+        let imported = try await engine.importKpub(canonical)
+        XCTAssertTrue(imported.kpub.hasPrefix("kpub"))
+    }
+
     @MainActor
     func testStrictSignedReturnVerifierIsAvailableThroughBundledWebAssembly() async {
         let engine = KasSignerEngine()
