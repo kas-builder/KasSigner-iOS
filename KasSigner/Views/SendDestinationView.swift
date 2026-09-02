@@ -26,6 +26,7 @@ struct SendDestinationView: View {
     @State private var selectedChangeAddress = ""
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
+    @FocusState private var customFeeFieldFocused: Bool
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
@@ -198,17 +199,34 @@ struct SendDestinationView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 14) {
-                    destinationCard
-                    changeAddressCard
-                    amountCard
-                    feeCard
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(spacing: 14) {
+                        destinationCard
+                        changeAddressCard
+                        amountCard
+                        feeCard
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .background(Color(.systemGroupedBackground))
+                .onChange(of: selectedFee) { _, choice in
+                    guard choice == .custom else {
+                        customFeeFieldFocused = false
+                        return
+                    }
+
+                    Task { @MainActor in
+                        await Task.yield()
+                        customFeeFieldFocused = true
+                        try? await Task.sleep(for: .milliseconds(250))
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo("custom-fee-field", anchor: .center)
+                        }
+                    }
+                }
             }
-            .background(Color(.systemGroupedBackground))
 
             Button {
                 Task {
@@ -868,6 +886,7 @@ struct SendDestinationView: View {
                 HStack(spacing: 10) {
                     TextField("0", text: $customFeeText)
                         .keyboardType(.decimalPad)
+                        .focused($customFeeFieldFocused)
                         .font(
                             .subheadline
                                 .weight(.semibold)
@@ -878,6 +897,7 @@ struct SendDestinationView: View {
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
+                .id("custom-fee-field")
                 .padding(12)
                 .background(
                     Color(.tertiarySystemGroupedBackground),
