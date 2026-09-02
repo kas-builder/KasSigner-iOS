@@ -1441,7 +1441,7 @@ private struct VerifiedSigningPreparationView: View {
     @State private var frameIndex = 0
     @State private var loading = true
     @State private var errorMessage: String?
-    @State private var isPlaying = false
+    @State private var isPlaying = true
     @State private var showingSignedQRScanner = false
     @State private var decoderProgressCount = 0
     @State private var decoderProgressTotal = 0
@@ -1459,11 +1459,9 @@ private struct VerifiedSigningPreparationView: View {
     @State private var lastScannedFrame: String?
     @State private var lastProgressCount = 0
 
-    private let frameTimer = Timer.publish(
-        every: 3.5,
-        on: .main,
-        in: .common
-    ).autoconnect()
+    private var framePlaybackTaskID: String {
+        "\(isPlaying)-\(frameIndex)-\(qrFrames.count)"
+    }
 
     var body: some View {
         ScrollView {
@@ -1481,8 +1479,22 @@ private struct VerifiedSigningPreparationView: View {
         .task {
             await loadQRFrames()
         }
-        .onReceive(frameTimer) { _ in
-            guard isPlaying, qrFrames.count > 1 else { return }
+        .task(id: framePlaybackTaskID) {
+            guard isPlaying,
+                  qrFrames.count > 1,
+                  qrFrames.indices.contains(frameIndex)
+            else { return }
+
+            do {
+                try await Task.sleep(for: .seconds(5))
+            } catch {
+                return
+            }
+
+            guard isPlaying,
+                  qrFrames.count > 1,
+                  qrFrames.indices.contains(frameIndex)
+            else { return }
             frameIndex = (frameIndex + 1) % qrFrames.count
         }
         .sheet(isPresented: $showingSignedQRScanner) {
@@ -2022,7 +2034,7 @@ private struct VerifiedSigningPreparationView: View {
         loading = true
         errorMessage = nil
         frameIndex = 0
-        isPlaying = false
+        isPlaying = true
 
         let currentDigest = SHA256.hash(
             data: Data(review.unsignedPSKB.utf8)
