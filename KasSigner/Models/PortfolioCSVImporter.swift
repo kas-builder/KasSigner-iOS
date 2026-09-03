@@ -39,7 +39,10 @@ enum PortfolioCSVExporter {
 
     static func data(transactions: [PortfolioTransaction]) -> Data {
         var rows = [columns]
-        rows.append(contentsOf: transactions.sorted(by: PortfolioTransactionOrder.ascending).map { transaction in
+        let newestFirst = transactions
+            .sorted(by: PortfolioTransactionOrder.ascending)
+            .reversed()
+        rows.append(contentsOf: newestFirst.map { transaction in
             let fee = transaction.feeUSD
             return [
                 dateString(transaction.timestamp),

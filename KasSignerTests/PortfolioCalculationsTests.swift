@@ -848,6 +848,9 @@ final class PortfolioCalculationsTests: XCTestCase {
         let exportedData = PortfolioCSVExporter.data(transactions: [later, earlier])
         let exportedText = String(decoding: exportedData, as: UTF8.self)
         XCTAssertTrue(exportedText.hasPrefix("\u{feff}Date (UTC-4:00),Coin,Type"))
+        let exportedRows = exportedText.components(separatedBy: "\r\n")
+        XCTAssertTrue(exportedRows[1].hasPrefix("2026-08-14 12:30:00"))
+        XCTAssertTrue(exportedRows[2].hasPrefix("2026-08-13 10:00:00"))
 
         let preview = try PortfolioCSVImporter.preview(
             data: exportedData,
@@ -858,9 +861,9 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
 
         XCTAssertEqual(preview.transactions.count, 2)
-        XCTAssertEqual(preview.transactions.map(\.type), [.buy, .sell])
-        XCTAssertEqual(preview.transactions[1].notes, "Partial sale, \"summer\"\nlot")
-        XCTAssertEqual(preview.transactions[1].feeUSD, 1.25, accuracy: 0.000_001)
+        XCTAssertEqual(preview.transactions.map(\.type), [.sell, .buy])
+        XCTAssertEqual(preview.transactions[0].notes, "Partial sale, \"summer\"\nlot")
+        XCTAssertEqual(preview.transactions[0].feeUSD, 1.25, accuracy: 0.000_001)
         XCTAssertTrue(preview.issues.isEmpty)
     }
 
