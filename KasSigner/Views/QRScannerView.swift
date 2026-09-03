@@ -25,6 +25,8 @@ struct QRScannerView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var cameraPermissionDenied = false
+    @State private var isTorchAvailable = false
+    @State private var isTorchOn = false
 
     var body: some View {
         NavigationStack {
@@ -40,11 +42,15 @@ struct QRScannerView: View {
                     .foregroundStyle(.white)
                 } else {
                     QRScannerCameraView(
+                        isTorchOn: $isTorchOn,
                         onScan: { value in
                             onScan(value)
                         },
                         onPermissionDenied: {
                             cameraPermissionDenied = true
+                        },
+                        onTorchAvailabilityChanged: { isAvailable in
+                            isTorchAvailable = isAvailable
                         }
                     )
                     .ignoresSafeArea()
@@ -94,7 +100,29 @@ struct QRScannerView: View {
                     Button("Cancel") { dismiss() }
                         .foregroundStyle(.white)
                 }
+
+                if isTorchAvailable {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            isTorchOn.toggle()
+                        } label: {
+                            Image(
+                                systemName: isTorchOn
+                                    ? "flashlight.on.fill"
+                                    : "flashlight.off.fill"
+                            )
+                            .symbolRenderingMode(.hierarchical)
+                        }
+                        .tint(isTorchOn ? .yellow : .white)
+                        .accessibilityLabel(
+                            isTorchOn ? "Turn flashlight off" : "Turn flashlight on"
+                        )
+                    }
+                }
             }
+        }
+        .onDisappear {
+            isTorchOn = false
         }
     }
 
@@ -115,17 +143,37 @@ struct QRScannerView: View {
 }
 
 private struct QRScannerCameraView: UIViewControllerRepresentable {
+    @Binding var isTorchOn: Bool
     let onScan: (String) -> Void
     let onPermissionDenied: () -> Void
+    let onTorchAvailabilityChanged: (Bool) -> Void
 
     func makeUIViewController(context: Context) -> QRScannerViewController {
         let controller = QRScannerViewController()
         controller.onScan = onScan
         controller.onPermissionDenied = onPermissionDenied
+        controller.onTorchAvailabilityChanged = onTorchAvailabilityChanged
+        controller.onTorchStateChanged = { actualState in
+            if isTorchOn != actualState {
+                isTorchOn = actualState
+            }
+        }
         return controller
     }
 
-    func updateUIViewController(_ uiViewController: QRScannerViewController, context: Context) {}
+    func updateUIViewController(
+        _ uiViewController: QRScannerViewController,
+        context: Context
+    ) {
+        uiViewController.setTorch(isOn: isTorchOn)
+    }
+
+    static func dismantleUIViewController(
+        _ uiViewController: QRScannerViewController,
+        coordinator: Void
+    ) {
+        uiViewController.stopCaptureAndTorch()
+    }
 }
 
 
@@ -313,10 +361,13 @@ private final class QRScannerCaptureSession: @unchecked Sendable {
 private final class QRScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onScan: ((String) -> Void)?
     var onPermissionDenied: (() -> Void)?
+    var onTorchAvailabilityChanged: ((Bool) -> Void)?
+    var onTorchStateChanged: ((Bool) -> Void)?
 
     private let captureSession = QRScannerCaptureSession()
     private let binaryQRDecoder = BinaryQRVideoDecoder()
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var videoDevice: AVCaptureDevice?
 
     private var session: AVCaptureSession {
         captureSession.session
@@ -349,7 +400,7 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        captureSession.stop()
+        stopCaptureAndTorch()
     }
 
     private func requestCameraAndConfigure() {
@@ -379,6 +430,8 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
 
         session.beginConfiguration()
         session.addInput(input)
+        videoDevice = device
+        onTorchAvailabilityChanged?(device.hasTorch && device.isTorchAvailable)
 
         let output = AVCaptureMetadataOutput()
         guard session.canAddOutput(output) else {
@@ -410,6 +463,40 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
         previewLayer = layer
 
         captureSession.start()
+    }
+
+    func setTorch(isOn: Bool) {
+        guard let videoDevice,
+              videoDevice.hasTorch,
+              videoDevice.isTorchAvailable
+        else {
+            if isOn {
+                onTorchStateChanged?(false)
+            }
+            return
+        }
+
+        let requestedMode: AVCaptureDevice.TorchMode = isOn ? .on : .off
+        guard videoDevice.torchMode != requestedMode else {
+            onTorchStateChanged?(isOn)
+            return
+        }
+
+        do {
+            try videoDevice.lockForConfiguration()
+            defer { videoDevice.unlockForConfiguration() }
+
+            videoDevice.torchMode = requestedMode
+            onTorchStateChanged?(videoDevice.torchMode == .on)
+        } catch {
+            onTorchStateChanged?(videoDevice.torchMode == .on)
+        }
+    }
+
+    func stopCaptureAndTorch() {
+        setTorch(isOn: false)
+        onTorchAvailabilityChanged?(false)
+        captureSession.stop()
     }
 
     nonisolated func metadataOutput(
