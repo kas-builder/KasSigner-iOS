@@ -14,7 +14,7 @@ final class CopyFeedbackCenter: ObservableObject {
         }
 
         dismissalTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(3))
+            try? await Task.sleep(for: .seconds(6))
             guard !Task.isCancelled else { return }
             withAnimation(.snappy) {
                 self.message = nil
@@ -23,7 +23,11 @@ final class CopyFeedbackCenter: ObservableObject {
     }
 
     func showCopied(_ value: String, label: String = "Address") {
-        let suffix = String(value.suffix(4))
-        show("\(label) ending in \(suffix) copied")
+        let previewValue = value.hasPrefix("kaspa:")
+            ? String(value.dropFirst("kaspa:".count))
+            : value
+        let prefix = String(previewValue.prefix(6))
+        let suffix = String(previewValue.suffix(6))
+        show("\(label) \(prefix)...\(suffix) copied")
     }
 }

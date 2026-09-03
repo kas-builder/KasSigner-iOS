@@ -3,6 +3,15 @@ import XCTest
 @testable import KasSigner
 
 final class PortfolioCalculationsTests: XCTestCase {
+    @MainActor
+    func testCopyToastShowsFirstAndLastSixCharacters() {
+        let feedback = CopyFeedbackCenter()
+
+        feedback.showCopied("kaspa:exampleaddress1234")
+
+        XCTAssertEqual(feedback.message, "Address exampl...ss1234 copied")
+    }
+
     func testCompactKpubPayloadAcceptsExactM5Format() throws {
         var raw = [UInt8](repeating: 0, count: 78)
         raw.replaceSubrange(0..<4, with: [0x03, 0x8f, 0x33, 0x2e])
