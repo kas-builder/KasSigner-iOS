@@ -176,7 +176,7 @@ private struct QRScannerCameraView: UIViewControllerRepresentable {
         _ uiViewController: QRScannerViewController,
         coordinator: Void
     ) {
-        uiViewController.stopCaptureAndTorch()
+        uiViewController.prepareForDismantle()
     }
 }
 
@@ -501,6 +501,17 @@ private final class QRScannerViewController: UIViewController, AVCaptureMetadata
         setTorch(isOn: false)
         onTorchAvailabilityChanged?(false)
         captureSession.stop()
+    }
+
+    func prepareForDismantle() {
+        // SwiftUI is invalidating the representable's graph at this point.
+        // Disconnect binding callbacks before shutdown so turning off the
+        // torch cannot synchronously mutate @State during view teardown.
+        onScan = nil
+        onPermissionDenied = nil
+        onTorchAvailabilityChanged = nil
+        onTorchStateChanged = nil
+        stopCaptureAndTorch()
     }
 
     nonisolated func metadataOutput(
