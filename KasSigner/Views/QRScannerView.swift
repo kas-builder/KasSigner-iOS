@@ -113,7 +113,11 @@ struct QRScannerView: View {
                             )
                             .symbolRenderingMode(.hierarchical)
                         }
-                        .tint(isTorchOn ? .yellow : .white)
+                        .tint(
+                            isTorchOn
+                                ? Color(red: 0.20, green: 0.62, blue: 0.57)
+                                : .white
+                        )
                         .accessibilityLabel(
                             isTorchOn ? "Turn flashlight off" : "Turn flashlight on"
                         )
