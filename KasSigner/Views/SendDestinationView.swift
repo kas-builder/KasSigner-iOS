@@ -2428,7 +2428,7 @@ private struct ChangeAddressSelectionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(isLocallyUsed || status != .fresh)
+        .disabled(status == .checking || status == .unavailable)
         .task(id: address) {
             guard !isLocallyUsed else {
                 status = .used
