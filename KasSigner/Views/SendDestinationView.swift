@@ -1433,6 +1433,7 @@ private struct VerifiedSigningPreparationView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var appLockService: AppLockService
 
     let review: VerifiedTransactionReview
     let onComplete: () -> Void
@@ -1449,6 +1450,7 @@ private struct VerifiedSigningPreparationView: View {
     @State private var signedPayload: String?
     @State private var originalRelayKSPT: String?
     @State private var signedBroadcastGate = VerifiedSignedPSKBGate()
+    @State private var isAuthorizingBroadcast = false
     @State private var isBroadcastingSignedTransaction = false
     @State private var broadcastTransactionID: String?
     @State private var showingBroadcastSuccess = false
@@ -1767,26 +1769,32 @@ private struct VerifiedSigningPreparationView: View {
                 }
             } label: {
                 HStack(spacing: 8) {
-                    if isBroadcastingSignedTransaction {
+                    if isAuthorizingBroadcast || isBroadcastingSignedTransaction {
                         ProgressView()
                             .controlSize(.small)
                     } else {
                         Image(systemName: "paperplane.fill")
                     }
 
-                    Text(
-                        isBroadcastingSignedTransaction
-                            ? "Broadcasting…"
-                            : "Broadcast Transaction"
-                    )
+                    Text(broadcastButtonTitle)
                     .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isBroadcastingSignedTransaction)
+            .disabled(isAuthorizingBroadcast || isBroadcastingSignedTransaction)
         }
+    }
+
+    private var broadcastButtonTitle: String {
+        if isAuthorizingBroadcast {
+            return "Authenticating…"
+        }
+        if isBroadcastingSignedTransaction {
+            return "Broadcasting…"
+        }
+        return "Broadcast Transaction"
     }
 
     @MainActor
@@ -1814,8 +1822,21 @@ private struct VerifiedSigningPreparationView: View {
     @MainActor
     private func broadcastSignedTransaction() async {
         guard let verifiedSignedPSKBForBroadcast = signedBroadcastGate.payload,
+              !isAuthorizingBroadcast,
               !isBroadcastingSignedTransaction
         else {
+            return
+        }
+
+        isAuthorizingBroadcast = true
+        scanErrorMessage = nil
+        let isAuthorized = await appLockService.authorizeTransactionBroadcast()
+        isAuthorizingBroadcast = false
+
+        guard isAuthorized else {
+            if let authenticationError = appLockService.authenticationError {
+                scanErrorMessage = "Authentication failed: \(authenticationError)"
+            }
             return
         }
 
