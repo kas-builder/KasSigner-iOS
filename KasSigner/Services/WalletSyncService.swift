@@ -969,12 +969,14 @@ final class WalletSyncService: ObservableObject {
         lastTransactionHistoryAttempt[profile.id] = Date()
         transactionHistoryProfilesInFlight[profile.id] = profileGeneration
         isRefreshingTransactionHistory = true
-        transactionHistoryProgress = TransactionHistoryProgress(
-            profileID: profile.id,
-            completedAddresses: 0,
-            totalAddresses: 0,
-            phase: .locatingAddresses
-        )
+        if keepProgressVisible {
+            transactionHistoryProgress = TransactionHistoryProgress(
+                profileID: profile.id,
+                completedAddresses: 0,
+                totalAddresses: 0,
+                phase: .locatingAddresses
+            )
+        }
         transactionHistoryError = nil
         var committedCompleteHistory = false
         defer {
@@ -1005,12 +1007,14 @@ final class WalletSyncService: ObservableObject {
                 guard let self,
                       self.activeProfileID == profile.id,
                       self.activeProfileGeneration == profileGeneration else { return }
-                self.transactionHistoryProgress = TransactionHistoryProgress(
-                    profileID: profile.id,
-                    completedAddresses: completed,
-                    totalAddresses: total,
-                    phase: isRetrying ? .retryingThrottledAddresses : .loadingAddresses
-                )
+                if keepProgressVisible {
+                    self.transactionHistoryProgress = TransactionHistoryProgress(
+                        profileID: profile.id,
+                        completedAddresses: completed,
+                        totalAddresses: total,
+                        phase: isRetrying ? .retryingThrottledAddresses : .loadingAddresses
+                    )
+                }
             }
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }

@@ -66,6 +66,7 @@ struct RootView: View {
     @State private var notificationRefreshTask: Task<Void, Never>?
     @State private var notificationRefreshRequested = false
     @State private var confirmationResolutionTask: Task<Void, Never>?
+    @State private var automaticallyRefreshedHistoryProfileID: UUID?
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -302,6 +303,10 @@ struct RootView: View {
 
         guard isActive,
               let profile = walletStore.selectedProfile else { return }
+        let isInitialImportedWalletSync = profile.requiresInitialDiscovery
+        let shouldAutomaticallyRefreshHistory =
+            automaticallyRefreshedHistoryProfileID != profile.id
+        let historyUpdatedAtBeforeRefresh = syncService.transactionHistoryUpdatedAt
 
         defer {
             syncService.completeTransactionHistoryReconciliation(profileID: profile.id)
@@ -323,9 +328,14 @@ struct RootView: View {
             preferences: preferences,
             force: false,
             minimumInterval: 9,
-            includeTransactionHistory: true,
-            keepTransactionProgressThroughReconciliation: true
+            includeTransactionHistory: shouldAutomaticallyRefreshHistory,
+            keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync
         )
+
+        if shouldAutomaticallyRefreshHistory,
+           syncService.transactionHistoryUpdatedAt != historyUpdatedAtBeforeRefresh {
+            automaticallyRefreshedHistoryProfileID = profile.id
+        }
 
         guard !Task.isCancelled,
               walletStore.selectedProfileID == profile.id else { return }
