@@ -303,6 +303,10 @@ struct RootView: View {
         guard isActive,
               let profile = walletStore.selectedProfile else { return }
 
+        defer {
+            syncService.completeTransactionHistoryReconciliation(profileID: profile.id)
+        }
+
         engine.startIfNeeded()
 
         // Let the first frame and tab bar become interactive before any
@@ -319,7 +323,8 @@ struct RootView: View {
             preferences: preferences,
             force: false,
             minimumInterval: 9,
-            includeTransactionHistory: true
+            includeTransactionHistory: true,
+            keepTransactionProgressThroughReconciliation: true
         )
 
         guard !Task.isCancelled,

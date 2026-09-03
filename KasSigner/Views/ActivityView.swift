@@ -42,26 +42,35 @@ struct ActivityView: View {
                 } else {
                     GeometryReader { proxy in
                         ScrollView {
-                            if transactions.isEmpty {
-                                ContentUnavailableView {
-                                    Label("No Transactions", systemImage: "clock.arrow.circlepath")
-                                } description: {
-                                    Text(emptyDescription)
+                            VStack(spacing: 12) {
+                                if isSynchronizingCurrentWallet {
+                                    transactionHistorySyncView
+                                } else if let error = syncService.transactionHistoryError {
+                                    transactionHistoryErrorView(error)
                                 }
-                                .frame(
-                                    maxWidth: .infinity,
-                                    minHeight: proxy.size.height
-                                )
-                            } else {
-                                LazyVStack(spacing: 12) {
-                                    ForEach(transactions) { transaction in
-                                        transactionCard(transaction)
+
+                                if transactions.isEmpty,
+                                   !isSynchronizingCurrentWallet {
+                                    ContentUnavailableView {
+                                        Label("No Transactions", systemImage: "clock.arrow.circlepath")
+                                    } description: {
+                                        Text(emptyDescription)
                                     }
+                                    .frame(
+                                        maxWidth: .infinity,
+                                        minHeight: proxy.size.height
+                                    )
+                                } else if !transactions.isEmpty {
+                                    LazyVStack(spacing: 12) {
+                                        ForEach(transactions) { transaction in
+                                            transactionCard(transaction)
+                                        }
+                                    }
+                                    .padding(.horizontal, 14)
+                                    .padding(.bottom, 24)
                                 }
-                                .padding(.horizontal, 14)
-                                .padding(.top, 8)
-                                .padding(.bottom, 24)
                             }
+                            .padding(.top, 8)
                         }
                         .refreshable {
                             await refreshHistory(force: true)
@@ -86,14 +95,6 @@ struct ActivityView: View {
                         }
                         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
                         .accessibilityLabel("Transaction Actions")
-                    }
-                }
-
-                if syncService.isRefreshingTransactionHistory {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .accessibilityLabel("Synchronizing transactions")
                     }
                 }
             }
@@ -164,6 +165,60 @@ struct ActivityView: View {
             return "Looking for wallet activity…"
         }
         return "Incoming and outgoing transactions will appear here after synchronization."
+    }
+
+    private var isSynchronizingCurrentWallet: Bool {
+        syncService.transactionHistoryProgress?.profileID
+            == walletStore.selectedProfileID
+    }
+
+    private var transactionHistorySyncView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 9) {
+                Image(systemName: "clock.arrow.circlepath")
+                    .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                Text("Synchronizing transactions")
+                    .font(.headline)
+            }
+
+            if let fraction = syncService.transactionHistoryProgress?.fraction {
+                ProgressView(value: fraction)
+                    .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+            } else {
+                ProgressView()
+                    .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+            }
+
+            Text(
+                syncService.transactionHistoryProgress?.detail
+                    ?? "Finding active wallet addresses…"
+            )
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 14)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func transactionHistoryErrorView(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundStyle(.orange)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Transaction synchronization paused")
+                    .font(.headline)
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background, in: RoundedRectangle(cornerRadius: 16))
+        .padding(.horizontal, 14)
     }
 
     private var historicalPriceRequestID: String {

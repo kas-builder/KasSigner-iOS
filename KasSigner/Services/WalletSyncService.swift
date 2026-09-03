@@ -137,7 +137,14 @@ struct TransactionHistoryClient: Sendable {
         ).blueScore
     }
 
-    func transactions(for profile: WalletProfile) async throws -> [WalletTransaction] {
+    func transactions(
+        for profile: WalletProfile,
+        progress: (@MainActor @Sendable (
+            _ completed: Int,
+            _ total: Int,
+            _ isRetryingThrottledAddresses: Bool
+        ) -> Void)? = nil
+    ) async throws -> [WalletTransaction] {
         guard profile.network.lowercased() == "mainnet" else {
             throw TransactionHistoryError.unsupportedNetwork
         }
@@ -148,16 +155,69 @@ struct TransactionHistoryClient: Sendable {
         guard !activeAddresses.isEmpty else { return [] }
 
         var indexedTransactions: [IndexedTransaction] = []
-        for (index, address) in activeAddresses.enumerated() {
-            try Task.checkCancellation()
-            indexedTransactions.append(
-                contentsOf: try await fetchTransactions(for: address)
-            )
-            if index < activeAddresses.count - 1 {
-                // The public indexer is deliberately paced during a full
-                // wallet import to avoid a burst of per-address requests.
-                try await Task.sleep(for: .milliseconds(200))
+        let maximumConcurrentRequests = 3
+        var nextAddressIndex = 0
+        var completedAddressCount = 0
+        await progress?(0, activeAddresses.count, false)
+        var throttledAddresses: [String] = []
+
+        try await withThrowingTaskGroup(
+            of: (transactions: [IndexedTransaction], throttledAddress: String?).self
+        ) { group in
+            func enqueueNextAddress() {
+                guard nextAddressIndex < activeAddresses.count else { return }
+                let address = activeAddresses[nextAddressIndex]
+                nextAddressIndex += 1
+                group.addTask {
+                    do {
+                        return (try await fetchTransactions(for: address), nil)
+                    } catch TransactionHistoryError.rateLimited {
+                        return ([], address)
+                    }
+                }
             }
+
+            for _ in 0..<min(maximumConcurrentRequests, activeAddresses.count) {
+                enqueueNextAddress()
+            }
+
+            while let result = try await group.next() {
+                try Task.checkCancellation()
+                if let throttledAddress = result.throttledAddress {
+                    throttledAddresses.append(throttledAddress)
+                } else {
+                    indexedTransactions.append(contentsOf: result.transactions)
+                    completedAddressCount += 1
+                    await progress?(completedAddressCount, activeAddresses.count, false)
+                }
+                enqueueNextAddress()
+            }
+        }
+
+        // Preserve completed requests and retry only throttled addresses after
+        // a cooldown. Healthy imports never enter this slower path.
+        for retryRound in 0..<2 where !throttledAddresses.isEmpty {
+            await progress?(completedAddressCount, activeAddresses.count, true)
+            try await Task.sleep(for: .seconds(retryRound == 0 ? 15 : 30))
+
+            var stillThrottled: [String] = []
+            for address in throttledAddresses {
+                try Task.checkCancellation()
+                do {
+                    indexedTransactions.append(
+                        contentsOf: try await fetchTransactions(for: address)
+                    )
+                    completedAddressCount += 1
+                    await progress?(completedAddressCount, activeAddresses.count, true)
+                } catch TransactionHistoryError.rateLimited {
+                    stillThrottled.append(address)
+                }
+            }
+            throttledAddresses = stillThrottled
+        }
+
+        guard throttledAddresses.isEmpty else {
+            throw TransactionHistoryError.rateLimited
         }
 
         return mapTransactions(
@@ -579,6 +639,42 @@ final class WalletSyncService: ObservableObject {
         let fraction: Double
     }
 
+    struct TransactionHistoryProgress: Equatable {
+        enum Phase: Equatable {
+            case locatingAddresses
+            case loadingAddresses
+            case retryingThrottledAddresses
+            case finalizing
+        }
+
+        let profileID: UUID
+        let completedAddresses: Int
+        let totalAddresses: Int
+        let phase: Phase
+
+        var fraction: Double? {
+            if phase == .finalizing { return 1 }
+            guard totalAddresses > 0 else { return nil }
+            return min(1, max(0, Double(completedAddresses) / Double(totalAddresses)))
+        }
+
+        var detail: String {
+            switch phase {
+            case .locatingAddresses:
+                return "Finding active wallet addresses…"
+            case .loadingAddresses:
+                guard totalAddresses > 0 else {
+                    return "Finding active wallet addresses…"
+                }
+                return "Loading address \(completedAddresses) of \(totalAddresses)…"
+            case .retryingThrottledAddresses:
+                return "Kaspa is busy. Retrying remaining addresses…"
+            case .finalizing:
+                return "Finalizing transaction history…"
+            }
+        }
+    }
+
     private struct InitialDiscoveryCheckpoint {
         let profile: WalletProfile
         let snapshot: WalletSyncPayload
@@ -605,6 +701,7 @@ final class WalletSyncService: ObservableObject {
     @Published private(set) var feeEstimate: FeeEstimate?
     @Published private(set) var isNetworkAvailable = true
     @Published private(set) var isRefreshingTransactionHistory = false
+    @Published private(set) var transactionHistoryProgress: TransactionHistoryProgress?
     @Published private(set) var transactionHistoryError: String?
     @Published private(set) var transactionHistoryUpdatedAt: Date?
     @Published private(set) var virtualBlueScore: UInt64?
@@ -696,7 +793,8 @@ final class WalletSyncService: ObservableObject {
         preferences: AppPreferences,
         force: Bool = true,
         minimumInterval: TimeInterval = 9,
-        includeTransactionHistory: Bool = true
+        includeTransactionHistory: Bool = true,
+        keepTransactionProgressThroughReconciliation: Bool = false
     ) async {
         guard isNetworkAvailable else {
             state = .failed("No internet connection.")
@@ -787,34 +885,8 @@ final class WalletSyncService: ObservableObject {
                     )
                 }
             }
-            snapshot = result
-
             var completedProfile = discoveredProfile
             if beganWithInitialDiscovery {
-                if preferences.nodeMode == .automatic {
-                    initialDiscoveryStage = "Loading transaction history"
-                    initialDiscoveryProgress = DiscoveryProgress(
-                        title: "Loading transaction history",
-                        detail: "Reconciling activity for the discovered addresses…",
-                        fraction: 0.86
-                    )
-                    let transactions = try await transactionHistoryClient.transactions(
-                        for: discoveredProfile
-                    )
-                    guard activeProfileID == profile.id,
-                          activeProfileGeneration == profileGeneration else { return }
-                    walletStore.mergeSyncedTransactions(
-                        transactions,
-                        profileID: profile.id
-                    )
-                    transactionHistoryUpdatedAt = Date()
-                } else {
-                    initialDiscoveryProgress = DiscoveryProgress(
-                        title: "Finishing wallet sync",
-                        detail: "Saving the addresses synchronized by your custom node…",
-                        fraction: 0.86
-                    )
-                }
                 completedProfile.requiresInitialDiscovery = false
                 if walletStore.pendingImportedProfile?.id == completedProfile.id {
                     walletStore.commitPendingImport(completedProfile)
@@ -823,10 +895,28 @@ final class WalletSyncService: ObservableObject {
                 }
                 initialDiscoveryProgress = DiscoveryProgress(
                     title: "Wallet ready",
-                    detail: "Addresses, UTXOs, and history are synchronized.",
+                    detail: "Addresses and UTXOs are synchronized.",
                     fraction: 1
                 )
             }
+
+            let shouldRefreshTransactionHistory = includeTransactionHistory
+                && (!beganWithInitialDiscovery || preferences.nodeMode == .automatic)
+            if shouldRefreshTransactionHistory,
+               keepTransactionProgressThroughReconciliation {
+                prepareTransactionHistoryProgress(profileID: profile.id)
+            }
+
+            // Commit the authoritative address and UTXO result before loading
+            // indexer history. This opens the wallet while the Transactions
+            // tab reports its own background synchronization progress.
+            snapshot = result
+            WalletSnapshotCache.shared.save(result, profileID: profile.id)
+            state = .connected
+            initialDiscoveryProgress = nil
+            initialDiscoveryError = nil
+            initialDiscoveryCheckpoint = nil
+
             do {
                 feeEstimate = try await engine.getFeeEstimate(
                     nodeConfiguration: preferences.nodeConfiguration
@@ -838,20 +928,14 @@ final class WalletSyncService: ObservableObject {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
 
-            WalletSnapshotCache.shared.save(
-                result,
-                profileID: profile.id
-            )
-            state = .connected
-            if includeTransactionHistory && !beganWithInitialDiscovery {
+            if shouldRefreshTransactionHistory {
                 await refreshTransactionHistory(
                     profile: completedProfile,
-                    walletStore: walletStore
+                    walletStore: walletStore,
+                    force: beganWithInitialDiscovery,
+                    keepProgressVisible: keepTransactionProgressThroughReconciliation
                 )
             }
-            initialDiscoveryProgress = nil
-            initialDiscoveryError = nil
-            initialDiscoveryCheckpoint = nil
         } catch {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
@@ -870,7 +954,8 @@ final class WalletSyncService: ObservableObject {
     func refreshTransactionHistory(
         profile: WalletProfile,
         walletStore: WalletStore,
-        force: Bool = false
+        force: Bool = false,
+        keepProgressVisible: Bool = false
     ) async {
         guard activeProfileID == profile.id else { return }
         let profileGeneration = activeProfileGeneration
@@ -884,31 +969,80 @@ final class WalletSyncService: ObservableObject {
         lastTransactionHistoryAttempt[profile.id] = Date()
         transactionHistoryProfilesInFlight[profile.id] = profileGeneration
         isRefreshingTransactionHistory = true
+        transactionHistoryProgress = TransactionHistoryProgress(
+            profileID: profile.id,
+            completedAddresses: 0,
+            totalAddresses: 0,
+            phase: .locatingAddresses
+        )
         transactionHistoryError = nil
+        var committedCompleteHistory = false
         defer {
             if transactionHistoryProfilesInFlight[profile.id] == profileGeneration {
                 transactionHistoryProfilesInFlight.removeValue(forKey: profile.id)
             }
             isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
+            if keepProgressVisible,
+               committedCompleteHistory,
+               activeProfileID == profile.id,
+               activeProfileGeneration == profileGeneration {
+                transactionHistoryProgress = TransactionHistoryProgress(
+                    profileID: profile.id,
+                    completedAddresses: 1,
+                    totalAddresses: 1,
+                    phase: .finalizing
+                )
+                isRefreshingTransactionHistory = true
+            } else if !isRefreshingTransactionHistory {
+                transactionHistoryProgress = nil
+            }
         }
 
         do {
-            let transactions = try await transactionHistoryClient.transactions(for: profile)
+            let transactions = try await transactionHistoryClient.transactions(
+                for: profile
+            ) { [weak self] completed, total, isRetrying in
+                guard let self,
+                      self.activeProfileID == profile.id,
+                      self.activeProfileGeneration == profileGeneration else { return }
+                self.transactionHistoryProgress = TransactionHistoryProgress(
+                    profileID: profile.id,
+                    completedAddresses: completed,
+                    totalAddresses: total,
+                    phase: isRetrying ? .retryingThrottledAddresses : .loadingAddresses
+                )
+            }
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             walletStore.mergeSyncedTransactions(transactions, profileID: profile.id)
             transactionHistoryUpdatedAt = Date()
+            committedCompleteHistory = true
         } catch {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             guard !Task.isCancelled,
                   !(error is CancellationError),
                   (error as? URLError)?.code != .cancelled else { return }
-            if case TransactionHistoryError.rateLimited = error {
-                return
-            }
             transactionHistoryError = error.localizedDescription
         }
+    }
+
+    func prepareTransactionHistoryProgress(profileID: UUID) {
+        guard activeProfileID == profileID else { return }
+        transactionHistoryProgress = TransactionHistoryProgress(
+            profileID: profileID,
+            completedAddresses: 0,
+            totalAddresses: 0,
+            phase: .locatingAddresses
+        )
+        isRefreshingTransactionHistory = true
+    }
+
+    func completeTransactionHistoryReconciliation(profileID: UUID) {
+        guard transactionHistoryProgress?.profileID == profileID,
+              transactionHistoryProfilesInFlight[profileID] == nil else { return }
+        transactionHistoryProgress = nil
+        isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
     }
 
     func reconcilePendingTransactions(
@@ -1345,6 +1479,7 @@ final class WalletSyncService: ObservableObject {
         discoveryNotice = nil
         transactionHistoryProfilesInFlight.removeAll()
         isRefreshingTransactionHistory = false
+        transactionHistoryProgress = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
     }
 
