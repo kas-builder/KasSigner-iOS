@@ -95,6 +95,7 @@ struct ReceiveView: View {
     @State private var addressWasManuallySelected = false
     @State private var addressChain: AddressChain = .receive
     @State private var showingChangeAddressWarning = false
+    @State private var showingAddressPicker = false
     @AppStorage("kassigner.receive.openToFreshAddress.v1")
     private var opensToFreshAddress = true
 
@@ -125,6 +126,7 @@ struct ReceiveView: View {
                                 showsText: preferences.addressStatusDisplayMode == .iconAndText
                             )
                         }
+
                     }
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -300,6 +302,18 @@ struct ReceiveView: View {
                     }
                 }
             }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingAddressPicker = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                }
+                .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                .accessibilityLabel(
+                    "Browse \(addressChain.rawValue.lowercased()) addresses"
+                )
+            }
         }
         .task {
             engine.startIfNeeded()
@@ -331,6 +345,19 @@ struct ReceiveView: View {
                 || addressWasManuallySelected {
                 persistSelectedAddressIndex()
             }
+        }
+        .sheet(isPresented: $showingAddressPicker) {
+            AddressNavigationPickerView(
+                profileID: profile.id,
+                chain: addressChain,
+                addresses: currentAddresses,
+                selectedIndex: $selectedAddressIndex
+            ) { index in
+                addressWasManuallySelected = true
+                selectedAddressIndex = index
+                persistSelectedAddressIndex()
+            }
+            .environmentObject(walletStore)
         }
         .alert(
             "Unable to Generate Address",
@@ -685,6 +712,127 @@ struct ReceiveView: View {
         selectedAddressIndex = min(max(0, preferredIndex), addresses.count - 1)
     }
 
+}
+
+private struct AddressNavigationPickerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var walletStore: WalletStore
+
+    let profileID: UUID
+    let chain: AddressChain
+    let addresses: [String]
+    @Binding var selectedIndex: Int
+    let select: (Int) -> Void
+
+    @State private var historicallyActive: Set<String>?
+    @State private var activityLookupFailed = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(addresses.enumerated()), id: \.offset) { index, address in
+                    AddressNavigationSelectionRow(
+                        chain: chain,
+                        index: index,
+                        address: address,
+                        isSelected: index == selectedIndex,
+                        status: status(for: address)
+                    ) {
+                        select(index)
+                        dismiss()
+                    }
+                    .listRowInsets(
+                        EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .navigationTitle("\(chain.rawValue) Address")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task(id: addresses.count) {
+                do {
+                    historicallyActive = try await TransactionHistoryClient()
+                        .activeAddresses(in: addresses)
+                    activityLookupFailed = false
+                } catch is CancellationError {
+                    return
+                } catch {
+                    activityLookupFailed = true
+                }
+            }
+        }
+    }
+
+    private func status(for address: String) -> AddressUsageStatus {
+        let locallyUsed = chain == .receive
+            ? walletStore.isReceiveAddressLocallyUsed(address, profileID: profileID)
+            : walletStore.isChangeAddressLocallyUsed(address, profileID: profileID)
+        if locallyUsed { return .used }
+        if activityLookupFailed { return .unavailable }
+        guard let historicallyActive else { return .checking }
+        return historicallyActive.contains(address.lowercased()) ? .used : .fresh
+    }
+}
+
+private struct AddressNavigationSelectionRow: View {
+    let chain: AddressChain
+    let index: Int
+    let address: String
+    let isSelected: Bool
+    let status: AddressUsageStatus
+    let select: () -> Void
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(chain.rawValue) Address #\(index + 1)")
+                        .foregroundStyle(.primary)
+                    Text(address)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                statusView
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(
+                        isSelected
+                            ? accentColor.opacity(0.78)
+                            : Color.primary.opacity(0.03),
+                        lineWidth: isSelected ? 2 : 1
+                    )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var statusView: some View {
+        switch status {
+        case .checking: ProgressView().controlSize(.mini)
+        case .fresh: Text("Fresh").foregroundStyle(.green)
+        case .used: Text("Used").foregroundStyle(.orange)
+        case .unavailable: Text("Unavailable").foregroundStyle(.secondary)
+        }
+    }
 }
 
 struct SharedQRCodeView: View {
