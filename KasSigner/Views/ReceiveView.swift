@@ -95,6 +95,8 @@ struct ReceiveView: View {
     @State private var addressWasManuallySelected = false
     @State private var addressChain: AddressChain = .receive
     @State private var showingChangeAddressWarning = false
+    @AppStorage("kassigner.receive.openToFreshAddress.v1")
+    private var opensToFreshAddress = true
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -247,27 +249,34 @@ struct ReceiveView: View {
                     in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                 )
 
-                Button {
-                    addressWasManuallySelected = true
-                    Task {
-                        await generateNextAddress()
-                    }
-                } label: {
-                    Label(
-                        isGeneratingAddress ? "Generating Address…" : "Generate New Address",
-                        systemImage: isGeneratingAddress
-                            ? "arrow.triangle.2.circlepath"
-                            : "plus.circle"
-                    )
-                        .font(.headline)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                        .foregroundStyle(.tint)
-                        .frame(minHeight: 44)
-                        .padding(.horizontal, 16)
+                if addressChain == .receive {
+                    Toggle("Open to Fresh Address", isOn: $opensToFreshAddress)
+                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
                 }
-                .buttonStyle(SubtlePressButtonStyle())
-                .disabled(isGeneratingAddress)
+
+                if needsMoreDerivedAddresses {
+                    Button {
+                        addressWasManuallySelected = true
+                        Task {
+                            await generateNextAddress()
+                        }
+                    } label: {
+                        Label(
+                            isGeneratingAddress ? "Generating Address…" : "Generate New Address",
+                            systemImage: isGeneratingAddress
+                                ? "arrow.triangle.2.circlepath"
+                                : "plus.circle"
+                        )
+                            .font(.headline)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .foregroundStyle(.tint)
+                            .frame(minHeight: 44)
+                            .padding(.horizontal, 16)
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .disabled(isGeneratingAddress)
+                }
 
             }
             .padding()
@@ -300,7 +309,7 @@ struct ReceiveView: View {
             await checkAddressUsage(currentAddress)
         }
         .task(id: oldestFreshAddressTaskID) {
-            guard addressChain == .receive else { return }
+            guard addressChain == .receive, opensToFreshAddress else { return }
             await selectOldestFreshAddress()
         }
         .onAppear {
@@ -311,8 +320,17 @@ struct ReceiveView: View {
             addressWasManuallySelected = false
             selectInitialAddress()
         }
+        .onChange(of: opensToFreshAddress) { _, _ in
+            guard addressChain == .receive else { return }
+            addressWasManuallySelected = false
+            selectInitialAddress()
+        }
         .onDisappear {
-            persistSelectedAddressIndex()
+            if addressChain != .receive
+                || !opensToFreshAddress
+                || addressWasManuallySelected {
+                persistSelectedAddressIndex()
+            }
         }
         .alert(
             "Unable to Generate Address",
@@ -355,6 +373,15 @@ struct ReceiveView: View {
         return currentAddresses[safeIndex]
     }
 
+    private var needsMoreDerivedAddresses: Bool {
+        guard !currentAddresses.isEmpty else { return true }
+        if addressChain == .receive {
+            return max(activeProfile.nextReceiveIndex, selectedAddressIndex) + 1
+                >= currentAddresses.count
+        }
+        return selectedAddressIndex + 1 >= currentAddresses.count
+    }
+
     private var twoLineAddress: String {
         guard !currentAddress.isEmpty else { return "" }
         let midpoint = currentAddress.index(
@@ -369,7 +396,7 @@ struct ReceiveView: View {
     }
 
     private var oldestFreshAddressTaskID: String {
-        "\(profile.id.uuidString):\(addressChain.rawValue):\(currentAddresses.count)"
+        "\(profile.id.uuidString):\(addressChain.rawValue):\(currentAddresses.count):\(opensToFreshAddress)"
     }
 
     @ViewBuilder
@@ -528,37 +555,47 @@ struct ReceiveView: View {
     }
 
     @MainActor
-    private func selectOldestFreshAddress() async {
+    private func selectOldestFreshAddress(forceRefresh: Bool = false) async {
         let addresses = activeProfile.receiveAddresses
         guard !addresses.isEmpty else { return }
 
-        for (index, address) in addresses.enumerated() {
+        if !forceRefresh,
+           let cachedIndex = activeProfile.earliestFreshReceiveIndex,
+           addresses.indices.contains(cachedIndex),
+           !walletStore.isReceiveAddressLocallyUsed(
+               addresses[cachedIndex],
+               profileID: profile.id
+           ) {
+            selectedAddressIndex = cachedIndex
+            addressUsageStatus = .fresh
+            return
+        }
+
+        do {
+            let historicallyActive = try await TransactionHistoryClient()
+                .activeAddresses(in: addresses)
+            try Task.checkCancellation()
             guard !addressWasManuallySelected else { return }
-            guard !walletStore.isReceiveAddressLocallyUsed(
-                address,
-                profileID: profile.id
-            ) else { continue }
 
-            do {
-                let status = try await AddressUsageChecker.shared.status(for: address)
-                try Task.checkCancellation()
+            guard let earliestFreshIndex = addresses.firstIndex(where: { address in
+                !historicallyActive.contains(address.lowercased())
+                    && !walletStore.isReceiveAddressLocallyUsed(
+                        address,
+                        profileID: profile.id
+                    )
+            }) else { return }
 
-                guard !addressWasManuallySelected else { return }
-                guard status == .fresh else { continue }
-
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    selectedAddressIndex = index
-                }
-                addressUsageStatus = .fresh
-                persistSelectedAddressIndex(addressCount: addresses.count)
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                // Without a result for an earlier address, a later address
-                // cannot be identified as the oldest fresh address safely.
-                return
-            }
+            selectedAddressIndex = earliestFreshIndex
+            addressUsageStatus = .fresh
+            var updatedProfile = activeProfile
+            updatedProfile.earliestFreshReceiveIndex = earliestFreshIndex
+            walletStore.update(updatedProfile)
+        } catch is CancellationError {
+            return
+        } catch {
+            // Keep the current address when complete historical activity
+            // cannot be verified; never guess that a later address is fresh.
+            return
         }
     }
 
@@ -593,6 +630,12 @@ struct ReceiveView: View {
             try Task.checkCancellation()
             guard address == currentAddress else { return }
             addressUsageStatus = status
+            if addressChain == .receive,
+               opensToFreshAddress,
+               status == .used,
+               activeProfile.earliestFreshReceiveIndex == selectedAddressIndex {
+                await selectOldestFreshAddress(forceRefresh: true)
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -610,13 +653,26 @@ struct ReceiveView: View {
 
         let preferredIndex: Int
         if addressChain == .receive {
-            preferredIndex = max(
-                activeProfile.nextReceiveIndex,
-                walletStore.lastViewedReceiveIndex(
+            if opensToFreshAddress {
+                if let cachedIndex = activeProfile.earliestFreshReceiveIndex,
+                   addresses.indices.contains(cachedIndex),
+                   !walletStore.isReceiveAddressLocallyUsed(
+                       addresses[cachedIndex],
+                       profileID: profile.id
+                   ) {
+                    preferredIndex = cachedIndex
+                } else {
+                    preferredIndex = walletStore.lastViewedReceiveIndex(
+                        for: profile.id,
+                        addressCount: addresses.count
+                    )
+                }
+            } else {
+                preferredIndex = walletStore.lastViewedReceiveIndex(
                     for: profile.id,
                     addressCount: addresses.count
                 )
-            )
+            }
         } else {
             preferredIndex = max(
                 activeProfile.nextChangeIndex,

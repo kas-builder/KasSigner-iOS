@@ -1165,6 +1165,10 @@ final class WalletSyncService: ObservableObject {
         )
         discovered.nextReceiveIndex = plan.nextReceiveIndex
         discovered.nextChangeIndex = plan.nextChangeIndex
+        let normalizedActive = Set(active.map { $0.lowercased() })
+        discovered.earliestFreshReceiveIndex = discovered.receiveAddresses.firstIndex {
+            !normalizedActive.contains($0.lowercased())
+        }
 
         if plan.reachedSafetyLimit {
             discoveryNotice = "Wallet activity reaches the 512-address discovery limit. The discovered range is usable, but a deeper scan is recommended."

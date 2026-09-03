@@ -10,6 +10,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var changeAddresses: [String]
     var nextReceiveIndex: Int
     var nextChangeIndex: Int
+    var earliestFreshReceiveIndex: Int?
     var requiresInitialDiscovery: Bool
 
     init(
@@ -22,6 +23,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         changeAddresses: [String] = [],
         nextReceiveIndex: Int = 0,
         nextChangeIndex: Int = 0,
+        earliestFreshReceiveIndex: Int? = nil,
         requiresInitialDiscovery: Bool = false
     ) {
         self.id = id
@@ -33,6 +35,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.changeAddresses = changeAddresses
         self.nextReceiveIndex = max(0, nextReceiveIndex)
         self.nextChangeIndex = max(0, nextChangeIndex)
+        self.earliestFreshReceiveIndex = earliestFreshReceiveIndex.map { max(0, $0) }
         self.requiresInitialDiscovery = requiresInitialDiscovery
     }
 
@@ -46,6 +49,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case changeAddresses
         case nextReceiveIndex
         case nextChangeIndex
+        case earliestFreshReceiveIndex
         case requiresInitialDiscovery
     }
 
@@ -66,6 +70,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
             0,
             try container.decodeIfPresent(Int.self, forKey: .nextChangeIndex) ?? 0
         )
+        earliestFreshReceiveIndex = try container.decodeIfPresent(
+            Int.self,
+            forKey: .earliestFreshReceiveIndex
+        ).map { max(0, $0) }
         requiresInitialDiscovery = try container.decodeIfPresent(
             Bool.self,
             forKey: .requiresInitialDiscovery
