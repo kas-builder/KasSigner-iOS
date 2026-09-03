@@ -311,12 +311,13 @@ struct AddWalletView: View {
                     return
                 }
 
-                walletStore.add(
+                walletStore.beginPendingImport(
                     WalletProfile(
                         name: cleanedName,
                         kpub: imported.kpub,
                         receiveAddresses: imported.receiveAddresses,
-                        changeAddresses: imported.changeAddresses
+                        changeAddresses: imported.changeAddresses,
+                        requiresInitialDiscovery: true
                     )
                 )
                 dismiss()

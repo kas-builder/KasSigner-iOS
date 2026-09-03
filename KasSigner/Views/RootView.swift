@@ -91,6 +91,7 @@ struct RootView: View {
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
+        .disabled(isInitialDiscoveryBlocking)
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
         .background {
             WalletTabContextMenu(
@@ -105,6 +106,26 @@ struct RootView: View {
         }
         .sheet(isPresented: $showingAddWallet) {
             AddWalletView()
+        }
+        .alert(
+            "Wallet Discovery Notice",
+            isPresented: Binding(
+                get: {
+                    syncService.discoveryNotice != nil
+                        && !isInitialDiscoveryBlocking
+                },
+                set: { isPresented in
+                    if !isPresented {
+                        syncService.clearDiscoveryNotice()
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                syncService.clearDiscoveryNotice()
+            }
+        } message: {
+            Text(syncService.discoveryNotice ?? "")
         }
         .overlay {
             GeometryReader { proxy in
@@ -131,6 +152,11 @@ struct RootView: View {
             }
             .allowsHitTesting(false)
         }
+        .overlay {
+            if isInitialDiscoveryBlocking {
+                initialDiscoveryOverlay
+            }
+        }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
         }
@@ -142,7 +168,8 @@ struct RootView: View {
         }
         .onChange(of: syncService.snapshot) { _, snapshot in
             guard let snapshot,
-                  let profile = walletStore.selectedProfile else { return }
+                  let profile = walletStore.selectedProfile,
+                  !profile.requiresInitialDiscovery else { return }
             Task {
                 await liveRPCService.configure(
                     profile: profile,
@@ -176,6 +203,77 @@ struct RootView: View {
             notificationRefreshTask = nil
             confirmationResolutionTask?.cancel()
             confirmationResolutionTask = nil
+        }
+    }
+
+    private var isInitialDiscoveryBlocking: Bool {
+        walletStore.selectedProfile?.requiresInitialDiscovery == true
+    }
+
+    @ViewBuilder
+    private var initialDiscoveryOverlay: some View {
+        ZStack {
+            Color(.systemBackground)
+                .opacity(0.96)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Image(systemName: "wallet.pass.fill")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+
+                if let progress = syncService.initialDiscoveryProgress {
+                    Text(progress.title)
+                        .font(.title3.weight(.semibold))
+                    ProgressView(value: progress.fraction)
+                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                        .frame(maxWidth: 300)
+                    Text(progress.detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                } else if let error = syncService.initialDiscoveryError {
+                    Text("Wallet discovery paused")
+                        .font(.title3.weight(.semibold))
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                    Button("Retry Discovery") {
+                        retryInitialDiscovery()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+
+                    Button("Cancel Import", role: .destructive) {
+                        syncService.reset()
+                        walletStore.discardPendingImport()
+                    }
+                } else {
+                    Text("Preparing wallet discovery…")
+                        .font(.title3.weight(.semibold))
+                    ProgressView()
+                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                }
+
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func retryInitialDiscovery() {
+        guard let profile = walletStore.selectedProfile else { return }
+        Task {
+            await syncService.refresh(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true
+            )
         }
     }
 
@@ -221,7 +319,7 @@ struct RootView: View {
             preferences: preferences,
             force: false,
             minimumInterval: 9,
-            includeTransactionHistory: false
+            includeTransactionHistory: true
         )
 
         guard !Task.isCancelled,

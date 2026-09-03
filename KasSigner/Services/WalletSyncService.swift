@@ -144,29 +144,20 @@ struct TransactionHistoryClient: Sendable {
 
         let addresses = Array(Set(profile.receiveAddresses + profile.changeAddresses)).sorted()
         guard !addresses.isEmpty else { return [] }
-        let activeAddresses = try await fetchActiveAddresses(addresses)
+        let activeAddresses = try await activeAddresses(in: addresses).sorted()
         guard !activeAddresses.isEmpty else { return [] }
 
         var indexedTransactions: [IndexedTransaction] = []
-        for batchStart in stride(from: 0, to: activeAddresses.count, by: 6) {
-            let batchEnd = min(batchStart + 6, activeAddresses.count)
-            let batch = activeAddresses[batchStart..<batchEnd]
-            let batchResults = try await withThrowingTaskGroup(
-                of: [IndexedTransaction].self
-            ) { group in
-                for address in batch {
-                    group.addTask {
-                        try await fetchTransactions(for: address)
-                    }
-                }
-
-                var results: [[IndexedTransaction]] = []
-                for try await result in group {
-                    results.append(result)
-                }
-                return results
+        for (index, address) in activeAddresses.enumerated() {
+            try Task.checkCancellation()
+            indexedTransactions.append(
+                contentsOf: try await fetchTransactions(for: address)
+            )
+            if index < activeAddresses.count - 1 {
+                // The public indexer is deliberately paced during a full
+                // wallet import to avoid a burst of per-address requests.
+                try await Task.sleep(for: .milliseconds(200))
             }
-            indexedTransactions.append(contentsOf: batchResults.flatMap { $0 })
         }
 
         return mapTransactions(
@@ -270,7 +261,7 @@ struct TransactionHistoryClient: Sendable {
         )
     }
 
-    private func fetchActiveAddresses(_ addresses: [String]) async throws -> [String] {
+    func activeAddresses(in addresses: [String]) async throws -> Set<String> {
         var active: [String] = []
         for start in stride(from: 0, to: addresses.count, by: 250) {
             let end = min(start + 250, addresses.count)
@@ -286,7 +277,7 @@ struct TransactionHistoryClient: Sendable {
             let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: data)
             active.append(contentsOf: entries.filter(\.active).map(\.address))
         }
-        return Array(Set(active)).sorted()
+        return Set(active.map { $0.lowercased() })
     }
 
     private func fetchTransactions(for address: String) async throws -> [IndexedTransaction] {
@@ -330,6 +321,7 @@ struct TransactionHistoryClient: Sendable {
                 break
             }
             before = next
+            try await Task.sleep(for: .milliseconds(100))
         }
         return transactions
     }
@@ -357,17 +349,29 @@ struct TransactionHistoryClient: Sendable {
     }
 
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        for attempt in 0..<3 {
-            let result = try await URLSession.shared.data(for: request)
+        var lastError: Error = TransactionHistoryError.invalidResponse
+        for attempt in 0..<6 {
+            let result: (Data, URLResponse)
+            do {
+                result = try await URLSession.shared.data(for: request)
+            } catch {
+                lastError = error
+                guard attempt < 5, isTransientTransportError(error) else {
+                    throw error
+                }
+                try await Task.sleep(for: .seconds(min(1 << attempt, 15)))
+                continue
+            }
 
             guard let response = result.1 as? HTTPURLResponse else {
                 throw TransactionHistoryError.invalidResponse
             }
 
-            if response.statusCode == 429 {
-                guard attempt < 2 else {
-                    throw TransactionHistoryError.rateLimited
-                }
+            if response.statusCode == 429 || (500..<600).contains(response.statusCode) {
+                lastError = response.statusCode == 429
+                    ? TransactionHistoryError.rateLimited
+                    : TransactionHistoryError.server(response.statusCode)
+                guard attempt < 5 else { throw lastError }
 
                 let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
                     .flatMap(TimeInterval.init)
@@ -381,7 +385,20 @@ struct TransactionHistoryClient: Sendable {
             return result
         }
 
-        throw TransactionHistoryError.rateLimited
+        throw lastError
+    }
+
+    private func isTransientTransportError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        return [
+            .timedOut,
+            .cannotFindHost,
+            .cannotConnectToHost,
+            .networkConnectionLost,
+            .dnsLookupFailed,
+            .notConnectedToInternet,
+            .resourceUnavailable
+        ].contains(urlError.code)
     }
 
     private func validate(_ response: URLResponse) throws {
@@ -548,6 +565,25 @@ final class WalletSnapshotCache {
 
 @MainActor
 final class WalletSyncService: ObservableObject {
+    struct DiscoveryPlan: Equatable {
+        let receiveCount: Int
+        let changeCount: Int
+        let nextReceiveIndex: Int
+        let nextChangeIndex: Int
+        let reachedSafetyLimit: Bool
+    }
+
+    struct DiscoveryProgress: Equatable {
+        let title: String
+        let detail: String
+        let fraction: Double
+    }
+
+    private struct InitialDiscoveryCheckpoint {
+        let profile: WalletProfile
+        let snapshot: WalletSyncPayload
+    }
+
     enum State: Equatable {
         case idle
         case syncing
@@ -572,6 +608,11 @@ final class WalletSyncService: ObservableObject {
     @Published private(set) var transactionHistoryError: String?
     @Published private(set) var transactionHistoryUpdatedAt: Date?
     @Published private(set) var virtualBlueScore: UInt64?
+    @Published private(set) var initialDiscoveryProgress: DiscoveryProgress?
+    @Published private(set) var initialDiscoveryError: String?
+    @Published private(set) var discoveryNotice: String?
+    private var initialDiscoveryStage = "Preparing wallet discovery"
+    private var initialDiscoveryCheckpoint: InitialDiscoveryCheckpoint?
 
     private var activeProfileID: UUID?
     private var activeProfileGeneration: UInt64 = 0
@@ -589,16 +630,26 @@ final class WalletSyncService: ObservableObject {
     func preload(profile: WalletProfile) {
         guard activeProfileID != profile.id else { return }
 
+        if initialDiscoveryCheckpoint?.profile.id != profile.id {
+            initialDiscoveryCheckpoint = nil
+        }
         activeProfileGeneration &+= 1
         activeProfileID = profile.id
         lastRefreshAttempt = nil
         transactionHistoryError = nil
         transactionHistoryUpdatedAt = nil
+        initialDiscoveryProgress = nil
+        initialDiscoveryError = nil
+        discoveryNotice = nil
         virtualBlueScore = nil
         lastVirtualBlueScoreAttempt = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
 
         snapshot = WalletSnapshotCache.shared.load(profileID: profile.id)
+    }
+
+    func clearDiscoveryNotice() {
+        discoveryNotice = nil
     }
 
     func refreshVirtualBlueScore(force: Bool = false) async {
@@ -675,24 +726,107 @@ final class WalletSyncService: ObservableObject {
         state = .syncing
 
         do {
-            let (result, discoveredProfile) = try await syncWithAddressDiscovery(
-                profile: walletStore.profiles.first(where: { $0.id == profile.id })
-                    ?? profile,
-                walletStore: walletStore,
-                engine: engine,
-                preferences: preferences
-            )
+            let beganWithInitialDiscovery = (
+                walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile
+            ).requiresInitialDiscovery
+            var profileToSync = walletStore.profiles.first(where: { $0.id == profile.id })
+                ?? profile
+
+            let resumableCheckpoint = initialDiscoveryCheckpoint.flatMap {
+                $0.profile.id == profile.id ? $0 : nil
+            }
+
+            if beganWithInitialDiscovery,
+               preferences.nodeMode == .automatic,
+               resumableCheckpoint == nil {
+                profileToSync = try await discoverImportedWallet(
+                    profile: profileToSync,
+                    engine: engine
+                )
+                guard activeProfileID == profile.id,
+                      activeProfileGeneration == profileGeneration else { return }
+            } else if beganWithInitialDiscovery {
+                discoveryNotice = "Historical address discovery was skipped because Custom Node mode does not contact public indexers. Current UTXOs were still synchronized from your selected node."
+                initialDiscoveryProgress = DiscoveryProgress(
+                    title: "Synchronizing wallet",
+                    detail: "Loading current UTXOs from your custom Kaspa node…",
+                    fraction: 0.42
+                )
+            }
+
+            let result: WalletSyncPayload
+            let discoveredProfile: WalletProfile
+            if let resumableCheckpoint {
+                result = resumableCheckpoint.snapshot
+                discoveredProfile = resumableCheckpoint.profile
+            } else {
+                let syncResult = try await syncWithAddressDiscovery(
+                    profile: profileToSync,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
+                )
+                result = syncResult.0
+                discoveredProfile = syncResult.1
+                if beganWithInitialDiscovery {
+                    initialDiscoveryCheckpoint = InitialDiscoveryCheckpoint(
+                        profile: discoveredProfile,
+                        snapshot: result
+                    )
+                }
+            }
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             if discoveredProfile != profile {
-                walletStore.update(discoveredProfile)
-                walletStore.setLastViewedReceiveIndex(
-                    discoveredProfile.nextReceiveIndex,
-                    for: discoveredProfile.id,
-                    addressCount: discoveredProfile.receiveAddresses.count
-                )
+                if !beganWithInitialDiscovery {
+                    walletStore.update(discoveredProfile)
+                    walletStore.setLastViewedReceiveIndex(
+                        discoveredProfile.nextReceiveIndex,
+                        for: discoveredProfile.id,
+                        addressCount: discoveredProfile.receiveAddresses.count
+                    )
+                }
             }
             snapshot = result
+
+            var completedProfile = discoveredProfile
+            if beganWithInitialDiscovery {
+                if preferences.nodeMode == .automatic {
+                    initialDiscoveryStage = "Loading transaction history"
+                    initialDiscoveryProgress = DiscoveryProgress(
+                        title: "Loading transaction history",
+                        detail: "Reconciling activity for the discovered addresses…",
+                        fraction: 0.86
+                    )
+                    let transactions = try await transactionHistoryClient.transactions(
+                        for: discoveredProfile
+                    )
+                    guard activeProfileID == profile.id,
+                          activeProfileGeneration == profileGeneration else { return }
+                    walletStore.mergeSyncedTransactions(
+                        transactions,
+                        profileID: profile.id
+                    )
+                    transactionHistoryUpdatedAt = Date()
+                } else {
+                    initialDiscoveryProgress = DiscoveryProgress(
+                        title: "Finishing wallet sync",
+                        detail: "Saving the addresses synchronized by your custom node…",
+                        fraction: 0.86
+                    )
+                }
+                completedProfile.requiresInitialDiscovery = false
+                if walletStore.pendingImportedProfile?.id == completedProfile.id {
+                    walletStore.commitPendingImport(completedProfile)
+                } else {
+                    walletStore.update(completedProfile)
+                }
+                initialDiscoveryProgress = DiscoveryProgress(
+                    title: "Wallet ready",
+                    detail: "Addresses, UTXOs, and history are synchronized.",
+                    fraction: 1
+                )
+            }
             do {
                 feeEstimate = try await engine.getFeeEstimate(
                     nodeConfiguration: preferences.nodeConfiguration
@@ -709,16 +843,27 @@ final class WalletSyncService: ObservableObject {
                 profileID: profile.id
             )
             state = .connected
-            if includeTransactionHistory {
+            if includeTransactionHistory && !beganWithInitialDiscovery {
                 await refreshTransactionHistory(
-                    profile: discoveredProfile,
+                    profile: completedProfile,
                     walletStore: walletStore
                 )
             }
+            initialDiscoveryProgress = nil
+            initialDiscoveryError = nil
+            initialDiscoveryCheckpoint = nil
         } catch {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             state = .failed(friendlyMessage(for: error, preferences: preferences))
+            if profile.requiresInitialDiscovery {
+                initialDiscoveryProgress = nil
+                initialDiscoveryError = discoveryMessage(
+                    for: error,
+                    stage: initialDiscoveryStage,
+                    preferences: preferences
+                )
+            }
         }
     }
 
@@ -957,6 +1102,130 @@ final class WalletSyncService: ObservableObject {
         "outgoing-reconciliation-\(profileID.uuidString.lowercased()).json"
     }
 
+    private func discoverImportedWallet(
+        profile: WalletProfile,
+        engine: KasSignerEngine
+    ) async throws -> WalletProfile {
+        let maximumAddressesPerChain = 512
+        let trailingGap = 20
+
+        initialDiscoveryError = nil
+        discoveryNotice = nil
+        initialDiscoveryCheckpoint = nil
+        initialDiscoveryStage = "Deriving wallet addresses"
+        initialDiscoveryProgress = DiscoveryProgress(
+            title: "Discovering wallet",
+            detail: "Deriving receive and change addresses…",
+            fraction: 0.12
+        )
+
+        let receiveNeeded = max(
+            0,
+            maximumAddressesPerChain - profile.receiveAddresses.count
+        )
+        let changeNeeded = max(
+            0,
+            maximumAddressesPerChain - profile.changeAddresses.count
+        )
+        let candidates = try await engine.extendAddresses(
+            for: profile,
+            receiveCount: receiveNeeded,
+            changeCount: changeNeeded
+        )
+        try Task.checkCancellation()
+
+        initialDiscoveryProgress = DiscoveryProgress(
+            title: "Scanning address history",
+            detail: "Checking historical activity across both address chains…",
+            fraction: 0.42
+        )
+        initialDiscoveryStage = "Scanning address history"
+        let allCandidates = candidates.receiveAddresses + candidates.changeAddresses
+        let active = try await transactionHistoryClient.activeAddresses(
+            in: allCandidates
+        )
+        try Task.checkCancellation()
+
+        let plan = Self.discoveryPlan(
+            receiveAddresses: candidates.receiveAddresses,
+            changeAddresses: candidates.changeAddresses,
+            activeAddresses: active,
+            currentNextReceiveIndex: profile.nextReceiveIndex,
+            currentNextChangeIndex: profile.nextChangeIndex,
+            trailingGap: trailingGap,
+            maximumAddressesPerChain: maximumAddressesPerChain
+        )
+
+        var discovered = profile
+        discovered.receiveAddresses = Array(
+            candidates.receiveAddresses.prefix(plan.receiveCount)
+        )
+        discovered.changeAddresses = Array(
+            candidates.changeAddresses.prefix(plan.changeCount)
+        )
+        discovered.nextReceiveIndex = plan.nextReceiveIndex
+        discovered.nextChangeIndex = plan.nextChangeIndex
+
+        if plan.reachedSafetyLimit {
+            discoveryNotice = "Wallet activity reaches the 512-address discovery limit. The discovered range is usable, but a deeper scan is recommended."
+        }
+
+        initialDiscoveryProgress = DiscoveryProgress(
+            title: "Synchronizing wallet",
+            detail: "Loading current UTXOs from the selected Kaspa node…",
+            fraction: 0.68
+        )
+        initialDiscoveryStage = "Synchronizing UTXOs"
+        return discovered
+    }
+
+    nonisolated static func discoveryPlan(
+        receiveAddresses: [String],
+        changeAddresses: [String],
+        activeAddresses: Set<String>,
+        currentNextReceiveIndex: Int,
+        currentNextChangeIndex: Int,
+        trailingGap: Int = 20,
+        maximumAddressesPerChain: Int = 512
+    ) -> DiscoveryPlan {
+        let normalizedActive = Set(activeAddresses.map { $0.lowercased() })
+        func highestActiveIndex(in addresses: [String]) -> Int? {
+            addresses.indices.last {
+                normalizedActive.contains(addresses[$0].lowercased())
+            }
+        }
+        func retainedCount(highestIndex: Int?, available: Int) -> Int {
+            min(
+                min(maximumAddressesPerChain, available),
+                max(min(20, available), (highestIndex ?? -1) + 1 + trailingGap)
+            )
+        }
+
+        let highestReceive = highestActiveIndex(in: receiveAddresses)
+        let highestChange = highestActiveIndex(in: changeAddresses)
+        let warningBoundary = maximumAddressesPerChain - trailingGap
+        return DiscoveryPlan(
+            receiveCount: retainedCount(
+                highestIndex: highestReceive,
+                available: receiveAddresses.count
+            ),
+            changeCount: retainedCount(
+                highestIndex: highestChange,
+                available: changeAddresses.count
+            ),
+            nextReceiveIndex: max(
+                currentNextReceiveIndex,
+                (highestReceive ?? -1) + 1
+            ),
+            nextChangeIndex: max(
+                currentNextChangeIndex,
+                (highestChange ?? -1) + 1
+            ),
+            reachedSafetyLimit: (highestReceive ?? -1) >= warningBoundary
+                || (highestChange ?? -1) >= warningBoundary
+        )
+    }
+
     private func syncWithAddressDiscovery(
         profile: WalletProfile,
         walletStore: WalletStore,
@@ -1042,12 +1311,14 @@ final class WalletSyncService: ObservableObject {
             )
             current.receiveAddresses = derived.receiveAddresses
             current.changeAddresses = derived.changeAddresses
-            walletStore.update(current)
-            walletStore.setLastViewedReceiveIndex(
-                current.nextReceiveIndex,
-                for: current.id,
-                addressCount: current.receiveAddresses.count
-            )
+            if !profile.requiresInitialDiscovery {
+                walletStore.update(current)
+                walletStore.setLastViewedReceiveIndex(
+                    current.nextReceiveIndex,
+                    for: current.id,
+                    addressCount: current.receiveAddresses.count
+                )
+            }
 
             await Task.yield()
         }
@@ -1065,6 +1336,9 @@ final class WalletSyncService: ObservableObject {
         feeEstimate = nil
         transactionHistoryError = nil
         transactionHistoryUpdatedAt = nil
+        initialDiscoveryProgress = nil
+        initialDiscoveryError = nil
+        discoveryNotice = nil
         transactionHistoryProfilesInFlight.removeAll()
         isRefreshingTransactionHistory = false
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
@@ -1088,5 +1362,22 @@ final class WalletSyncService: ObservableObject {
         }
 
         return "Unable to reach the Kaspa network. Check your internet connection and try again."
+    }
+
+    private func discoveryMessage(
+        for error: Error,
+        stage: String,
+        preferences: AppPreferences
+    ) -> String {
+        let detail: String
+        if let historyError = error as? TransactionHistoryError {
+            detail = historyError.localizedDescription
+        } else {
+            detail = friendlyMessage(for: error, preferences: preferences)
+        }
+#if DEBUG
+        print("Wallet discovery failed during \(stage): \(error.localizedDescription)")
+#endif
+        return "\(stage) failed. \(detail)"
     }
 }

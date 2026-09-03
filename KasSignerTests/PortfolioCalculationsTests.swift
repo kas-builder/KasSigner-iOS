@@ -1009,6 +1009,73 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 
+    func testDiscoveryRetainsTwentyAddressesAfterHighestHistoricalUse() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[65], change[31]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 86)
+        XCTAssertEqual(plan.changeCount, 52)
+        XCTAssertEqual(plan.nextReceiveIndex, 66)
+        XCTAssertEqual(plan.nextChangeIndex, 32)
+        XCTAssertFalse(plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryFindsActivityAfterAHistoryGap() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: [],
+            activeAddresses: [receive[2], receive[107]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 128)
+        XCTAssertEqual(plan.nextReceiveIndex, 108)
+    }
+
+    func testDiscoveryPreservesReservedIndicesAndReportsSafetyLimit() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[500]],
+            currentNextReceiveIndex: 507,
+            currentNextChangeIndex: 9
+        )
+
+        XCTAssertEqual(plan.receiveCount, 512)
+        XCTAssertEqual(plan.nextReceiveIndex, 507)
+        XCTAssertEqual(plan.nextChangeIndex, 9)
+        XCTAssertTrue(plan.reachedSafetyLimit)
+    }
+
+    func testLegacyWalletProfileDoesNotUnexpectedlyRequireDiscovery() throws {
+        let profile = WalletProfile(
+            name: "Legacy",
+            kpub: "kpub-test",
+            receiveAddresses: ["kaspa:receive"],
+            changeAddresses: ["kaspa:change"]
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(profile))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "requiresInitialDiscovery")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(WalletProfile.self, from: legacyData)
+
+        XCTAssertFalse(decoded.requiresInitialDiscovery)
+    }
+
     func testAcceptedHistoryWaitsForBlueScoreBeforeShowingConfirmed() {
         let profileID = UUID()
         let walletAddress = "kaspa:wallet"
@@ -1343,6 +1410,54 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
         XCTAssertTrue(relaunchedStore.sendSessions.isEmpty)
         XCTAssertEqual(relaunchedStore.profiles, [profile])
+    }
+
+    @MainActor
+    func testImportedWalletIsNotPersistedUntilDiscoveryCommits() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let completed = WalletProfile(name: "Completed", kpub: "kpub-completed")
+        let pending = WalletProfile(
+            name: "Pending",
+            kpub: "kpub-pending",
+            requiresInitialDiscovery: true
+        )
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        store.add(completed)
+        store.beginPendingImport(pending)
+
+        XCTAssertEqual(store.selectedProfile, pending)
+        XCTAssertEqual(store.profiles, [completed])
+
+        let relaunchedBeforeCommit = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedBeforeCommit.profiles, [completed])
+        XCTAssertEqual(relaunchedBeforeCommit.selectedProfile, completed)
+
+        var discovered = pending
+        discovered.requiresInitialDiscovery = false
+        store.commitPendingImport(discovered)
+
+        let relaunchedAfterCommit = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedAfterCommit.profiles, [completed, discovered])
+        XCTAssertEqual(relaunchedAfterCommit.selectedProfile, discovered)
     }
 
     private var utcCalendar: Calendar {

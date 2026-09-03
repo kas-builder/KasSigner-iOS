@@ -10,6 +10,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var changeAddresses: [String]
     var nextReceiveIndex: Int
     var nextChangeIndex: Int
+    var requiresInitialDiscovery: Bool
 
     init(
         id: UUID = UUID(),
@@ -20,7 +21,8 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         receiveAddresses: [String] = [],
         changeAddresses: [String] = [],
         nextReceiveIndex: Int = 0,
-        nextChangeIndex: Int = 0
+        nextChangeIndex: Int = 0,
+        requiresInitialDiscovery: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -31,6 +33,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.changeAddresses = changeAddresses
         self.nextReceiveIndex = max(0, nextReceiveIndex)
         self.nextChangeIndex = max(0, nextChangeIndex)
+        self.requiresInitialDiscovery = requiresInitialDiscovery
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -43,6 +46,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case changeAddresses
         case nextReceiveIndex
         case nextChangeIndex
+        case requiresInitialDiscovery
     }
 
     init(from decoder: Decoder) throws {
@@ -62,5 +66,9 @@ struct WalletProfile: Identifiable, Codable, Equatable {
             0,
             try container.decodeIfPresent(Int.self, forKey: .nextChangeIndex) ?? 0
         )
+        requiresInitialDiscovery = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresInitialDiscovery
+        ) ?? false
     }
 }

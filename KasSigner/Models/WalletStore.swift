@@ -376,9 +376,13 @@ final class WalletStore: ObservableObject {
     @Published var selectedProfileID: UUID? {
         didSet {
             guard !isLoading else { return }
+            guard selectedProfileID != pendingImportedProfile?.id else { return }
             save()
         }
     }
+
+    @Published private(set) var pendingImportedProfile: WalletProfile?
+    private var selectionBeforePendingImport: UUID?
 
     private let storageKey = "kassigner.walletProfiles.v1"
     private let transactionsStorageKey = "kassigner.walletTransactions.v1"
@@ -409,8 +413,33 @@ final class WalletStore: ObservableObject {
     }
 
     var selectedProfile: WalletProfile? {
+        if selectedProfileID == pendingImportedProfile?.id {
+            return pendingImportedProfile
+        }
         guard let selectedProfileID else { return profiles.first }
         return profiles.first(where: { $0.id == selectedProfileID }) ?? profiles.first
+    }
+
+    func beginPendingImport(_ profile: WalletProfile) {
+        selectionBeforePendingImport = selectedProfileID
+        pendingImportedProfile = profile
+        selectedProfileID = profile.id
+    }
+
+    func commitPendingImport(_ profile: WalletProfile) {
+        guard pendingImportedProfile?.id == profile.id else { return }
+        profiles.append(profile)
+        pendingImportedProfile = nil
+        selectionBeforePendingImport = nil
+        selectedProfileID = profile.id
+        save()
+    }
+
+    func discardPendingImport() {
+        guard pendingImportedProfile != nil else { return }
+        pendingImportedProfile = nil
+        selectedProfileID = selectionBeforePendingImport
+        selectionBeforePendingImport = nil
     }
 
     func add(_ profile: WalletProfile) {
@@ -768,12 +797,32 @@ final class WalletStore: ObservableObject {
             }
         }
 
-        profiles = persistentState.profiles
-        if let selectedID = persistentState.selectedProfileID,
+        let incompleteProfiles = persistentState.profiles.filter(\.requiresInitialDiscovery)
+        profiles = persistentState.profiles.filter { !$0.requiresInitialDiscovery }
+        let interruptedImport = incompleteProfiles.first {
+            $0.id == persistentState.selectedProfileID
+        }
+        if let interruptedImport {
+            // Imports from builds that persisted discovery too early are made
+            // transient. A later relaunch falls back to the last completed wallet.
+            pendingImportedProfile = interruptedImport
+            selectionBeforePendingImport = profiles.first?.id
+            selectedProfileID = interruptedImport.id
+            persistentState.profiles = profiles
+            persistentState.selectedProfileID = selectionBeforePendingImport
+            _ = protectedStorage.save(
+                persistentState,
+                fileName: "wallet-state.json"
+            )
+        } else if let selectedID = persistentState.selectedProfileID,
            profiles.contains(where: { $0.id == selectedID }) {
             selectedProfileID = selectedID
         } else {
             selectedProfileID = profiles.first?.id
+        }
+
+        for incompleteProfile in incompleteProfiles {
+            transactionCache.remove(profileID: incompleteProfile.id)
         }
 
         let legacyTransactions: [WalletTransaction]
