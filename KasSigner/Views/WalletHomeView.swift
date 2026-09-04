@@ -35,7 +35,7 @@ struct WalletHomeView: View {
                     }
                 }
             }
-            .navigationTitle(walletStore.selectedProfile == nil ? "KasSigner" : "")
+            .navigationTitle(walletStore.selectedProfile == nil ? "KasSigner-iOS" : "")
             .navigationBarTitleDisplayMode(walletStore.selectedProfile == nil ? .large : .inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -77,13 +77,9 @@ struct WalletHomeView: View {
     private func walletContent(_ profile: WalletProfile) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 0) {
-                    Text("Kas")
-                        .foregroundStyle(.primary)
-                    Text("Signer")
-                        .foregroundStyle(.primary)
-                }
-                .font(.largeTitle.weight(.bold))
+                Text("KasSigner-iOS")
+                    .foregroundStyle(.primary)
+                    .font(.largeTitle.weight(.bold))
                     .offset(y: -12)
                     .padding(.bottom, -10)
 

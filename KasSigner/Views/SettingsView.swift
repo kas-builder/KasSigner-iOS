@@ -195,7 +195,7 @@ struct SettingsView: View {
                 }
 
                 Section("About") {
-                    LabeledContent("App", value: "KasSigner")
+                    LabeledContent("App", value: "KasSigner-iOS")
                     LabeledContent(
                         "Version",
                         value: Bundle.main.object(
