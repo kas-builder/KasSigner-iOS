@@ -249,7 +249,7 @@ final class PortfolioCalculationsTests: XCTestCase {
             destination: "kaspa:destination",
             amountSompi: 100_000_000,
             feeSompi: 1_000,
-            committedChangeIndex: 1
+            committedChangeIndices: [1]
         )
 
         XCTAssertTrue(
@@ -262,6 +262,152 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         if let index = store.profiles.firstIndex(where: { $0.id == profileID }) {
             store.remove(at: IndexSet(integer: index))
+        }
+    }
+
+    @MainActor
+    func testNonContiguousChangeAddressesAreAllMarkedUsedAndAdvanceCursor() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Multiple Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 1
+            )
+        )
+
+        let recorded = store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "e", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndices: [1, 3, 5]
+        )
+
+        XCTAssertTrue(recorded)
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[1], profileID: profileID))
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[3], profileID: profileID))
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[5], profileID: profileID))
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[2], profileID: profileID))
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[4], profileID: profileID))
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            6
+        )
+    }
+
+    @MainActor
+    func testInvalidChangeIndexRejectsBroadcastRecordWithoutPartialMarking() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<3).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Invalid Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 0
+            )
+        )
+
+        let recorded = store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "f", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndices: [0, 4]
+        )
+
+        XCTAssertFalse(recorded)
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[0], profileID: profileID))
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            0
+        )
+    }
+
+    func testAutoSplitPreservesExactTotalAndMinimumAcrossRepeatedRuns() throws {
+        let minimum: UInt64 = 66_900
+        let available: UInt64 = 42_000_000_000
+        let outputs = (0..<4).map {
+            PlannedChangeOutput(
+                addressIndex: $0,
+                address: "kaspa:change-\($0)",
+                amountSompi: 0
+            )
+        }
+
+        for _ in 0..<128 {
+            let split = try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: available,
+                selectedOutputs: outputs,
+                minimumOutputSompi: minimum
+            )
+
+            XCTAssertEqual(split.count, outputs.count)
+            XCTAssertTrue(split.allSatisfy { $0.amountSompi >= minimum })
+            XCTAssertEqual(
+                split.reduce(UInt64(0)) { $0 + $1.amountSompi },
+                available
+            )
+        }
+    }
+
+    func testAutoSplitRejectsDuplicateAddresses() {
+        let outputs = [
+            PlannedChangeOutput(
+                addressIndex: 0,
+                address: "kaspa:duplicate",
+                amountSompi: 0
+            ),
+            PlannedChangeOutput(
+                addressIndex: 1,
+                address: " KASPA:DUPLICATE ",
+                amountSompi: 0
+            )
+        ]
+
+        XCTAssertThrowsError(
+            try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: 1_000_000,
+                selectedOutputs: outputs,
+                minimumOutputSompi: 66_900
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChangeOutputPlanningError,
+                .duplicateAddress
+            )
+        }
+    }
+
+    func testAutoSplitRejectsInsufficientChangeWithoutOverflow() {
+        let outputs = (0..<4).map {
+            PlannedChangeOutput(
+                addressIndex: $0,
+                address: "kaspa:change-\($0)",
+                amountSompi: 0
+            )
+        }
+
+        XCTAssertThrowsError(
+            try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: 267_599,
+                selectedOutputs: outputs,
+                minimumOutputSompi: 66_900
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChangeOutputPlanningError,
+                .insufficientChange
+            )
         }
     }
 

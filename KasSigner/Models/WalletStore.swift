@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 final class ProtectedWalletStorage {
     static let shared = ProtectedWalletStorage()
@@ -259,12 +260,144 @@ enum SendSessionStage: String, Equatable {
     case signed
 }
 
+struct PlannedChangeOutput: Identifiable, Codable, Equatable, Hashable {
+    let addressIndex: Int
+    let address: String
+    var amountSompi: UInt64
+
+    var id: String {
+        address
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case addressIndex = "address_index"
+        case address
+        case amountSompi = "amount_sompi"
+    }
+}
+
+enum ChangeOutputPlanningError: LocalizedError, Equatable {
+    case noOutputs
+    case tooManyOutputs
+    case duplicateAddress
+    case invalidMinimumAmount
+    case insufficientChange
+    case secureRandomFailure(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .noOutputs:
+            return "Select at least one change address."
+        case .tooManyOutputs:
+            return "Select no more than four change addresses."
+        case .duplicateAddress:
+            return "Each change address may be selected only once."
+        case .invalidMinimumAmount:
+            return "The minimum change-output amount is invalid."
+        case .insufficientChange:
+            return "The available change cannot fund every selected output."
+        case .secureRandomFailure:
+            return "Secure change splitting is unavailable. Try again."
+        }
+    }
+}
+
+enum ChangeOutputPlanner {
+    static let maximumOutputCount = 4
+
+    static func autoSplit(
+        availableChangeSompi: UInt64,
+        selectedOutputs: [PlannedChangeOutput],
+        minimumOutputSompi: UInt64
+    ) throws -> [PlannedChangeOutput] {
+        guard !selectedOutputs.isEmpty else {
+            throw ChangeOutputPlanningError.noOutputs
+        }
+        guard selectedOutputs.count <= maximumOutputCount else {
+            throw ChangeOutputPlanningError.tooManyOutputs
+        }
+        guard minimumOutputSompi > 0 else {
+            throw ChangeOutputPlanningError.invalidMinimumAmount
+        }
+        guard Set(selectedOutputs.map(\.id)).count == selectedOutputs.count else {
+            throw ChangeOutputPlanningError.duplicateAddress
+        }
+
+        let reserved = minimumOutputSompi.multipliedReportingOverflow(
+            by: UInt64(selectedOutputs.count)
+        )
+        guard !reserved.overflow,
+              availableChangeSompi >= reserved.partialValue
+        else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        var remaining = availableChangeSompi - reserved.partialValue
+        var result = selectedOutputs
+
+        for index in result.indices.dropLast() {
+            let randomRange = remaining.addingReportingOverflow(1)
+            guard !randomRange.overflow else {
+                throw ChangeOutputPlanningError.insufficientChange
+            }
+            let share = try secureRandom(upperBound: randomRange.partialValue)
+            result[index].amountSompi = minimumOutputSompi + share
+            remaining -= share
+        }
+
+        guard let finalIndex = result.indices.last else {
+            throw ChangeOutputPlanningError.noOutputs
+        }
+        let finalAmount = minimumOutputSompi.addingReportingOverflow(remaining)
+        guard !finalAmount.overflow else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+        result[finalIndex].amountSompi = finalAmount.partialValue
+
+        let verifiedTotal = result.reduce(into: UInt64?.some(0)) { total, output in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(output.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+        guard verifiedTotal == availableChangeSompi else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        return result
+    }
+
+    private static func secureRandom(upperBound: UInt64) throws -> UInt64 {
+        guard upperBound > 0 else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        let rejectionThreshold = (0 &- upperBound) % upperBound
+        while true {
+            var value: UInt64 = 0
+            let status = withUnsafeMutableBytes(of: &value) { bytes in
+                SecRandomCopyBytes(
+                    kSecRandomDefault,
+                    bytes.count,
+                    bytes.baseAddress!
+                )
+            }
+            guard status == errSecSuccess else {
+                throw ChangeOutputPlanningError.secureRandomFailure(status)
+            }
+            if value >= rejectionThreshold {
+                return value % upperBound
+            }
+        }
+    }
+}
+
 struct SendSession: Identifiable, Equatable {
     let id: UUID
     let profileID: UUID
     var selectedUTXOs: [WalletUTXO]
-    var changeAddressIndex: Int
-    var changeAddress: String
+    var changeOutputs: [PlannedChangeOutput]
     var destination: String
     var amountText: String
     var sendMax: Bool
@@ -466,8 +599,13 @@ final class WalletStore: ObservableObject {
             id: UUID(),
             profileID: profileID,
             selectedUTXOs: selectedUTXOs,
-            changeAddressIndex: profile.nextChangeIndex,
-            changeAddress: profile.changeAddresses[profile.nextChangeIndex],
+            changeOutputs: [
+                PlannedChangeOutput(
+                    addressIndex: profile.nextChangeIndex,
+                    address: profile.changeAddresses[profile.nextChangeIndex],
+                    amountSompi: 0
+                )
+            ],
             destination: "",
             amountText: "",
             sendMax: false,
@@ -561,31 +699,44 @@ final class WalletStore: ObservableObject {
         )
     }
 
+    @discardableResult
     func recordBroadcastedTransaction(
         profileID: UUID,
         transactionID: String,
         destination: String,
         amountSompi: UInt64,
         feeSompi: UInt64,
-        committedChangeIndex: Int? = nil
-    ) {
+        committedChangeIndices: [Int] = []
+    ) -> Bool {
         let normalizedTransactionID = transactionID
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
 
-        guard !normalizedTransactionID.isEmpty else { return }
+        guard !normalizedTransactionID.isEmpty else { return false }
 
-        if let committedChangeIndex,
-           let profileIndex = profiles.firstIndex(where: { $0.id == profileID }) {
-            if profiles[profileIndex].changeAddresses.indices.contains(committedChangeIndex) {
+        if !committedChangeIndices.isEmpty {
+            guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+                  Set(committedChangeIndices).count == committedChangeIndices.count,
+                  committedChangeIndices.allSatisfy(
+                    profiles[profileIndex].changeAddresses.indices.contains
+                  )
+            else {
+                return false
+            }
+
+            for committedChangeIndex in committedChangeIndices {
                 markChangeAddressLocallyUsed(
                     profiles[profileIndex].changeAddresses[committedChangeIndex],
                     profileID: profileID
                 )
             }
+
+            guard let highestCommittedIndex = committedChangeIndices.max() else {
+                return false
+            }
             profiles[profileIndex].nextChangeIndex = max(
                 profiles[profileIndex].nextChangeIndex,
-                committedChangeIndex + 1
+                highestCommittedIndex + 1
             )
         }
         sendSessions.removeAll { $0.profileID == profileID }
@@ -638,6 +789,7 @@ final class WalletStore: ObservableObject {
         rebuildPublishedTransactions()
         transactionRevision &+= 1
         save()
+        return true
     }
 
     func recordObservedUTXOTransactions(

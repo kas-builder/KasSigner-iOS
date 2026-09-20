@@ -22,8 +22,7 @@ struct SendDestinationView: View {
     @State private var buildErrorMessage = ""
     @State private var isBuildingPSKB = false
     @State private var verifiedReview: VerifiedTransactionReview?
-    @State private var selectedChangeIndex = 0
-    @State private var selectedChangeAddress = ""
+    @State private var changeOutputs: [PlannedChangeOutput] = []
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
     @FocusState private var customFeeFieldFocused: Bool
@@ -185,6 +184,17 @@ struct SendDestinationView: View {
         return maximum.partialValue
     }
 
+    private var availableChangeSompi: UInt64? {
+        guard !sendMax,
+              let selectedTotalSompi,
+              let enteredAmountSompi,
+              let requestedFeeSompi
+        else { return sendMax ? 0 : nil }
+        let required = enteredAmountSompi.addingReportingOverflow(requestedFeeSompi)
+        guard !required.overflow, selectedTotalSompi >= required.partialValue else { return nil }
+        return selectedTotalSompi - required.partialValue
+    }
+
     private var feeLooksValid: Bool {
         guard selectedFee == .custom else { return true }
         guard let fee = customFeeSompi else { return false }
@@ -280,7 +290,7 @@ struct SendDestinationView: View {
         .onChange(of: destinationAddress) { _, _ in persistSendSession() }
         .onChange(of: amountText) { _, _ in persistSendSession() }
         .onChange(of: sendMax) { _, _ in persistSendSession() }
-        .onChange(of: selectedChangeIndex) { _, _ in persistSendSession() }
+        .onChange(of: changeOutputs) { _, _ in persistSendSession() }
         .onChange(of: syncService.feeEstimate) { _, _ in
             updateSendMaxAmount()
         }
@@ -295,8 +305,8 @@ struct SendDestinationView: View {
         .sheet(isPresented: $showingChangeAddressPicker) {
             ChangeAddressPickerView(
                 profileID: profile.id,
-                selectedIndex: $selectedChangeIndex,
-                selectedAddress: $selectedChangeAddress
+                availableChangeSompi: availableChangeSompi ?? 0,
+                selectedOutputs: $changeOutputs
             )
             .environmentObject(engine)
             .environmentObject(walletStore)
@@ -379,27 +389,50 @@ struct SendDestinationView: View {
                 throw SendVerificationError.walletStateChanged
             }
 
-            guard activeProfile.changeAddresses.indices.contains(selectedChangeIndex),
-                  activeProfile.changeAddresses[selectedChangeIndex]
-                    .caseInsensitiveCompare(selectedChangeAddress) == .orderedSame
-            else {
-                throw SendVerificationError.walletStateChanged
+            let plannedChangeOutputs = (sendMax || availableChangeSompi == 0)
+                ? []
+                : changeOutputs
+            if let availableChangeSompi, availableChangeSompi > 0 {
+                guard !plannedChangeOutputs.isEmpty else {
+                    throw ChangeOutputPlanningError.noOutputs
+                }
+                guard plannedChangeOutputs.count <= ChangeOutputPlanner.maximumOutputCount,
+                      Set(plannedChangeOutputs.map(\.id)).count == plannedChangeOutputs.count
+                else {
+                    throw ChangeOutputPlanningError.duplicateAddress
+                }
+                var plannedTotal: UInt64 = 0
+                for output in plannedChangeOutputs {
+                    guard activeProfile.changeAddresses.indices.contains(output.addressIndex),
+                          activeProfile.changeAddresses[output.addressIndex]
+                            .caseInsensitiveCompare(output.address) == .orderedSame,
+                          output.amountSompi > 0
+                    else {
+                        throw SendVerificationError.walletStateChanged
+                    }
+                    let addition = plannedTotal.addingReportingOverflow(output.amountSompi)
+                    guard !addition.overflow else { throw SendVerificationError.invalidFeeArithmetic }
+                    plannedTotal = addition.partialValue
+                }
+                guard plannedTotal == availableChangeSompi else {
+                    throw SendVerificationError.changeAmountMismatch
+                }
+            } else if !plannedChangeOutputs.isEmpty {
+                throw SendVerificationError.changeAmountMismatch
             }
-
-            var draftProfile = activeProfile
-            draftProfile.nextChangeIndex = selectedChangeIndex
 
             // Provisional runtime checkpoint only. Final fee selection will use
             // the exact verified transaction mass.
             let draft = try SendDraft(
-                profile: draftProfile,
+                profile: activeProfile,
                 selectedUTXOs: selectedUTXOs,
                 destination: destinationAddress,
                 amountSompi: amountSompi,
                 feeSompi: requestedFeeSompi,
                 feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
                 usesExactFee: selectedFee == .custom,
-                sendMax: sendMax
+                sendMax: sendMax,
+                changeOutputs: plannedChangeOutputs
             )
 
             let pskb = try await engine.buildUnsignedPSKB(
@@ -462,13 +495,6 @@ struct SendDestinationView: View {
                 ? builtDestinationAmount
                 : amountSompi
 
-            let ownedChangeAddresses = Set(
-                activeProfile.changeAddresses.map {
-                    $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                        .lowercased()
-                }
-            )
-
             for output in outputs {
                 guard let address = output.address?
                     .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
@@ -482,7 +508,9 @@ struct SendDestinationView: View {
                     address == normalizedDestination
                     && outputAmount == verifiedAmountSompi
 
-                let isWalletChange = ownedChangeAddresses.contains(address)
+                let isWalletChange = plannedChangeOutputs.contains {
+                    $0.id == address && $0.amountSompi == outputAmount
+                }
 
                 guard isDestination || isWalletChange else {
                     throw SendVerificationError.unknownOutput
@@ -517,25 +545,10 @@ struct SendDestinationView: View {
                 throw SendVerificationError.invalidFeeArithmetic
             }
             let verifiedChangeSompi = afterFee.partialValue
-            var verifiedChangeAddress: String?
-
-            if verifiedChangeSompi > 0 {
-                let expectedChangeAddress = selectedChangeAddress
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased()
-                let matchingChangeOutputs = outputs.filter {
-                    $0.address?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                        .lowercased() == expectedChangeAddress
-                        && $0.amountSompi == verifiedChangeSompi
-                }
-
-                guard matchingChangeOutputs.count == 1 else {
-                    throw SendVerificationError.changeAddressMismatch
-                }
-
-                verifiedChangeAddress = expectedChangeAddress
-            }
+            guard verifiedChangeSompi == plannedChangeOutputs.reduce(0, { $0 + $1.amountSompi }),
+                  outputs.count == 1 + plannedChangeOutputs.count,
+                  countedOutputsMatch(outputs, destination: normalizedDestination, amount: verifiedAmountSompi, changeOutputs: plannedChangeOutputs)
+            else { throw SendVerificationError.changeAddressMismatch }
 
             unsignedPSKB = pskb
             if var session = walletStore.sendSession(
@@ -547,8 +560,7 @@ struct SendDestinationView: View {
                 session.sendMax = sendMax
                 session.feeChoice = selectedFee.rawValue
                 session.customFeeText = customFeeText
-                session.changeAddressIndex = selectedChangeIndex
-                session.changeAddress = selectedChangeAddress
+                session.changeOutputs = plannedChangeOutputs
                 session.unsignedPSKB = pskb
                 session.verifiedDigest = SHA256.hash(
                     data: Data(pskb.utf8)
@@ -562,8 +574,7 @@ struct SendDestinationView: View {
                 amountSompi: verifiedAmountSompi,
                 feeSompi: reportedFee,
                 changeSompi: verifiedChangeSompi,
-                changeAddress: verifiedChangeAddress,
-                changeAddressIndex: selectedChangeIndex,
+                changeOutputs: plannedChangeOutputs,
                 selectedInputCount: builtInputs.count,
                 selectedOutpoints: draft.selectedInputs.map { $0.outpointKey },
                 unsignedPSKB: pskb,
@@ -598,8 +609,7 @@ struct SendDestinationView: View {
         sendMax = session.sendMax
         selectedFee = SendFeeChoice(rawValue: session.feeChoice) ?? .normal
         customFeeText = session.customFeeText
-        selectedChangeIndex = session.changeAddressIndex
-        selectedChangeAddress = session.changeAddress
+        changeOutputs = session.changeOutputs
         if !destinationAddress.isEmpty {
             validateDestinationAddress(destinationAddress)
         }
@@ -615,8 +625,7 @@ struct SendDestinationView: View {
         session.sendMax = sendMax
         session.feeChoice = selectedFee.rawValue
         session.customFeeText = customFeeText
-        session.changeAddressIndex = selectedChangeIndex
-        session.changeAddress = selectedChangeAddress
+        session.changeOutputs = changeOutputs
         walletStore.updateSendSession(session)
     }
 
@@ -638,10 +647,14 @@ struct SendDestinationView: View {
         } label: {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Change Address")
+                    Text(changeOutputs.count == 1 ? "Change Address" : "Change Addresses")
                         .font(.headline)
                         .foregroundStyle(.primary)
-                    Text(selectedChangeAddress.isEmpty ? "Select a fresh change address" : selectedChangeAddress)
+                    Text(changeOutputs.isEmpty
+                         ? "Select a fresh change address"
+                         : changeOutputs.count == 1
+                            ? changeOutputs[0].address
+                            : "\(changeOutputs.count) selected")
                         .font(.system(.caption, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -655,6 +668,29 @@ struct SendDestinationView: View {
             .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
+        .disabled(sendMax)
+    }
+
+    private func countedOutputsMatch(
+        _ outputs: [PSKTSummaryOutput],
+        destination: String,
+        amount: UInt64,
+        changeOutputs: [PlannedChangeOutput]
+    ) -> Bool {
+        var expected: [String: Int] = ["\(destination)|\(amount)": 1]
+        for output in changeOutputs {
+            expected["\(output.id)|\(output.amountSompi)", default: 0] += 1
+        }
+        var actual: [String: Int] = [:]
+        for output in outputs {
+            guard let address = output.address?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+                  let amount = output.amountSompi
+            else { return false }
+            actual["\(address)|\(amount)", default: 0] += 1
+        }
+        return actual == expected
     }
 
     private var destinationCard: some View {
@@ -1080,8 +1116,7 @@ private struct VerifiedTransactionReview: Identifiable, Hashable {
     let amountSompi: UInt64
     let feeSompi: UInt64
     let changeSompi: UInt64
-    let changeAddress: String?
-    let changeAddressIndex: Int
+    let changeOutputs: [PlannedChangeOutput]
     let selectedInputCount: Int
     let selectedOutpoints: [String]
     let unsignedPSKB: String
@@ -1270,12 +1305,8 @@ private struct VerifiedTransactionSummaryCards: View {
         VStack(spacing: 16) {
             transactionCard
             destinationCard
-            if let changeAddress = review.changeAddress {
-                addressCard(
-                    title: "Change Address",
-                    address: changeAddress,
-                    accessibilityLabel: "Copy change address"
-                )
+            ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
+                changeAddressCard(output, number: index + 1)
             }
             inputsCard
         }
@@ -1305,6 +1336,32 @@ private struct VerifiedTransactionSummaryCards: View {
             title: "Destination",
             address: review.destination,
             accessibilityLabel: "Copy destination"
+        )
+    }
+
+    private func changeAddressCard(
+        _ output: PlannedChangeOutput,
+        number: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(review.changeOutputs.count == 1 ? "Change" : "Change \(number)")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+                Text(formatKas(output.amountSompi))
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+            }
+            Text(output.address)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
         )
     }
 
@@ -1869,16 +1926,19 @@ private struct VerifiedSigningPreparationView: View {
             )
             .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
-            walletStore.recordBroadcastedTransaction(
+            let recorded = walletStore.recordBroadcastedTransaction(
                 profileID: review.profileID,
                 transactionID: transactionID,
                 destination: review.destination,
                 amountSompi: review.amountSompi,
                 feeSompi: review.feeSompi,
-                committedChangeIndex: review.changeSompi > 0
-                    ? review.changeAddressIndex
-                    : nil
+                committedChangeIndices: review.changeOutputs.map(\.addressIndex)
             )
+            guard recorded else {
+                scanErrorMessage =
+                    "The transaction was broadcast, but its local change-address state could not be updated. Refresh the wallet before sending again."
+                return
+            }
             broadcastTransactionID = transactionID
             showingBroadcastSuccess = true
 
@@ -2031,21 +2091,29 @@ private struct VerifiedSigningPreparationView: View {
             throw SendVerificationError.destinationMismatch
         }
 
-        if review.changeSompi > 0 {
-            guard let changeAddress = review.changeAddress else {
-                throw SendVerificationError.changeAddressMismatch
-            }
-            let normalizedChangeAddress = changeAddress.lowercased()
-            let changeMatches = outputs.filter {
-                $0.address?
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased() == normalizedChangeAddress
-                    && $0.amountSompi == review.changeSompi
-            }
-            guard changeMatches.count == 1 else {
-                throw SendVerificationError.changeAddressMismatch
-            }
-        } else if review.changeAddress != nil {
+        var expected: [String: Int] = ["\(destination)|\(review.amountSompi)": 1]
+        for output in review.changeOutputs {
+            expected["\(output.id)|\(output.amountSompi)", default: 0] += 1
+        }
+        var actual: [String: Int] = [:]
+        for output in outputs {
+            guard let address = output.address?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+                  let amount = output.amountSompi
+            else { throw SendVerificationError.invalidOutput }
+            actual["\(address)|\(amount)", default: 0] += 1
+        }
+        let amountAndChange = review.amountSompi.addingReportingOverflow(review.changeSompi)
+        let expectedInput = amountAndChange.partialValue.addingReportingOverflow(review.feeSompi)
+        guard !amountAndChange.overflow,
+              !expectedInput.overflow,
+              actual == expected,
+              outputs.count == 1 + review.changeOutputs.count,
+              summary.totalInputSompi == expectedInput.partialValue,
+              summary.totalOutputSompi == amountAndChange.partialValue,
+              summary.feeSompi == review.feeSompi
+        else {
             throw SendVerificationError.changeAddressMismatch
         }
     }
@@ -2281,6 +2349,7 @@ private enum SendVerificationError: LocalizedError {
     case customFeeMismatch
     case changeAddressUnavailable
     case changeAddressMismatch
+    case changeAmountMismatch
     case walletStateChanged
     case integrityCheckFailed
     case missingOriginalRelay
@@ -2308,7 +2377,9 @@ private enum SendVerificationError: LocalizedError {
         case .changeAddressUnavailable:
             return "No unused change address is available. Refresh the wallet and try again."
         case .changeAddressMismatch:
-            return "The transaction did not use the expected unused change address."
+            return "The transaction does not match the approved change outputs."
+        case .changeAmountMismatch:
+            return "Change amounts do not equal available change."
         case .walletStateChanged:
             return "The wallet address state changed. Return to the wallet and try again."
         case .integrityCheckFailed:
@@ -2324,10 +2395,13 @@ private struct ChangeAddressPickerView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var walletStore: WalletStore
     let profileID: UUID
-    @Binding var selectedIndex: Int
-    @Binding var selectedAddress: String
+    let availableChangeSompi: UInt64
+    @Binding var selectedOutputs: [PlannedChangeOutput]
+    @State private var draftOutputs: [PlannedChangeOutput] = []
     @State private var isGenerating = false
     @State private var generationError: String?
+    @State private var selectionError: String?
+    @State private var showingAllocation = false
 
     private var profile: WalletProfile? {
         walletStore.profiles.first { $0.id == profileID }
@@ -2337,55 +2411,89 @@ private struct ChangeAddressPickerView: View {
         NavigationStack {
             List {
                 if let profile {
-                    ForEach(Array(profile.changeAddresses.enumerated()), id: \.offset) { index, address in
-                        ChangeAddressSelectionRow(
-                            index: index,
-                            address: address,
-                            isSelected: index == selectedIndex,
-                            isLocallyUsed: walletStore.isChangeAddressLocallyUsed(
-                                address,
-                                profileID: profileID
-                            )
-                        ) {
-                            selectedIndex = index
-                            selectedAddress = address
-                            dismiss()
-                        }
-                        .listRowInsets(
-                            EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)
-                        )
-                        .listRowSeparator(.hidden)
-                        .listRowBackground(Color.clear)
-                    }
-
-                    Button {
-                        Task { await generateAddress(from: profile) }
-                    } label: {
-                        if isGenerating {
-                            ProgressView()
-                        } else {
-                            Label("Generate New Change Address", systemImage: "plus")
-                        }
-                    }
-                    .disabled(isGenerating)
+                    addressRows(profile)
+                    generateButton(profile)
                 }
             }
-            .navigationTitle("Change Address")
+            .navigationTitle("Change Addresses")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear { draftOutputs = selectedOutputs }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        showingAllocation = true
+                    }
+                    .disabled(draftOutputs.isEmpty)
+                }
             }
-            .alert("Address could not be generated", isPresented: Binding(
-                get: { generationError != nil },
-                set: { if !$0 { generationError = nil } }
+            .navigationDestination(isPresented: $showingAllocation) {
+                ChangeAllocationView(
+                    availableChangeSompi: availableChangeSompi,
+                    outputs: $draftOutputs
+                ) {
+                    selectedOutputs = draftOutputs
+                    dismiss()
+                }
+            }
+            .alert("Change addresses", isPresented: Binding(
+                get: { generationError != nil || selectionError != nil },
+                set: {
+                    if !$0 {
+                        generationError = nil
+                        selectionError = nil
+                    }
+                }
             )) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(generationError ?? "Unknown error")
+                Text(generationError ?? selectionError ?? "Unknown error")
             }
         }
+    }
+
+    @ViewBuilder
+    private func addressRows(_ profile: WalletProfile) -> some View {
+        ForEach(profile.changeAddresses.indices, id: \.self) { index in
+            let address = profile.changeAddresses[index]
+            ChangeAddressSelectionRow(
+                index: index,
+                address: address,
+                isSelected: draftOutputs.contains { $0.addressIndex == index },
+                isLocallyUsed: walletStore.isChangeAddressLocallyUsed(address, profileID: profileID)
+            ) {
+                toggle(index: index, address: address)
+            }
+            .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
+        }
+    }
+
+    private func generateButton(_ profile: WalletProfile) -> some View {
+        Button {
+            Task { await generateAddress(from: profile) }
+        } label: {
+            if isGenerating { ProgressView() }
+            else { Label("Generate New Change Address", systemImage: "plus") }
+        }
+        .disabled(isGenerating)
+    }
+
+    private func toggle(index: Int, address: String) {
+        if let selectedIndex = draftOutputs.firstIndex(where: { $0.addressIndex == index }) {
+            draftOutputs.remove(at: selectedIndex)
+            return
+        }
+        guard draftOutputs.count < ChangeOutputPlanner.maximumOutputCount else {
+            selectionError = "Select no more than four change addresses."
+            return
+        }
+        draftOutputs.append(
+            PlannedChangeOutput(addressIndex: index, address: address, amountSompi: 0)
+        )
     }
 
     private func generateAddress(from profile: WalletProfile) async {
@@ -2404,6 +2512,202 @@ private struct ChangeAddressPickerView: View {
         } catch {
             generationError = error.localizedDescription
         }
+    }
+}
+
+private struct ChangeAllocationView: View {
+    let availableChangeSompi: UInt64
+    @Binding var outputs: [PlannedChangeOutput]
+    let complete: () -> Void
+
+    @State private var allocationError: String?
+    private let minimumOutputSompi: UInt64 = 66_900
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(outputs.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 8) {
+                        outputTitle(outputs[index])
+                        TextField("0", text: amountBinding(at: index))
+                            .keyboardType(.decimalPad)
+                            .font(.body.monospacedDigit())
+                    }
+                    .padding(.vertical, 3)
+                }
+            }
+
+            Section {
+                valueRow("Available", value: formatKas(availableChangeSompi))
+                valueRow("Allocated", value: allocatedSompi.map(formatKas) ?? "Invalid")
+                valueRow(
+                    "Remaining",
+                    value: remainingText,
+                    valueColor: isValidAllocation ? .secondary : .red
+                )
+            }
+
+            Section {
+                Button("Auto Split") { autoSplit() }
+                    .disabled(availableChangeSompi == 0)
+                Button("Reset", role: .destructive) { resetAmounts() }
+            }
+        }
+        .navigationTitle("Allocation")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done", action: complete)
+                    .disabled(!canFinish)
+            }
+        }
+        .alert("Allocation", isPresented: Binding(
+            get: { allocationError != nil },
+            set: { if !$0 { allocationError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(allocationError ?? "Unknown error")
+        }
+    }
+
+    private func outputTitle(_ output: PlannedChangeOutput) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Change Address #\(output.addressIndex + 1)")
+                .foregroundStyle(.primary)
+            Text(output.address)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func valueRow(
+        _ title: String,
+        value: String,
+        valueColor: Color = .secondary
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value)
+                .font(.body.monospacedDigit())
+                .foregroundStyle(valueColor)
+        }
+    }
+
+    private var allocatedSompi: UInt64? {
+        outputs.reduce(into: UInt64?.some(0)) { total, output in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(output.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+    }
+
+    private var isValidAllocation: Bool {
+        guard availableChangeSompi > 0,
+              !outputs.isEmpty,
+              outputs.count <= ChangeOutputPlanner.maximumOutputCount,
+              let allocatedSompi,
+              allocatedSompi == availableChangeSompi
+        else { return false }
+        return outputs.allSatisfy { $0.amountSompi >= minimumOutputSompi }
+    }
+
+    private var canFinish: Bool {
+        if availableChangeSompi == 0 {
+            return !outputs.isEmpty
+                && outputs.count <= ChangeOutputPlanner.maximumOutputCount
+                && Set(outputs.map(\.id)).count == outputs.count
+        }
+        return isValidAllocation
+    }
+
+    private var remainingText: String {
+        guard let allocatedSompi else { return "Invalid" }
+        if allocatedSompi > availableChangeSompi {
+            return "−\(formatKas(allocatedSompi - availableChangeSompi))"
+        }
+        return formatKas(availableChangeSompi - allocatedSompi)
+    }
+
+    private func amountBinding(at index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                outputs[index].amountSompi == 0
+                    ? ""
+                    : formatPlainKas(outputs[index].amountSompi)
+            },
+            set: { text in
+                outputs[index].amountSompi = parseAmount(text) ?? 0
+                if index != outputs.indices.last {
+                    assignRemainderToLast()
+                }
+            }
+        )
+    }
+
+    private func assignRemainderToLast() {
+        guard let last = outputs.indices.last else { return }
+        let earlier = outputs.indices.dropLast().reduce(into: UInt64?.some(0)) { total, index in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(outputs[index].amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+        guard let earlier, earlier <= availableChangeSompi else {
+            outputs[last].amountSompi = 0
+            return
+        }
+        outputs[last].amountSompi = availableChangeSompi - earlier
+    }
+
+    private func resetAmounts() {
+        for index in outputs.indices {
+            outputs[index].amountSompi = 0
+        }
+    }
+
+    private func autoSplit() {
+        do {
+            outputs = try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: availableChangeSompi,
+                selectedOutputs: outputs,
+                minimumOutputSompi: minimumOutputSompi
+            )
+        } catch {
+            allocationError = error.localizedDescription
+        }
+    }
+
+    private func parseAmount(_ text: String) -> UInt64? {
+        let parts = text.trimmingCharacters(in: .whitespacesAndNewlines).split(
+            separator: ".", omittingEmptySubsequences: false
+        )
+        guard parts.count <= 2,
+              let whole = UInt64(parts.first.map(String.init) ?? "0")
+        else { return nil }
+        let fractionText = parts.count == 2 ? String(parts[1]) : ""
+        guard fractionText.count <= 8,
+              fractionText.allSatisfy(\.isNumber),
+              let fraction = UInt64(fractionText.padding(toLength: 8, withPad: "0", startingAt: 0))
+        else { return nil }
+        let scaled = whole.multipliedReportingOverflow(by: 100_000_000)
+        guard !scaled.overflow else { return nil }
+        let total = scaled.partialValue.addingReportingOverflow(fraction)
+        return total.overflow ? nil : total.partialValue
+    }
+
+    private func formatKas(_ sompi: UInt64) -> String {
+        "\(formatPlainKas(sompi)) KAS"
+    }
+
+    private func formatPlainKas(_ sompi: UInt64) -> String {
+        let whole = sompi / 100_000_000
+        let fractional = sompi % 100_000_000
+        guard fractional != 0 else { return String(whole) }
+        return "\(whole).\(String(format: "%08llu", fractional).replacingOccurrences(of: "0+$", with: "", options: .regularExpression))"
     }
 }
 

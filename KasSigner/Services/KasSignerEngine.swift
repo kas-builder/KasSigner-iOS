@@ -89,6 +89,7 @@ struct SendDraft {
     let feeRateSompiPerGram: Double
     let usesExactFee: Bool
     let sendMax: Bool
+    let changeOutputs: [PlannedChangeOutput]
     let selectedTotalSompi: UInt64
 
     init(
@@ -99,7 +100,8 @@ struct SendDraft {
         feeSompi: UInt64,
         feeRateSompiPerGram: Double,
         usesExactFee: Bool,
-        sendMax: Bool
+        sendMax: Bool,
+        changeOutputs: [PlannedChangeOutput] = []
     ) throws {
         let destination = destination.trimmingCharacters(
             in: .whitespacesAndNewlines
@@ -163,6 +165,7 @@ struct SendDraft {
         self.feeRateSompiPerGram = feeRateSompiPerGram
         self.usesExactFee = usesExactFee
         self.sendMax = sendMax
+        self.changeOutputs = changeOutputs
         self.selectedTotalSompi = selectedTotalSompi
     }
 }
@@ -586,6 +589,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
             throw EngineError.invalidResponse
         }
 
+        let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
+        guard let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8) else {
+            throw EngineError.invalidResponse
+        }
+
         let result = try await webView.callAsyncJavaScript(
             """
             try {
@@ -597,6 +605,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
                     feeRateSompiPerGram,
                     usesExactFee,
                     sendMax,
+                    changeOutputsJSON,
                     utxosJSON,
                     nodeConfig
                 );
@@ -616,6 +625,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
                 "feeRateSompiPerGram": draft.feeRateSompiPerGram,
                 "usesExactFee": draft.usesExactFee,
                 "sendMax": draft.sendMax,
+                "changeOutputsJSON": changeOutputsJSON,
                 "utxosJSON": utxosJSON,
                 "nodeConfig": nodeConfiguration
             ],

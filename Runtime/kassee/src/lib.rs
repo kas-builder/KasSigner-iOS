@@ -409,11 +409,15 @@ pub async fn create_send_pskb_with_utxos(
     exact_fee_sompi: u64,
     fee_rate_sompi_per_gram: f64,
     send_max: bool,
+    change_outputs_json: &str,
     utxos_json: &str,
     ws_url: &str,
 ) -> Result<String, JsValue> {
     let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
         .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let change_outputs: Vec<kspt::ExplicitChangeOutput> =
+        serde_json::from_str(change_outputs_json)
+            .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
     let utxos: Vec<rpc::UtxoEntry> = serde_json::from_str::<Vec<serde_json::Value>>(utxos_json)
         .map_err(|e| JsValue::from_str(&format!("Bad UTXOs JSON: {}", e)))?
         .iter()
@@ -445,6 +449,7 @@ pub async fn create_send_pskb_with_utxos(
         exact_fee_sompi,
         fee_rate_sompi_per_gram,
         send_max,
+        change_outputs,
         utxos,
         ws_url,
     )
