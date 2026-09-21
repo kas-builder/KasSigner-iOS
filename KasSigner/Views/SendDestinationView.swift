@@ -1423,6 +1423,7 @@ private struct VerifiedTransactionSummaryCards: View {
                     title: review.changeOutputs.count == 1
                         ? "Change"
                         : "Change \(index + 1)",
+                    amountSompi: output.amountSompi,
                     address: output.address,
                     accessibilityLabel: "Copy change address"
                 )
@@ -1453,6 +1454,7 @@ private struct VerifiedTransactionSummaryCards: View {
     private var destinationCard: some View {
         addressCard(
             title: "Destination",
+            amountSompi: review.amountSompi,
             address: review.destination,
             accessibilityLabel: "Copy destination"
         )
@@ -1460,12 +1462,21 @@ private struct VerifiedTransactionSummaryCards: View {
 
     private func addressCard(
         title: String,
+        amountSompi: UInt64,
         address: String,
         accessibilityLabel: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.title3.weight(.semibold))
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.title3.weight(.semibold))
+
+                Spacer()
+
+                Text(formatKas(amountSompi))
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .multilineTextAlignment(.trailing)
+            }
 
             Button {
                 PrivatePasteboard.copy(address)
