@@ -401,28 +401,11 @@ pub async fn create_send_pskb_selected(
 
 /// Create unsigned PSKB with explicit UTXO data (no re-fetch, no stale indices).
 /// utxos_json: JSON array of {tx_id, index, amount, script_public_key, block_daa_score} objects.
-#[wasm_bindgen]
-pub async fn create_send_pskb_with_utxos(
-    wallet_json: &str,
-    dest_address: &str,
-    amount_sompi: u64,
-    exact_fee_sompi: u64,
-    fee_rate_sompi_per_gram: f64,
-    send_max: bool,
-    change_outputs_json: &str,
-    utxos_json: &str,
-    ws_url: &str,
-) -> Result<String, JsValue> {
-    let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
-        .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
-    let change_outputs: Vec<kspt::ExplicitChangeOutput> =
-        serde_json::from_str(change_outputs_json)
-            .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
-    let utxos: Vec<rpc::UtxoEntry> = serde_json::from_str::<Vec<serde_json::Value>>(utxos_json)
+fn parse_explicit_utxos(utxos_json: &str) -> Result<Vec<rpc::UtxoEntry>, JsValue> {
+    Ok(serde_json::from_str::<Vec<serde_json::Value>>(utxos_json)
         .map_err(|e| JsValue::from_str(&format!("Bad UTXOs JSON: {}", e)))?
         .iter()
         .map(|v| {
-            // script_public_key can be a JSON array of bytes [0,32,...] or a hex string
             let spk_bytes = if let Some(arr) = v["script_public_key"].as_array() {
                 arr.iter()
                     .filter_map(|b| b.as_u64().map(|n| n as u8))
@@ -441,7 +424,54 @@ pub async fn create_send_pskb_with_utxos(
                 covenant_id: None,
             }
         })
-        .collect();
+        .collect())
+}
+
+#[wasm_bindgen]
+pub fn plan_send_change_outputs_with_utxos(
+    wallet_json: &str,
+    dest_address: &str,
+    amount_sompi: u64,
+    exact_fee_sompi: u64,
+    fee_rate_sompi_per_gram: f64,
+    change_outputs_json: &str,
+    utxos_json: &str,
+) -> Result<String, JsValue> {
+    let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let change_outputs: Vec<kspt::ExplicitChangeOutput> = serde_json::from_str(change_outputs_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
+    let utxos = parse_explicit_utxos(utxos_json)?;
+    let plan = kspt::plan_explicit_change_fee(
+        &wallet,
+        dest_address,
+        amount_sompi,
+        exact_fee_sompi,
+        fee_rate_sompi_per_gram,
+        change_outputs,
+        &utxos,
+    )
+    .map_err(|e| JsValue::from_str(&e))?;
+    serde_json::to_string(&plan)
+        .map_err(|e| JsValue::from_str(&format!("Could not encode fee plan: {}", e)))
+}
+
+#[wasm_bindgen]
+pub async fn create_send_pskb_with_utxos(
+    wallet_json: &str,
+    dest_address: &str,
+    amount_sompi: u64,
+    exact_fee_sompi: u64,
+    fee_rate_sompi_per_gram: f64,
+    send_max: bool,
+    change_outputs_json: &str,
+    utxos_json: &str,
+) -> Result<String, JsValue> {
+    let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let change_outputs: Vec<kspt::ExplicitChangeOutput> = serde_json::from_str(change_outputs_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
+    let utxos = parse_explicit_utxos(utxos_json)?;
     kspt::create_send_pskb_with_utxos(
         &wallet,
         dest_address,
@@ -451,7 +481,6 @@ pub async fn create_send_pskb_with_utxos(
         send_max,
         change_outputs,
         utxos,
-        ws_url,
     )
     .await
     .map_err(|e| JsValue::from_str(&e))

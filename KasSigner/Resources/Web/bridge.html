@@ -119,7 +119,7 @@
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
     const runtimeVersion = "db218007d8f955c5";
-    const transactionRuntimeVersion = "84a4f8f35bb0db8c";
+    const transactionRuntimeVersion = "8ae24f394ab5f465";
     const module = await import(
       `./pkg/kassee_web.js?runtime=${runtimeVersion}`
     );
@@ -468,7 +468,7 @@
         );
       },
 
-      async buildUnsignedPSKB(
+      buildUnsignedPSKB(
         wallet,
         destination,
         amountSompi,
@@ -477,24 +477,39 @@
         usesExactFee,
         sendMax,
         changeOutputsJSON,
-        utxosJSON,
-        nodeConfig
+        utxosJSON
       ) {
-        const result = await runWithNodeFailover(
-          nodeConfig,
-          async resolved => await transactionModule.create_send_pskb_with_utxos(
-            JSON.stringify(wallet),
-            String(destination),
-            BigInt(String(amountSompi)),
-            Boolean(usesExactFee) ? BigInt(String(feeSompi)) : 0n,
-            Number(feeRateSompiPerGram),
-            Boolean(sendMax),
-            String(changeOutputsJSON),
-            String(utxosJSON),
-            String(resolved.nodeURL)
-          )
+        return transactionModule.create_send_pskb_with_utxos(
+          JSON.stringify(wallet),
+          String(destination),
+          BigInt(String(amountSompi)),
+          Boolean(usesExactFee) ? BigInt(String(feeSompi)) : 0n,
+          Number(feeRateSompiPerGram),
+          Boolean(sendMax),
+          String(changeOutputsJSON),
+          String(utxosJSON)
         );
-        return result.value;
+      },
+
+      planChangeOutputs(
+        wallet,
+        destination,
+        amountSompi,
+        feeSompi,
+        feeRateSompiPerGram,
+        usesExactFee,
+        changeOutputsJSON,
+        utxosJSON
+      ) {
+        return transactionModule.plan_send_change_outputs_with_utxos(
+          JSON.stringify(wallet),
+          String(destination),
+          BigInt(String(amountSompi)),
+          Boolean(usesExactFee) ? BigInt(String(feeSompi)) : 0n,
+          Number(feeRateSompiPerGram),
+          String(changeOutputsJSON),
+          String(utxosJSON)
+        );
       },
 
       summarizePSKB(wireHex) {

@@ -14,7 +14,7 @@
 use crate::bip32::WalletData;
 use crate::rpc::UtxoEntry;
 use k256::elliptic_curve::sec1::ToEncodedPoint;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Blake2b-256 hash — unkeyed (matches firmware sighash::blake2b_hash for P2SH)
 pub fn blake2b_hash(data: &[u8]) -> [u8; 32] {
@@ -33,6 +33,13 @@ const STANDARD_OUTPUT_SIZE_PLUS_INPUT_SIZE_3X: u64 = (8 + 2 + 8 + 35 + 148) * 3;
 pub struct ExplicitChangeOutput {
     pub address: String,
     pub amount_sompi: u64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ExplicitChangeFeePlan {
+    pub fee_sompi: u64,
+    pub available_change_sompi: u64,
+    pub amounts_sompi: Vec<u64>,
 }
 
 fn validate_explicit_change_outputs(
@@ -137,6 +144,96 @@ fn fee_for_mass(compute_mass: u64, transaction_mass: u64, fee_rate: f64) -> Resu
     // Matches rusty-kaspa Generator::calc_fee_rate.
     let rate_fee = rate_fee_f64 as u64;
     Ok(minimum_relay_fee(compute_mass).max(rate_fee))
+}
+
+pub fn plan_explicit_change_fee(
+    wallet: &WalletData,
+    dest_address: &str,
+    amount_sompi: u64,
+    exact_fee_sompi: u64,
+    fee_rate_sompi_per_gram: f64,
+    mut change_outputs: Vec<ExplicitChangeOutput>,
+    selected: &[crate::rpc::UtxoEntry],
+) -> Result<ExplicitChangeFeePlan, String> {
+    if selected.is_empty() {
+        return Err("No UTXOs provided".into());
+    }
+    if change_outputs.is_empty() {
+        return Err("Select at least one change address".into());
+    }
+    if amount_sompi == 0 || is_dust(amount_sompi) {
+        return Err("The destination amount would be dust".into());
+    }
+
+    let dest_script = crate::address::address_to_script_pubkey(dest_address)?;
+    let (_, change_scripts) = validate_explicit_change_outputs(wallet, &change_outputs)?;
+    let selected_total = selected.iter().try_fold(0u64, |total, utxo| {
+        total
+            .checked_add(utxo.amount)
+            .ok_or_else(|| "Selected UTXO total overflow".to_string())
+    })?;
+    let fixed_change = change_outputs
+        .iter()
+        .take(change_outputs.len() - 1)
+        .try_fold(0u64, |total, output| {
+            total
+                .checked_add(output.amount_sompi)
+                .ok_or_else(|| "Change output total overflow".to_string())
+        })?;
+    let mut script_lengths = Vec::with_capacity(1 + change_scripts.len());
+    script_lengths.push(dest_script.len());
+    script_lengths.extend(change_scripts.iter().map(Vec::len));
+    let compute_mass = standard_compute_mass(selected.len(), &script_lengths)?;
+    let inputs: Vec<(u64, u64)> = selected.iter().map(|utxo| (utxo.amount, 1)).collect();
+
+    for _ in 0..64 {
+        let mut storage_outputs = Vec::with_capacity(1 + change_outputs.len());
+        storage_outputs.push((amount_sompi, 1));
+        storage_outputs.extend(change_outputs.iter().map(|output| (output.amount_sompi, 1)));
+        let mass = compute_mass.max(storage_mass_estimate(&inputs, &storage_outputs));
+        if mass > MAX_STANDARD_MASS {
+            return Err(format!(
+                "Transaction mass {} exceeds the standard limit {}",
+                mass, MAX_STANDARD_MASS
+            ));
+        }
+        let fee = if exact_fee_sompi > 0 {
+            let minimum_fee = minimum_relay_fee(compute_mass);
+            if exact_fee_sompi < minimum_fee {
+                return Err(format!(
+                    "Custom fee is below the minimum relay fee of {} sompi",
+                    minimum_fee
+                ));
+            }
+            exact_fee_sompi
+        } else {
+            fee_for_mass(compute_mass, mass, fee_rate_sompi_per_gram)?
+        };
+        let available_change = selected_total
+            .checked_sub(amount_sompi)
+            .and_then(|value| value.checked_sub(fee))
+            .ok_or_else(|| "Selected UTXOs cannot cover the amount and fee".to_string())?;
+        let final_amount = available_change.checked_sub(fixed_change).ok_or_else(|| {
+            "The earlier change amounts leave no value for the final output".to_string()
+        })?;
+        if final_amount == 0 || is_dust(final_amount) {
+            return Err("The final change output would be dust".into());
+        }
+        let last = change_outputs.len() - 1;
+        if change_outputs[last].amount_sompi == final_amount {
+            return Ok(ExplicitChangeFeePlan {
+                fee_sompi: fee,
+                available_change_sompi: available_change,
+                amounts_sompi: change_outputs
+                    .iter()
+                    .map(|output| output.amount_sompi)
+                    .collect(),
+            });
+        }
+        change_outputs[last].amount_sompi = final_amount;
+    }
+
+    Err("Change-output fee calculation did not converge".into())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1298,7 +1395,6 @@ pub async fn create_send_pskb_with_utxos(
     send_max: bool,
     change_outputs: Vec<ExplicitChangeOutput>,
     selected: Vec<crate::rpc::UtxoEntry>,
-    _ws_url: &str,
 ) -> Result<String, String> {
     let dest_script = crate::address::address_to_script_pubkey(dest_address)?;
 
@@ -2649,6 +2745,58 @@ mod standard_send_tests {
         ];
         assert!(validate_explicit_change_outputs(&wallet, &overflow)
             .unwrap_err().contains("overflow"));
+    }
+
+    #[test]
+    fn explicit_change_fee_plan_converges_and_preserves_the_output_total() {
+        let wallet = wallet_with_change_count(3);
+        let selected = vec![utxo(500_000_000, 0)];
+        let outputs: Vec<_> = wallet.change_addresses.iter().map(|address| {
+            ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: 100_000_000,
+            }
+        }).collect();
+
+        let plan = plan_explicit_change_fee(
+            &wallet,
+            &crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+            100_000_000,
+            0,
+            150.0,
+            outputs,
+            &selected,
+        ).unwrap();
+
+        assert_eq!(plan.amounts_sompi.len(), 3);
+        assert_eq!(plan.amounts_sompi[0], 100_000_000);
+        assert_eq!(plan.amounts_sompi[1], 100_000_000);
+        assert_eq!(plan.amounts_sompi.iter().sum::<u64>(), plan.available_change_sompi);
+        assert_eq!(100_000_000 + plan.available_change_sompi + plan.fee_sompi, 500_000_000);
+    }
+
+    #[test]
+    fn explicit_change_fee_plan_preserves_an_exact_custom_fee() {
+        let wallet = wallet_with_change_count(2);
+        let selected = vec![utxo(300_000_000, 0)];
+        let outputs = wallet.change_addresses.iter().map(|address| ExplicitChangeOutput {
+            address: address.clone(),
+            amount_sompi: 50_000_000,
+        }).collect();
+
+        let plan = plan_explicit_change_fee(
+            &wallet,
+            &crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+            100_000_000,
+            500_000,
+            0.0,
+            outputs,
+            &selected,
+        ).unwrap();
+
+        assert_eq!(plan.fee_sompi, 500_000);
+        assert_eq!(plan.available_change_sompi, 199_500_000);
+        assert_eq!(plan.amounts_sompi.iter().sum::<u64>(), 199_500_000);
     }
 
     #[test]

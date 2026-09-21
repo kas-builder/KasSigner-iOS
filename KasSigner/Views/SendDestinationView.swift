@@ -23,6 +23,7 @@ struct SendDestinationView: View {
     @State private var isBuildingPSKB = false
     @State private var verifiedReview: VerifiedTransactionReview?
     @State private var changeOutputs: [PlannedChangeOutput] = []
+    @State private var resolvedChangeFeeSompi: UInt64?
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
     @FocusState private var customFeeFieldFocused: Bool
@@ -135,7 +136,7 @@ struct SendDestinationView: View {
         parseKasTextToSompi(customFeeText)
     }
 
-    private var requestedFeeSompi: UInt64? {
+    private var provisionalFeeSompi: UInt64? {
         switch selectedFee {
         case .custom:
             guard let customFeeSompi, customFeeSompi > 0 else {
@@ -166,6 +167,10 @@ struct SendDestinationView: View {
             }
             return UInt64(selectedFee)
         }
+    }
+
+    private var requestedFeeSompi: UInt64? {
+        resolvedChangeFeeSompi ?? provisionalFeeSompi
     }
 
     private var maximumSendSompi: UInt64? {
@@ -280,18 +285,30 @@ struct SendDestinationView: View {
             addressValidationTask?.cancel()
         }
         .onChange(of: selectedFee) { _, _ in
+            resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
             persistSendSession()
         }
         .onChange(of: customFeeText) { _, _ in
+            resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
             persistSendSession()
         }
-        .onChange(of: destinationAddress) { _, _ in persistSendSession() }
-        .onChange(of: amountText) { _, _ in persistSendSession() }
-        .onChange(of: sendMax) { _, _ in persistSendSession() }
+        .onChange(of: destinationAddress) { _, _ in
+            resolvedChangeFeeSompi = nil
+            persistSendSession()
+        }
+        .onChange(of: amountText) { _, _ in
+            resolvedChangeFeeSompi = nil
+            persistSendSession()
+        }
+        .onChange(of: sendMax) { _, _ in
+            resolvedChangeFeeSompi = nil
+            persistSendSession()
+        }
         .onChange(of: changeOutputs) { _, _ in persistSendSession() }
         .onChange(of: syncService.feeEstimate) { _, _ in
+            resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
         }
         .sheet(isPresented: $showingScanner) {
@@ -306,7 +323,14 @@ struct SendDestinationView: View {
             ChangeAddressPickerView(
                 profileID: profile.id,
                 availableChangeSompi: availableChangeSompi ?? 0,
-                selectedOutputs: $changeOutputs
+                selectedOutputs: $changeOutputs,
+                resolvePlan: { outputs in
+                    try await resolveChangePlan(outputs)
+                },
+                completePlan: { outputs, plan in
+                    changeOutputs = outputs
+                    resolvedChangeFeeSompi = plan.feeSompi
+                }
             )
             .environmentObject(engine)
             .environmentObject(walletStore)
@@ -336,6 +360,42 @@ struct SendDestinationView: View {
                 }
             )
         }
+    }
+
+    @MainActor
+    private func resolveChangePlan(
+        _ outputs: [PlannedChangeOutput]
+    ) async throws -> (outputs: [PlannedChangeOutput], plan: ChangeFeePlan) {
+        guard let activeProfile = walletStore.profiles.first(
+            where: { $0.id == profile.id }
+        ) else {
+            throw SendVerificationError.walletStateChanged
+        }
+        guard let amountSompi = enteredAmountSompi,
+              let feeSompi = provisionalFeeSompi
+        else {
+            throw SendVerificationError.invalidFeeArithmetic
+        }
+        let draft = try SendDraft(
+            profile: activeProfile,
+            selectedUTXOs: selectedUTXOs,
+            destination: destinationAddress,
+            amountSompi: amountSompi,
+            feeSompi: feeSompi,
+            feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
+            usesExactFee: selectedFee == .custom,
+            sendMax: false,
+            changeOutputs: outputs
+        )
+        let plan = try await engine.planChangeOutputs(from: draft)
+        guard plan.amountsSompi.count == outputs.count else {
+            throw SendVerificationError.changeAmountMismatch
+        }
+        var resolvedOutputs = outputs
+        for index in resolvedOutputs.indices {
+            resolvedOutputs[index].amountSompi = plan.amountsSompi[index]
+        }
+        return (resolvedOutputs, plan)
     }
 
     @MainActor
@@ -393,6 +453,9 @@ struct SendDestinationView: View {
                 ? []
                 : changeOutputs
             if let availableChangeSompi, availableChangeSompi > 0 {
+                guard resolvedChangeFeeSompi != nil else {
+                    throw SendVerificationError.changeAmountMismatch
+                }
                 guard !plannedChangeOutputs.isEmpty else {
                     throw ChangeOutputPlanningError.noOutputs
                 }
@@ -435,10 +498,7 @@ struct SendDestinationView: View {
                 changeOutputs: plannedChangeOutputs
             )
 
-            let pskb = try await engine.buildUnsignedPSKB(
-                from: draft,
-                nodeConfiguration: preferences.nodeConfiguration
-            )
+            let pskb = try await engine.buildUnsignedPSKB(from: draft)
 
             let summary = try await engine.summarizePSKB(pskb)
 
@@ -1125,6 +1185,17 @@ private struct VerifiedTransactionReview: Identifiable, Hashable {
     let destinationVerified: Bool
     let changeVerified: Bool
     let feeVerified: Bool
+
+    static func == (
+        lhs: VerifiedTransactionReview,
+        rhs: VerifiedTransactionReview
+    ) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
 }
 
 private struct VerifiedTransactionReviewView: View {
@@ -2397,6 +2468,11 @@ private struct ChangeAddressPickerView: View {
     let profileID: UUID
     let availableChangeSompi: UInt64
     @Binding var selectedOutputs: [PlannedChangeOutput]
+    let resolvePlan: ([PlannedChangeOutput]) async throws -> (
+        outputs: [PlannedChangeOutput],
+        plan: ChangeFeePlan
+    )
+    let completePlan: ([PlannedChangeOutput], ChangeFeePlan) -> Void
     @State private var draftOutputs: [PlannedChangeOutput] = []
     @State private var isGenerating = false
     @State private var generationError: String?
@@ -2432,9 +2508,12 @@ private struct ChangeAddressPickerView: View {
             .navigationDestination(isPresented: $showingAllocation) {
                 ChangeAllocationView(
                     availableChangeSompi: availableChangeSompi,
-                    outputs: $draftOutputs
-                ) {
-                    selectedOutputs = draftOutputs
+                    outputs: $draftOutputs,
+                    resolvePlan: resolvePlan
+                ) { resolvedOutputs, plan in
+                    draftOutputs = resolvedOutputs
+                    selectedOutputs = resolvedOutputs
+                    completePlan(resolvedOutputs, plan)
                     dismiss()
                 }
             }
@@ -2516,12 +2595,33 @@ private struct ChangeAddressPickerView: View {
 }
 
 private struct ChangeAllocationView: View {
-    let availableChangeSompi: UInt64
     @Binding var outputs: [PlannedChangeOutput]
-    let complete: () -> Void
+    let resolvePlan: ([PlannedChangeOutput]) async throws -> (
+        outputs: [PlannedChangeOutput],
+        plan: ChangeFeePlan
+    )
+    let complete: ([PlannedChangeOutput], ChangeFeePlan) -> Void
 
+    @State private var availableChangeSompi: UInt64
+    @State private var resolvedFeeSompi: UInt64?
     @State private var allocationError: String?
+    @State private var isResolvingFee = false
     private let minimumOutputSompi: UInt64 = 66_900
+
+    init(
+        availableChangeSompi: UInt64,
+        outputs: Binding<[PlannedChangeOutput]>,
+        resolvePlan: @escaping ([PlannedChangeOutput]) async throws -> (
+            outputs: [PlannedChangeOutput],
+            plan: ChangeFeePlan
+        ),
+        complete: @escaping ([PlannedChangeOutput], ChangeFeePlan) -> Void
+    ) {
+        _availableChangeSompi = State(initialValue: availableChangeSompi)
+        _outputs = outputs
+        self.resolvePlan = resolvePlan
+        self.complete = complete
+    }
 
     var body: some View {
         List {
@@ -2539,6 +2639,9 @@ private struct ChangeAllocationView: View {
 
             Section {
                 valueRow("Available", value: formatKas(availableChangeSompi))
+                if let resolvedFeeSompi {
+                    valueRow("Fee", value: formatKas(resolvedFeeSompi))
+                }
                 valueRow("Allocated", value: allocatedSompi.map(formatKas) ?? "Invalid")
                 valueRow(
                     "Remaining",
@@ -2548,17 +2651,22 @@ private struct ChangeAllocationView: View {
             }
 
             Section {
-                Button("Auto Split") { autoSplit() }
-                    .disabled(availableChangeSompi == 0)
+                Button("Auto Split") {
+                    Task { await autoSplit() }
+                }
+                .disabled(availableChangeSompi == 0 || isResolvingFee)
                 Button("Reset", role: .destructive) { resetAmounts() }
+                    .disabled(isResolvingFee)
             }
         }
         .navigationTitle("Allocation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
-                Button("Done", action: complete)
-                    .disabled(!canFinish)
+                Button("Done") {
+                    Task { await finish() }
+                }
+                .disabled(!canFinish || isResolvingFee)
             }
         }
         .alert("Allocation", isPresented: Binding(
@@ -2664,18 +2772,43 @@ private struct ChangeAllocationView: View {
     }
 
     private func resetAmounts() {
+        resolvedFeeSompi = nil
         for index in outputs.indices {
             outputs[index].amountSompi = 0
         }
     }
 
-    private func autoSplit() {
+    @MainActor
+    private func autoSplit() async {
+        guard !isResolvingFee else { return }
+        isResolvingFee = true
+        defer { isResolvingFee = false }
         do {
-            outputs = try ChangeOutputPlanner.autoSplit(
+            let split = try ChangeOutputPlanner.autoSplit(
                 availableChangeSompi: availableChangeSompi,
                 selectedOutputs: outputs,
                 minimumOutputSompi: minimumOutputSompi
             )
+            let resolved = try await resolvePlan(split)
+            outputs = resolved.outputs
+            availableChangeSompi = resolved.plan.availableChangeSompi
+            resolvedFeeSompi = resolved.plan.feeSompi
+        } catch {
+            allocationError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func finish() async {
+        guard !isResolvingFee else { return }
+        isResolvingFee = true
+        defer { isResolvingFee = false }
+        do {
+            let resolved = try await resolvePlan(outputs)
+            outputs = resolved.outputs
+            availableChangeSompi = resolved.plan.availableChangeSompi
+            resolvedFeeSompi = resolved.plan.feeSompi
+            complete(resolved.outputs, resolved.plan)
         } catch {
             allocationError = error.localizedDescription
         }

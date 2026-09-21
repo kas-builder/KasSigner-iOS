@@ -28,6 +28,18 @@ struct FeeEstimate: Decodable, Equatable {
     }
 }
 
+struct ChangeFeePlan: Decodable, Equatable {
+    let feeSompi: UInt64
+    let availableChangeSompi: UInt64
+    let amountsSompi: [UInt64]
+
+    private enum CodingKeys: String, CodingKey {
+        case feeSompi = "fee_sompi"
+        case availableChangeSompi = "available_change_sompi"
+        case amountsSompi = "amounts_sompi"
+    }
+}
+
 struct SendDraftInput: Encodable, Hashable {
     let transactionID: String
     let index: UInt32
@@ -560,10 +572,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
     }
 
 
-    func buildUnsignedPSKB(
-        from draft: SendDraft,
-        nodeConfiguration: [String: Any]
-    ) async throws -> String {
+    func buildUnsignedPSKB(from draft: SendDraft) async throws -> String {
         try await ensureReady()
 
         let wallet: [String: Any] = [
@@ -606,8 +615,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
                     usesExactFee,
                     sendMax,
                     changeOutputsJSON,
-                    utxosJSON,
-                    nodeConfig
+                    utxosJSON
                 );
                 return { ok: true, value };
             } catch (error) {
@@ -626,8 +634,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
                 "usesExactFee": draft.usesExactFee,
                 "sendMax": draft.sendMax,
                 "changeOutputsJSON": changeOutputsJSON,
-                "utxosJSON": utxosJSON,
-                "nodeConfig": nodeConfiguration
+                "utxosJSON": utxosJSON
             ],
             in: nil,
             contentWorld: .page
@@ -663,6 +670,73 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
 
         return normalized.lowercased()
+    }
+
+    func planChangeOutputs(from draft: SendDraft) async throws -> ChangeFeePlan {
+        try await ensureReady()
+
+        let wallet: [String: Any] = [
+            "kpub": draft.profile.kpub,
+            "receive_addresses": draft.profile.receiveAddresses,
+            "change_addresses": draft.profile.changeAddresses,
+            "next_receive_index": draft.profile.nextReceiveIndex,
+            "next_change_index": draft.profile.nextChangeIndex
+        ]
+        let utxosData = try JSONEncoder().encode(draft.selectedInputs)
+        let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
+        guard let utxosJSON = String(data: utxosData, encoding: .utf8),
+              let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8)
+        else {
+            throw EngineError.invalidResponse
+        }
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.planChangeOutputs(
+                    wallet,
+                    destination,
+                    amountSompi,
+                    feeSompi,
+                    feeRateSompiPerGram,
+                    usesExactFee,
+                    changeOutputsJSON,
+                    utxosJSON
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "wallet": wallet,
+                "destination": draft.destination,
+                "amountSompi": String(draft.amountSompi),
+                "feeSompi": String(draft.feeSompi),
+                "feeRateSompiPerGram": draft.feeRateSompiPerGram,
+                "usesExactFee": draft.usesExactFee,
+                "changeOutputsJSON": changeOutputsJSON,
+                "utxosJSON": utxosJSON
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let response = result as? [String: Any],
+              let succeeded = response["ok"] as? Bool
+        else {
+            throw EngineError.invalidResponse
+        }
+        guard succeeded else {
+            throw EngineError.javascript(
+                response["error"] as? String ?? "The fee calculation failed."
+            )
+        }
+        guard let json = response["value"] as? String,
+              let data = json.data(using: .utf8)
+        else {
+            throw EngineError.invalidResponse
+        }
+        return try JSONDecoder().decode(ChangeFeePlan.self, from: data)
     }
 
 
