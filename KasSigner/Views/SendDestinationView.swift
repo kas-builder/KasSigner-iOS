@@ -1418,8 +1418,17 @@ private struct VerifiedTransactionSummaryCards: View {
         VStack(spacing: 16) {
             transactionCard
             destinationCard
-            ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
-                changeAddressCard(output, number: index + 1)
+            if review.changeOutputs.count == 1,
+               let output = review.changeOutputs.first {
+                addressCard(
+                    title: "Change",
+                    address: output.address,
+                    accessibilityLabel: "Copy change address"
+                )
+            } else {
+                ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
+                    changeAddressCard(output, number: index + 1)
+                }
             }
             inputsCard
         }
@@ -1458,7 +1467,7 @@ private struct VerifiedTransactionSummaryCards: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(review.changeOutputs.count == 1 ? "Change" : "Change \(number)")
+                Text("Change \(number)")
                     .font(.title3.weight(.semibold))
                 Spacer()
                 Text(formatKas(output.amountSompi))
