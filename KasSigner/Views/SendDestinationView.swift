@@ -1418,17 +1418,14 @@ private struct VerifiedTransactionSummaryCards: View {
         VStack(spacing: 16) {
             transactionCard
             destinationCard
-            if review.changeOutputs.count == 1,
-               let output = review.changeOutputs.first {
+            ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
                 addressCard(
-                    title: "Change",
+                    title: review.changeOutputs.count == 1
+                        ? "Change"
+                        : "Change \(index + 1)",
                     address: output.address,
                     accessibilityLabel: "Copy change address"
                 )
-            } else {
-                ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
-                    changeAddressCard(output, number: index + 1)
-                }
             }
             inputsCard
         }
@@ -1461,68 +1458,35 @@ private struct VerifiedTransactionSummaryCards: View {
         )
     }
 
-    private func changeAddressCard(
-        _ output: PlannedChangeOutput,
-        number: Int
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Change \(number)")
-                    .font(.title3.weight(.semibold))
-                Spacer()
-                Text(formatKas(output.amountSompi))
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-            }
-            Text(output.address)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .textSelection(.enabled)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
-        )
-    }
-
     private func addressCard(
         title: String,
         address: String,
         accessibilityLabel: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(title)
-                    .font(.title3.weight(.semibold))
+            Text(title)
+                .font(.title3.weight(.semibold))
 
-                Spacer()
-
-                Button {
-                    PrivatePasteboard.copy(address)
-                    copyFeedbackCenter.showCopied(address)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.subheadline.weight(.semibold))
-                }
-                .buttonStyle(SubtlePressButtonStyle())
-                .accessibilityLabel(accessibilityLabel)
+            Button {
+                PrivatePasteboard.copy(address)
+                copyFeedbackCenter.showCopied(address)
+            } label: {
+                Text(address)
+                    .font(.body.monospaced())
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(
+                        Color(.tertiarySystemGroupedBackground),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                    }
             }
-
-            Text(address)
-                .font(.body.monospaced())
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(12)
-                .background(
-                    Color(.tertiarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-                }
+            .buttonStyle(SubtlePressButtonStyle())
+            .accessibilityLabel(accessibilityLabel)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
