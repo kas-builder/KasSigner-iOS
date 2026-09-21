@@ -398,6 +398,7 @@ struct SendSession: Identifiable, Equatable {
     let profileID: UUID
     var selectedUTXOs: [WalletUTXO]
     var changeOutputs: [PlannedChangeOutput]
+    var usesManualChangeAllocation: Bool
     var destination: String
     var amountText: String
     var sendMax: Bool
@@ -606,6 +607,7 @@ final class WalletStore: ObservableObject {
                     amountSompi: 0
                 )
             ],
+            usesManualChangeAllocation: false,
             destination: "",
             amountText: "",
             sendMax: false,

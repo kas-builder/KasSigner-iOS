@@ -23,6 +23,7 @@ struct SendDestinationView: View {
     @State private var isBuildingPSKB = false
     @State private var verifiedReview: VerifiedTransactionReview?
     @State private var changeOutputs: [PlannedChangeOutput] = []
+    @State private var usesManualChangeAllocation = false
     @State private var resolvedChangeFeeSompi: UInt64?
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
@@ -329,6 +330,7 @@ struct SendDestinationView: View {
                 },
                 completePlan: { outputs, plan in
                     changeOutputs = outputs
+                    usesManualChangeAllocation = true
                     resolvedChangeFeeSompi = plan.feeSompi
                 }
             )
@@ -449,13 +451,25 @@ struct SendDestinationView: View {
                 throw SendVerificationError.walletStateChanged
             }
 
-            let plannedChangeOutputs = (sendMax || availableChangeSompi == 0)
-                ? []
-                : changeOutputs
-            if let availableChangeSompi, availableChangeSompi > 0 {
-                guard resolvedChangeFeeSompi != nil else {
-                    throw SendVerificationError.changeAmountMismatch
-                }
+            var transactionFeeSompi = requestedFeeSompi
+            var plannedChangeOutputs: [PlannedChangeOutput] = []
+            var plannedAvailableChangeSompi = availableChangeSompi
+
+            if usesManualChangeAllocation,
+               !sendMax,
+               let availableChangeSompi,
+               availableChangeSompi > 0 {
+                let resolved = try await resolveChangePlan(changeOutputs)
+                plannedChangeOutputs = resolved.outputs
+                plannedAvailableChangeSompi = resolved.plan.availableChangeSompi
+                transactionFeeSompi = resolved.plan.feeSompi
+                changeOutputs = resolved.outputs
+                resolvedChangeFeeSompi = resolved.plan.feeSompi
+            }
+
+            if usesManualChangeAllocation,
+               let plannedAvailableChangeSompi,
+               plannedAvailableChangeSompi > 0 {
                 guard !plannedChangeOutputs.isEmpty else {
                     throw ChangeOutputPlanningError.noOutputs
                 }
@@ -477,10 +491,10 @@ struct SendDestinationView: View {
                     guard !addition.overflow else { throw SendVerificationError.invalidFeeArithmetic }
                     plannedTotal = addition.partialValue
                 }
-                guard plannedTotal == availableChangeSompi else {
+                guard plannedTotal == plannedAvailableChangeSompi else {
                     throw SendVerificationError.changeAmountMismatch
                 }
-            } else if !plannedChangeOutputs.isEmpty {
+            } else if usesManualChangeAllocation && !plannedChangeOutputs.isEmpty {
                 throw SendVerificationError.changeAmountMismatch
             }
 
@@ -491,7 +505,7 @@ struct SendDestinationView: View {
                 selectedUTXOs: selectedUTXOs,
                 destination: destinationAddress,
                 amountSompi: amountSompi,
-                feeSompi: requestedFeeSompi,
+                feeSompi: transactionFeeSompi,
                 feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
                 usesExactFee: selectedFee == .custom,
                 sendMax: sendMax,
@@ -555,28 +569,6 @@ struct SendDestinationView: View {
                 ? builtDestinationAmount
                 : amountSompi
 
-            for output in outputs {
-                guard let address = output.address?
-                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                    .lowercased(),
-                      let outputAmount = output.amountSompi
-                else {
-                    throw SendVerificationError.invalidOutput
-                }
-
-                let isDestination =
-                    address == normalizedDestination
-                    && outputAmount == verifiedAmountSompi
-
-                let isWalletChange = plannedChangeOutputs.contains {
-                    $0.id == address && $0.amountSompi == outputAmount
-                }
-
-                guard isDestination || isWalletChange else {
-                    throw SendVerificationError.unknownOutput
-                }
-            }
-
             guard let totalInput = summary.totalInputSompi,
                   let totalOutput = summary.totalOutputSompi,
                   let reportedFee = summary.feeSompi,
@@ -587,7 +579,7 @@ struct SendDestinationView: View {
             }
 
             if selectedFee == .custom,
-               reportedFee != requestedFeeSompi {
+               reportedFee != transactionFeeSompi {
                 throw SendVerificationError.customFeeMismatch
             }
 
@@ -605,9 +597,54 @@ struct SendDestinationView: View {
                 throw SendVerificationError.invalidFeeArithmetic
             }
             let verifiedChangeSompi = afterFee.partialValue
-            guard verifiedChangeSompi == plannedChangeOutputs.reduce(0, { $0 + $1.amountSompi }),
-                  outputs.count == 1 + plannedChangeOutputs.count,
-                  countedOutputsMatch(outputs, destination: normalizedDestination, amount: verifiedAmountSompi, changeOutputs: plannedChangeOutputs)
+
+            let verifiedChangeOutputs: [PlannedChangeOutput]
+            if usesManualChangeAllocation {
+                verifiedChangeOutputs = plannedChangeOutputs
+            } else if verifiedChangeSompi > 0 {
+                guard activeProfile.changeAddresses.indices.contains(
+                    activeProfile.nextChangeIndex
+                ) else {
+                    throw SendVerificationError.changeAddressUnavailable
+                }
+                verifiedChangeOutputs = [
+                    PlannedChangeOutput(
+                        addressIndex: activeProfile.nextChangeIndex,
+                        address: activeProfile.changeAddresses[
+                            activeProfile.nextChangeIndex
+                        ],
+                        amountSompi: verifiedChangeSompi
+                    )
+                ]
+            } else {
+                verifiedChangeOutputs = []
+            }
+
+            for output in outputs {
+                guard let address = output.address?
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+                    .lowercased(),
+                      let outputAmount = output.amountSompi
+                else {
+                    throw SendVerificationError.invalidOutput
+                }
+
+                let isDestination =
+                    address == normalizedDestination
+                    && outputAmount == verifiedAmountSompi
+
+                let isWalletChange = verifiedChangeOutputs.contains {
+                    $0.id == address && $0.amountSompi == outputAmount
+                }
+
+                guard isDestination || isWalletChange else {
+                    throw SendVerificationError.unknownOutput
+                }
+            }
+
+            guard verifiedChangeSompi == verifiedChangeOutputs.reduce(0, { $0 + $1.amountSompi }),
+                  outputs.count == 1 + verifiedChangeOutputs.count,
+                  countedOutputsMatch(outputs, destination: normalizedDestination, amount: verifiedAmountSompi, changeOutputs: verifiedChangeOutputs)
             else { throw SendVerificationError.changeAddressMismatch }
 
             unsignedPSKB = pskb
@@ -620,7 +657,10 @@ struct SendDestinationView: View {
                 session.sendMax = sendMax
                 session.feeChoice = selectedFee.rawValue
                 session.customFeeText = customFeeText
-                session.changeOutputs = plannedChangeOutputs
+                session.changeOutputs = usesManualChangeAllocation
+                    ? verifiedChangeOutputs
+                    : changeOutputs
+                session.usesManualChangeAllocation = usesManualChangeAllocation
                 session.unsignedPSKB = pskb
                 session.verifiedDigest = SHA256.hash(
                     data: Data(pskb.utf8)
@@ -634,7 +674,7 @@ struct SendDestinationView: View {
                 amountSompi: verifiedAmountSompi,
                 feeSompi: reportedFee,
                 changeSompi: verifiedChangeSompi,
-                changeOutputs: plannedChangeOutputs,
+                changeOutputs: verifiedChangeOutputs,
                 selectedInputCount: builtInputs.count,
                 selectedOutpoints: draft.selectedInputs.map { $0.outpointKey },
                 unsignedPSKB: pskb,
@@ -670,6 +710,7 @@ struct SendDestinationView: View {
         selectedFee = SendFeeChoice(rawValue: session.feeChoice) ?? .normal
         customFeeText = session.customFeeText
         changeOutputs = session.changeOutputs
+        usesManualChangeAllocation = session.usesManualChangeAllocation
         if !destinationAddress.isEmpty {
             validateDestinationAddress(destinationAddress)
         }
@@ -686,6 +727,7 @@ struct SendDestinationView: View {
         session.feeChoice = selectedFee.rawValue
         session.customFeeText = customFeeText
         session.changeOutputs = changeOutputs
+        session.usesManualChangeAllocation = usesManualChangeAllocation
         walletStore.updateSendSession(session)
     }
 
