@@ -337,6 +337,7 @@ struct SendUTXOSelectionView: View {
                                 sendUTXOCard(utxo)
                             }
                         }
+                        .padding(.top, 2)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 20)
                     }
