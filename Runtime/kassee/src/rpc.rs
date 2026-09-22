@@ -42,6 +42,13 @@ pub struct UtxoEntry {
     /// Exposed so a continuation can bind to the thread's actual id.
     #[serde(default)]
     pub covenant_id: Option<String>,
+    /// Wallet branch resolved from the UTXO script ("receive" or "change").
+    /// This is public watch-only metadata; it never contains key material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation_chain: Option<String>,
+    /// Child index within `derivation_chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derivation_index: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -291,6 +298,8 @@ fn parse_utxo_payload(data: &[u8]) -> Result<Vec<UtxoEntry>, String> {
             script_public_key: spk_script,
             block_daa_score,
             covenant_id: covenant_id_hex,
+            derivation_chain: None,
+            derivation_index: None,
         });
     }
 
@@ -452,7 +461,42 @@ pub async fn fetch_all_utxos(ws_url: &str, wallet: &WalletData) -> Result<Vec<Ut
 
     let payload = build_get_utxos_payload(&all_addresses)?;
     let response = ws_rpc_call(ws_url, OP_GET_UTXOS_BY_ADDRESSES, &payload).await?;
-    parse_utxo_payload(&response)
+    let mut utxos = parse_utxo_payload(&response)?;
+    resolve_utxo_derivations(&mut utxos, wallet)?;
+    Ok(utxos)
+}
+
+/// Resolve each UTXO's script against the watch-only wallet address lists.
+/// A duplicate script at two derivation paths is rejected rather than guessed.
+fn resolve_utxo_derivations(
+    utxos: &mut [UtxoEntry],
+    wallet: &WalletData,
+) -> Result<(), String> {
+    let mut scripts = std::collections::HashMap::<Vec<u8>, (String, u32)>::new();
+
+    for (chain, addresses) in [
+        ("receive", &wallet.receive_addresses),
+        ("change", &wallet.change_addresses),
+    ] {
+        for (index, address) in addresses.iter().enumerate() {
+            let script = crate::address::address_to_script_pubkey(address)?;
+            if scripts
+                .insert(script, (chain.to_string(), index as u32))
+                .is_some()
+            {
+                return Err("A wallet script resolves to multiple derivation paths".into());
+            }
+        }
+    }
+
+    for utxo in utxos {
+        if let Some((chain, index)) = scripts.get(&utxo.script_public_key) {
+            utxo.derivation_chain = Some(chain.clone());
+            utxo.derivation_index = Some(*index);
+        }
+    }
+
+    Ok(())
 }
 
 /// Fetch UTXOs for a single address (used for multisig P2SH)

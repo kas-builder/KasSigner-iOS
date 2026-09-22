@@ -39,9 +39,31 @@ struct WalletUTXO: Codable, Equatable, Identifiable {
     let scriptPublicKey: [UInt8]
     let blockDAAScore: UInt64
     let covenantID: String?
+    let derivationChain: String?
+    let derivationIndex: UInt32?
 
     var id: String { "\(txID):\(index)" }
     var amountKas: Double { Double(amount) / 100_000_000 }
+
+    init(
+        txID: String,
+        index: UInt32,
+        amount: UInt64,
+        scriptPublicKey: [UInt8],
+        blockDAAScore: UInt64,
+        covenantID: String?,
+        derivationChain: String? = nil,
+        derivationIndex: UInt32? = nil
+    ) {
+        self.txID = txID
+        self.index = index
+        self.amount = amount
+        self.scriptPublicKey = scriptPublicKey
+        self.blockDAAScore = blockDAAScore
+        self.covenantID = covenantID
+        self.derivationChain = derivationChain
+        self.derivationIndex = derivationIndex
+    }
 
     enum CodingKeys: String, CodingKey {
         case txID = "tx_id"
@@ -50,6 +72,8 @@ struct WalletUTXO: Codable, Equatable, Identifiable {
         case scriptPublicKey = "script_public_key"
         case blockDAAScore = "block_daa_score"
         case covenantID = "covenant_id"
+        case derivationChain = "derivation_chain"
+        case derivationIndex = "derivation_index"
     }
 }
 

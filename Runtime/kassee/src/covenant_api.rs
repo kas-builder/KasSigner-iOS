@@ -1196,6 +1196,8 @@ pub async fn create_global_spending_limit_withdraw(
             block_daa_score: v["block_daa_score"].as_u64().unwrap_or(0),
             script_public_key: Vec::new(),
             covenant_id: None,
+            derivation_chain: None,
+            derivation_index: None,
         })
         .collect();
 
@@ -1544,6 +1546,8 @@ pub async fn create_global_allowance_withdraw(
             block_daa_score: v["block_daa_score"].as_u64().unwrap_or(0),
             script_public_key: Vec::new(),
             covenant_id: None,
+            derivation_chain: None,
+            derivation_index: None,
         })
         .collect();
 

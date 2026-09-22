@@ -119,7 +119,7 @@
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
     const runtimeVersion = "db218007d8f955c5";
-    const transactionRuntimeVersion = "8ae24f394ab5f465";
+    const transactionRuntimeVersion = "94dfec09f21dcde3";
     const module = await import(
       `./pkg/kassee_web.js?runtime=${runtimeVersion}`
     );
@@ -254,6 +254,38 @@
         funded_receive_indices: fundedIndices(receiveAddresses),
         funded_change_indices: fundedIndices(changeAddresses)
       };
+    }
+
+    function resolveUTXODerivations(wallet, utxos) {
+      const scripts = new Map();
+      const addChain = (chain, addresses) => {
+        for (const [index, address] of addresses.entries()) {
+          const key = scriptKey(scriptPublicKeyForAddress(address));
+          if (scripts.has(key)) {
+            throw new Error("A wallet script resolves to multiple derivation paths.");
+          }
+          scripts.set(key, { chain, index });
+        }
+      };
+
+      addChain(
+        "receive",
+        Array.isArray(wallet.receive_addresses) ? wallet.receive_addresses : []
+      );
+      addChain(
+        "change",
+        Array.isArray(wallet.change_addresses) ? wallet.change_addresses : []
+      );
+
+      return utxos.map(utxo => {
+        const resolved = scripts.get(scriptKey(utxo.script_public_key));
+        if (!resolved) return { ...utxo };
+        return {
+          ...utxo,
+          derivation_chain: resolved.chain,
+          derivation_index: resolved.index
+        };
+      });
     }
 
     function isAutomaticNode(config = {}) {
@@ -650,7 +682,7 @@
         );
         const resolved = syncResult.resolved;
         const { nodeURL, utxosJSON } = syncResult.value;
-        const utxos = JSON.parse(utxosJSON);
+        const utxos = resolveUTXODerivations(wallet, JSON.parse(utxosJSON));
         const balance = balanceFromUTXOs(wallet, utxos);
 
         const addresses = [

@@ -422,6 +422,8 @@ fn parse_explicit_utxos(utxos_json: &str) -> Result<Vec<rpc::UtxoEntry>, JsValue
                 script_public_key: spk_bytes,
                 block_daa_score: v["block_daa_score"].as_u64().unwrap_or(0),
                 covenant_id: None,
+                derivation_chain: v["derivation_chain"].as_str().map(str::to_owned),
+                derivation_index: v["derivation_index"].as_u64().map(|index| index as u32),
             }
         })
         .collect())

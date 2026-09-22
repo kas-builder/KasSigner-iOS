@@ -763,7 +763,6 @@ pub fn finalize_to_kspt_hex(wire_hex: &str) -> Result<String, String> {
     let obj = pskt
         .as_object()
         .ok_or_else(|| "PSKT not object".to_string())?;
-
     // ─── Global ───
     let global = obj
         .get("global")
@@ -812,6 +811,107 @@ pub fn finalize_to_kspt_hex(wire_hex: &str) -> Result<String, String> {
     }
 
     Ok(hex::encode(&buf))
+}
+
+/// Exact-path unsigned relay for standard P2PK sends. Other PSKB variants
+/// continue through the existing v3 partial-signature relay.
+fn relay_standard_send_v4(obj: &serde_json::Map<String, Value>) -> Result<String, String> {
+    let global = obj.get("global").ok_or("missing global")?;
+    let inputs = obj.get("inputs").and_then(Value::as_array).ok_or("missing inputs")?;
+    let outputs = obj.get("outputs").and_then(Value::as_array).ok_or("missing outputs")?;
+    if inputs.is_empty() || inputs.len() > 8 || outputs.is_empty() || outputs.len() > 8 {
+        return Err("KSPT v4 supports 1–8 inputs and 1–8 outputs".into());
+    }
+    let tx_version = u16::try_from(global.get("txVersion").and_then(Value::as_u64)
+        .ok_or("missing txVersion")?).map_err(|_| "invalid txVersion")?;
+    let payload = hex::decode(global.get("txPayload").and_then(Value::as_str).unwrap_or(""))
+        .map_err(|e| format!("bad payload: {e}"))?;
+    if payload.len() > 128 { return Err("KSPT v4 payload too long".into()); }
+    let subnet = hex::decode(global.get("subnetworkId").and_then(Value::as_str)
+        .unwrap_or("0000000000000000000000000000000000000000"))
+        .map_err(|e| format!("bad subnetwork: {e}"))?;
+    if subnet.len() != 20 { return Err("KSPT v4 subnetwork must be 20 bytes".into()); }
+    let mut buf = Vec::with_capacity(512);
+    buf.extend_from_slice(b"KSPT");
+    buf.push(0x04);
+    buf.push(0x00);
+    buf.extend_from_slice(&tx_version.to_le_bytes());
+    buf.push(inputs.len() as u8);
+    buf.push(outputs.len() as u8);
+    buf.extend_from_slice(&global.get("fallbackLockTime").and_then(Value::as_u64)
+        .unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(&subnet);
+    buf.extend_from_slice(&global.get("gas").and_then(Value::as_u64)
+        .unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+    buf.extend_from_slice(&payload);
+
+    for (position, input) in inputs.iter().enumerate() {
+        if input.get("redeemScript").is_some_and(|v| !v.is_null())
+            || input.get("partialSigs").and_then(Value::as_object)
+                .is_some_and(|sigs| !sigs.is_empty()) {
+            return Err(format!("input {position} is not an unsigned P2PK input"));
+        }
+        let utxo = input.get("utxoEntry").ok_or("missing utxoEntry")?;
+        let outpoint = input.get("previousOutpoint").ok_or("missing previousOutpoint")?;
+        let tx_id = hex::decode(outpoint.get("transactionId").and_then(Value::as_str)
+            .ok_or("missing transactionId")?).map_err(|e| format!("bad tx id: {e}"))?;
+        if tx_id.len() != 32 { return Err("transactionId must be 32 bytes".into()); }
+        let prev_index = u32::try_from(outpoint.get("index").and_then(Value::as_u64)
+            .ok_or("missing outpoint index")?).map_err(|_| "outpoint index overflow")?;
+        let (spk_version, spk) = parse_spk_hex(utxo.get("scriptPublicKey")
+            .and_then(Value::as_str).ok_or("missing input script")?)?;
+        if spk_version != 0 || spk.len() != 34 || spk[0] != 0x20 || spk[33] != 0xac {
+            return Err(format!("input {position} is not P2PK"));
+        }
+        let hint = encode_v4_derivation_hint(input, false)?;
+        buf.extend_from_slice(&tx_id);
+        buf.extend_from_slice(&prev_index.to_le_bytes());
+        buf.extend_from_slice(&utxo.get("amount").and_then(Value::as_u64)
+            .ok_or("missing input amount")?.to_le_bytes());
+        buf.extend_from_slice(&input.get("sequence").and_then(Value::as_u64)
+            .unwrap_or(0).to_le_bytes());
+        buf.push(u8::try_from(input.get("sigOpCount").and_then(Value::as_u64)
+            .unwrap_or(1)).map_err(|_| "sigOpCount overflow")?);
+        buf.extend_from_slice(&spk_version.to_le_bytes());
+        push_spk_len(&mut buf, spk.len());
+        buf.extend_from_slice(&spk);
+        buf.extend_from_slice(&hint.to_le_bytes());
+    }
+    for (position, output) in outputs.iter().enumerate() {
+        let (spk_version, spk) = parse_spk_hex(output.get("scriptPublicKey")
+            .and_then(Value::as_str).ok_or("missing output script")?)?;
+        let hint = encode_v4_derivation_hint(output, true)?;
+        if hint != 0xffff && (spk_version != 0 || spk.len() != 34
+            || spk[0] != 0x20 || spk[33] != 0xac) {
+            return Err(format!("change output {position} is not P2PK"));
+        }
+        if spk.len() > 64 { return Err("KSPT v4 output script too long".into()); }
+        buf.extend_from_slice(&output.get("amount").and_then(Value::as_u64)
+            .ok_or("missing output amount")?.to_le_bytes());
+        buf.extend_from_slice(&spk_version.to_le_bytes());
+        push_spk_len(&mut buf, spk.len());
+        buf.extend_from_slice(&spk);
+        buf.extend_from_slice(&hint.to_le_bytes());
+    }
+    Ok(hex::encode(buf))
+}
+
+fn encode_v4_derivation_hint(value: &Value, output: bool) -> Result<u16, String> {
+    let path = value.get("proprietaries")
+        .and_then(|p| p.get("kasSignerDerivation"));
+    let Some(path) = path else {
+        return if output { Ok(0xffff) } else { Err("input has no derivation path".into()) };
+    };
+    let chain = path.get("chain").and_then(Value::as_str).ok_or("missing derivation chain")?;
+    let index = path.get("index").and_then(Value::as_u64).ok_or("missing derivation index")?;
+    if index > 511 { return Err("derivation index exceeds M5 v4 range".into()); }
+    let chain_bit = match chain {
+        "receive" if !output => 0,
+        "change" => 0x8000,
+        _ => return Err("invalid v4 derivation chain".into()),
+    };
+    Ok(chain_bit | index as u16)
 }
 
 /// Encode one input in KSPT v2 signed layout. See the module header
@@ -1106,6 +1206,12 @@ pub fn relay_pskb_as_kspt_v2_hex(wire_hex: &str) -> Result<String, String> {
     let obj = pskt
         .as_object()
         .ok_or_else(|| "PSKT not object".to_string())?;
+    if obj.get("global")
+        .and_then(|g| g.get("proprietaries"))
+        .and_then(|p| p.get("kasSignerKSPTV4"))
+        .and_then(Value::as_bool) == Some(true) {
+        return relay_standard_send_v4(obj);
+    }
 
     // ─── Global ───
     let global = obj
@@ -4080,7 +4186,16 @@ pub fn verify_and_merge_signed_kspt_into_pskb(
     } else {
         parse_kspt_transaction(&signed_bytes)?
     };
-    let relay = parse_kspt_transaction(&relay_bytes)?;
+    let relay = if relay_bytes.get(4) == Some(&0x04) {
+        // Bind the untrusted QR relay back to the canonical PSKB before
+        // comparing the device's signed v1 transaction against it.
+        if relay_pskb_as_kspt_v2_hex(original_pskb_hex)? != original_relay_kspt_hex {
+            return Err("original KSPT v4 relay does not match the PSKB".into());
+        }
+        parse_kspt_v4_unsigned(&relay_bytes)?
+    } else {
+        parse_kspt_transaction(&relay_bytes)?
+    };
 
     if relay.flags & 0x01 != 0 {
         return Err("original relay KSPT is unexpectedly marked signed".into());
@@ -4269,6 +4384,70 @@ fn parse_kspt_transaction(data: &[u8]) -> Result<ParsedKsptTransaction, String> 
             trailer,
         },
         signatures,
+    })
+}
+
+fn parse_kspt_v4_unsigned(data: &[u8]) -> Result<ParsedKsptTransaction, String> {
+    let mut r = KsptReader::new(data);
+    if r.bytes(4)? != b"KSPT" || r.u8()? != 0x04 {
+        return Err("not an unsigned KSPT v4 relay".into());
+    }
+    let flags = r.u8()?;
+    if flags != 0 { return Err("unsupported KSPT v4 flags".into()); }
+    let tx_version = r.u16_le()?;
+    let input_count = r.u8()? as usize;
+    let output_count = r.u8()? as usize;
+    if input_count == 0 || input_count > 8 || output_count == 0 || output_count > 8 {
+        return Err("invalid KSPT v4 input/output count".into());
+    }
+    let locktime = r.u64_le()?;
+    let mut subnetwork_id = [0u8; 20];
+    subnetwork_id.copy_from_slice(r.bytes(20)?);
+    let gas = r.u64_le()?;
+    let payload_len = r.u16_le()? as usize;
+    if payload_len > 128 { return Err("KSPT v4 payload too long".into()); }
+    let payload = r.bytes(payload_len)?.to_vec();
+    let mut inputs = Vec::with_capacity(input_count);
+    for _ in 0..input_count {
+        let mut previous_transaction_id = [0u8; 32];
+        previous_transaction_id.copy_from_slice(r.bytes(32)?);
+        let previous_output_index = r.u32_le()?;
+        let amount = r.u64_le()?;
+        let sequence = r.u64_le()?;
+        let sig_op_count = r.u8()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+        let hint = r.u16_le()?;
+        if hint == 0xffff || hint & 0x7e00 != 0 {
+            return Err("invalid KSPT v4 input hint".into());
+        }
+        inputs.push(KsptInputIdentity {
+            previous_transaction_id, previous_output_index, amount, sequence,
+            sig_op_count, script_public_key_version, script_public_key,
+            redeem_script: Vec::new(),
+        });
+    }
+    let mut outputs = Vec::with_capacity(output_count);
+    for _ in 0..output_count {
+        let amount = r.u64_le()?;
+        let script_public_key_version = r.u16_le()?;
+        let script_public_key_length = read_kspt_length(&mut r)?;
+        let script_public_key = r.bytes(script_public_key_length)?.to_vec();
+        let hint = r.u16_le()?;
+        if hint != 0xffff && (hint & 0x7e00 != 0 || hint & 0x8000 == 0) {
+            return Err("invalid KSPT v4 output hint".into());
+        }
+        outputs.push(KsptOutputIdentity { amount, script_public_key_version, script_public_key });
+    }
+    if !r.remaining().is_empty() { return Err("unexpected KSPT v4 trailing bytes".into()); }
+    Ok(ParsedKsptTransaction {
+        flags,
+        identity: KsptTransactionIdentity {
+            wire_version: 0x04, tx_version, locktime, subnetwork_id, gas,
+            payload, inputs, outputs, trailer: Vec::new(),
+        },
+        signatures: vec![Vec::new(); input_count],
     })
 }
 
@@ -4948,6 +5127,69 @@ mod signed_return_tests {
         let relay = relay_pskb_as_kspt_v2_hex(&pskb).unwrap();
         let parsed = parse_kspt_transaction(&hex::decode(&relay).unwrap()).unwrap();
         (pskb, relay, parsed, secret)
+    }
+
+    fn v4_fixture() -> (String, String, ParsedKsptTransaction, Scalar) {
+        let (pskb, _, _, secret) = fixture();
+        let wire = hex::decode(pskb).unwrap();
+        let mut root: Value = serde_json::from_slice(&hex::decode(&wire[4..]).unwrap()).unwrap();
+        let transaction = &mut root.as_array_mut().unwrap()[0];
+        transaction["global"]["proprietaries"] =
+            serde_json::json!({ "kasSignerKSPTV4": true });
+        transaction["inputs"][0]["proprietaries"] = serde_json::json!({
+            "kasSignerDerivation": { "chain": "change", "index": 511 }
+        });
+        transaction["outputs"][0]["proprietaries"] = serde_json::json!({
+            "kasSignerDerivation": { "chain": "change", "index": 100 }
+        });
+        let json = serde_json::to_vec(&root).unwrap();
+        let mut v4_wire = b"PSKB".to_vec();
+        v4_wire.extend_from_slice(hex::encode(json).as_bytes());
+        let pskb = hex::encode(v4_wire);
+        let relay = relay_pskb_as_kspt_v2_hex(&pskb).unwrap();
+        let parsed = parse_kspt_v4_unsigned(&hex::decode(&relay).unwrap()).unwrap();
+        (pskb, relay, parsed, secret)
+    }
+
+    #[test]
+    fn v4_relay_carries_exact_paths_and_accepts_verified_v1_return() {
+        let (pskb, relay, parsed, secret) = v4_fixture();
+        let bytes = hex::decode(&relay).unwrap();
+        assert_eq!(&bytes[..6], b"KSPT\x04\x00");
+        let mut reader = KsptReader::new(&bytes);
+        reader.bytes(4 + 1 + 1 + 2 + 1 + 1 + 8 + 20 + 8).unwrap();
+        let payload_len = reader.u16_le().unwrap() as usize;
+        reader.bytes(payload_len).unwrap();
+        reader.bytes(32 + 4 + 8 + 8 + 1 + 2).unwrap();
+        let input_spk_len = read_kspt_length(&mut reader).unwrap();
+        reader.bytes(input_spk_len).unwrap();
+        assert_eq!(reader.u16_le().unwrap(), 0x8000 | 511);
+        reader.bytes(8 + 2).unwrap();
+        let output_spk_len = read_kspt_length(&mut reader).unwrap();
+        reader.bytes(output_spk_len).unwrap();
+        assert_eq!(reader.u16_le().unwrap(), 0x8000 | 100);
+        assert!(reader.remaining().is_empty());
+
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let signed = serialize_signed_v1(&parsed.identity, &signatures);
+        let merged = verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).unwrap();
+        assert_ne!(merged, pskb);
+    }
+
+    #[test]
+    fn v4_return_or_original_relay_mutation_is_rejected() {
+        let (pskb, relay, parsed, secret) = v4_fixture();
+        let signatures = sign_transaction(&parsed, &secret, 0x01);
+        let mut changed = parsed.identity.clone();
+        changed.outputs[0].amount += 1;
+        let signed = serialize_signed_v1(&changed, &signatures);
+        assert!(verify_and_merge_signed_kspt_into_pskb(&signed, &relay, &pskb).is_err());
+        let signed = serialize_signed_v1(&parsed.identity, &signatures);
+        let mut relay_bytes = hex::decode(&relay).unwrap();
+        *relay_bytes.last_mut().unwrap() ^= 1;
+        let tampered_relay = hex::encode(relay_bytes);
+        assert!(verify_and_merge_signed_kspt_into_pskb(&signed, &tampered_relay, &pskb)
+            .unwrap_err().contains("does not match the PSKB"));
     }
 
     fn sign_transaction(

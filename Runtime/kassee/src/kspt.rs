@@ -1401,6 +1401,7 @@ pub async fn create_send_pskb_with_utxos(
     if selected.is_empty() {
         return Err("No UTXOs provided".into());
     }
+    validate_input_derivations(wallet, &selected)?;
 
     let (explicit_change_total, explicit_change_scripts) =
         validate_explicit_change_outputs(wallet, &change_outputs)?;
@@ -1507,7 +1508,49 @@ pub async fn create_send_pskb_with_utxos(
         }
     }
 
-    serialize_pskb_single_sig(&selected, &outputs)
+    serialize_pskb_single_sig_v4(&selected, &outputs, wallet)
+}
+
+fn validate_input_derivations(
+    wallet: &WalletData,
+    inputs: &[crate::rpc::UtxoEntry],
+) -> Result<(), String> {
+    for (position, input) in inputs.iter().enumerate() {
+        let (chain, index) = match (&input.derivation_chain, input.derivation_index) {
+            (Some(chain), Some(index)) => (chain.as_str(), index as usize),
+            _ => {
+                return Err(format!(
+                    "Selected input {} has no wallet derivation path",
+                    position + 1
+                ));
+            }
+        };
+        let addresses = match chain {
+            "receive" => &wallet.receive_addresses,
+            "change" => &wallet.change_addresses,
+            _ => {
+                return Err(format!(
+                    "Selected input {} has an invalid derivation chain",
+                    position + 1
+                ));
+            }
+        };
+        let address = addresses.get(index).ok_or_else(|| {
+            format!(
+                "Selected input {} derivation index {} is outside the synchronized wallet",
+                position + 1,
+                index
+            )
+        })?;
+        let expected_script = crate::address::address_to_script_pubkey(address)?;
+        if expected_script != input.script_public_key {
+            return Err(format!(
+                "Selected input {} derivation path does not match its script",
+                position + 1
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Create compound unsigned PSKB: multiple recipients in one transaction.
@@ -1621,6 +1664,23 @@ fn serialize_pskb_single_sig(
     inputs: &[crate::rpc::UtxoEntry],
     outputs: &[(u64, Vec<u8>)],
 ) -> Result<String, String> {
+    serialize_pskb_single_sig_inner(inputs, outputs, None)
+}
+
+/// Only the explicitly selected standard send opts into the coordinated v4 relay.
+fn serialize_pskb_single_sig_v4(
+    inputs: &[crate::rpc::UtxoEntry],
+    outputs: &[(u64, Vec<u8>)],
+    wallet: &WalletData,
+) -> Result<String, String> {
+    serialize_pskb_single_sig_inner(inputs, outputs, Some(wallet))
+}
+
+fn serialize_pskb_single_sig_inner(
+    inputs: &[crate::rpc::UtxoEntry],
+    outputs: &[(u64, Vec<u8>)],
+    v4_wallet: Option<&WalletData>,
+) -> Result<String, String> {
     if inputs.len() > MAX_STANDARD_INPUTS {
         return Err(format!(
             "Maximum {} UTXOs per transaction; selected {}",
@@ -1660,20 +1720,35 @@ fn serialize_pskb_single_sig(
             "sigOpCount": 1u8,
             "bip32Derivations": {},
             "finalScriptSig": serde_json::Value::Null,
-            "proprietaries": {}
+            "proprietaries": derivation_proprietaries(utxo)
         });
         inputs_json.push(input);
     }
 
     let mut outputs_json = Vec::<serde_json::Value>::with_capacity(outputs.len());
-    for (amount, script) in outputs {
+    for (output_index, (amount, script)) in outputs.iter().enumerate() {
         let spk_hex = format!("0000{}", hex::encode(script));
+        let mut proprietaries = serde_json::json!({});
+        if output_index > 0 {
+            if let Some(wallet) = v4_wallet {
+                let index = wallet.change_addresses.iter().position(|address| {
+                    crate::address::address_to_script_pubkey(address)
+                        .as_ref().is_ok_and(|candidate| candidate == script)
+                }).ok_or_else(|| format!("Change output {} has no wallet path", output_index))?;
+                if index > 511 {
+                    return Err("Change derivation index exceeds M5 v4 range".into());
+                }
+                proprietaries = serde_json::json!({
+                    "kasSignerDerivation": { "chain": "change", "index": index }
+                });
+            }
+        }
         let output = serde_json::json!({
             "amount": amount,
             "scriptPublicKey": spk_hex,
             "redeemScript": serde_json::Value::Null,
             "bip32Derivations": {},
-            "proprietaries": {}
+            "proprietaries": proprietaries
         });
         outputs_json.push(output);
     }
@@ -1688,7 +1763,11 @@ fn serialize_pskb_single_sig(
         "outputCount": num_out,
         "xpubs": {},
         "id": serde_json::Value::Null,
-        "proprietaries": {}
+        "proprietaries": if v4_wallet.is_some() {
+            serde_json::json!({ "kasSignerKSPTV4": true })
+        } else {
+            serde_json::json!({})
+        }
     });
 
     let pskt = serde_json::json!({
@@ -1707,6 +1786,21 @@ fn serialize_pskb_single_sig(
     let wire_hex = hex::encode(&wire);
 
     Ok(wire_hex)
+}
+
+/// Preserve the watch-only path resolution in the canonical PSKB. The compact
+/// KSPT relay intentionally does not emit this yet; current M5 firmware rejects
+/// unknown trailers. A later coordinated firmware update can transport it.
+fn derivation_proprietaries(utxo: &crate::rpc::UtxoEntry) -> serde_json::Value {
+    match (&utxo.derivation_chain, utxo.derivation_index) {
+        (Some(chain), Some(index)) => serde_json::json!({
+            "kasSignerDerivation": {
+                "chain": chain,
+                "index": index
+            }
+        }),
+        _ => serde_json::json!({}),
+    }
 }
 
 /// Output descriptor for PSKB with optional covenant binding.
@@ -2689,6 +2783,30 @@ mod standard_send_tests {
             script_public_key: vec![0x20; 34],
             block_daa_score: 1,
             covenant_id: None,
+            derivation_chain: None,
+            derivation_index: None,
+        }
+    }
+
+    fn derived_utxo(
+        wallet: &WalletData,
+        chain: &str,
+        derivation_index: usize,
+    ) -> UtxoEntry {
+        let address = match chain {
+            "receive" => &wallet.receive_addresses[derivation_index],
+            "change" => &wallet.change_addresses[derivation_index],
+            _ => unreachable!(),
+        };
+        UtxoEntry {
+            tx_id: format!("{:064x}", derivation_index + 1),
+            index: 0,
+            amount: 500_000_000,
+            script_public_key: crate::address::address_to_script_pubkey(address).unwrap(),
+            block_daa_score: 1,
+            covenant_id: None,
+            derivation_chain: Some(chain.into()),
+            derivation_index: Some(derivation_index as u32),
         }
     }
 
@@ -2702,6 +2820,62 @@ mod standard_send_tests {
             next_receive_index: 0,
             next_change_index: 0,
         }
+    }
+
+    #[test]
+    fn input_derivation_must_match_the_actual_script() {
+        let mut wallet = wallet_with_change_count(3);
+        wallet.receive_addresses = (0..3)
+            .map(|index| {
+                crate::address::encode_p2pk_address(&[index as u8 + 20; 32], "kaspa")
+            })
+            .collect();
+
+        let receive = derived_utxo(&wallet, "receive", 2);
+        let change = derived_utxo(&wallet, "change", 1);
+        assert!(validate_input_derivations(&wallet, &[receive, change.clone()]).is_ok());
+
+        let mut wrong_index = change.clone();
+        wrong_index.derivation_index = Some(2);
+        assert!(validate_input_derivations(&wallet, &[wrong_index])
+            .unwrap_err()
+            .contains("does not match its script"));
+
+        let mut missing = change;
+        missing.derivation_chain = None;
+        assert!(validate_input_derivations(&wallet, &[missing])
+            .unwrap_err()
+            .contains("no wallet derivation path"));
+    }
+
+    #[test]
+    fn explicit_standard_send_marks_only_change_outputs_for_v4() {
+        let wallet = wallet_with_change_count(3);
+        let selected = vec![derived_utxo(&wallet, "change", 2)];
+        let destination = crate::address::address_to_script_pubkey(
+            &crate::address::encode_p2pk_address(&[91; 32], "kaspa")
+        ).unwrap();
+        let change = crate::address::address_to_script_pubkey(
+            &wallet.change_addresses[1]
+        ).unwrap();
+        let wire = serialize_pskb_single_sig_v4(
+            &selected,
+            &[(100_000_000, destination), (399_000_000, change)],
+            &wallet,
+        ).unwrap();
+        let bytes = hex::decode(&wire).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_slice(&hex::decode(&bytes[4..]).unwrap()).unwrap();
+        let transaction = &root[0];
+        assert_eq!(transaction["global"]["proprietaries"]["kasSignerKSPTV4"], true);
+        assert_eq!(transaction["inputs"][0]["proprietaries"]
+            ["kasSignerDerivation"]["index"], 2);
+        assert!(transaction["outputs"][0]["proprietaries"]
+            .as_object().unwrap().is_empty());
+        assert_eq!(transaction["outputs"][1]["proprietaries"]
+            ["kasSignerDerivation"]["index"], 1);
+        let relay = crate::pskt::relay_pskb_as_kspt_v2_hex(&wire).unwrap();
+        assert_eq!(&hex::decode(relay).unwrap()[..6], b"KSPT\x04\x00");
     }
 
     #[test]

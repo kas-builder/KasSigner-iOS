@@ -46,6 +46,8 @@ struct SendDraftInput: Encodable, Hashable {
     let amountSompi: UInt64
     let scriptPublicKey: String
     let blockDAAScore: UInt64
+    let derivationChain: String
+    let derivationIndex: UInt32
 
     init(utxo: WalletUTXO) throws {
         let transactionID = utxo.txID.trimmingCharacters(
@@ -72,11 +74,20 @@ struct SendDraftInput: Encodable, Hashable {
             throw SendDraftError.zeroValueInput
         }
 
+        guard let derivationChain = utxo.derivationChain,
+              derivationChain == "receive" || derivationChain == "change",
+              let derivationIndex = utxo.derivationIndex
+        else {
+            throw SendDraftError.unresolvedInputDerivation(outpoint: utxo.id)
+        }
+
         self.transactionID = transactionID.lowercased()
         self.index = utxo.index
         self.amountSompi = utxo.amount
         self.scriptPublicKey = scriptPublicKey.lowercased()
         self.blockDAAScore = utxo.blockDAAScore
+        self.derivationChain = derivationChain
+        self.derivationIndex = derivationIndex
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -85,6 +96,8 @@ struct SendDraftInput: Encodable, Hashable {
         case amountSompi = "amount"
         case scriptPublicKey = "script_public_key"
         case blockDAAScore = "block_daa_score"
+        case derivationChain = "derivation_chain"
+        case derivationIndex = "derivation_index"
     }
 
     var outpointKey: String {
@@ -194,6 +207,7 @@ enum SendDraftError: LocalizedError {
     case inputTotalOverflow
     case requiredTotalOverflow
     case insufficientSelectedInputs
+    case unresolvedInputDerivation(outpoint: String)
 
     var errorDescription: String? {
         switch self {
@@ -219,6 +233,8 @@ enum SendDraftError: LocalizedError {
             return "The amount and fee total is too large."
         case .insufficientSelectedInputs:
             return "The selected UTXOs cannot cover the amount and fee."
+        case let .unresolvedInputDerivation(outpoint):
+            return "The selected UTXO \(outpoint) could not be matched to a receive or change address in this wallet."
         }
     }
 }
