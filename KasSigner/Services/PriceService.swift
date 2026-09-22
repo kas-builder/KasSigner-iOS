@@ -195,9 +195,8 @@ final class PriceService: ObservableObject {
             historyRevision += 1
 
             let elapsed = Date().timeIntervalSince(startedAt)
-            if elapsed < 0.45 {
-                try? await Task.sleep(for: .seconds(0.45 - elapsed))
-            }
+            let remainingPresentationTime = max(5 - elapsed, 0.25)
+            try? await Task.sleep(for: .seconds(remainingPresentationTime))
         } catch {
             isHistoricalPrepared = historicalDiskCache != nil
             if historicalDiskCache != nil {
