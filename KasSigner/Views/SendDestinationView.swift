@@ -1872,9 +1872,11 @@ private struct VerifiedSigningPreparationView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .padding(16)
+        .padding(showingBroadcastReview ? 0 : 16)
         .background(
-            Color(.secondarySystemGroupedBackground),
+            showingBroadcastReview
+                ? Color.clear
+                : Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 15, style: .continuous)
         )
     }
