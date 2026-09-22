@@ -6,7 +6,7 @@ KasSigner-iOS is a native, watch-only Kaspa wallet and portfolio app for iPhone.
 
 Private keys, seed phrases, and signing passphrases are never requested or stored by the iOS app.
 
-**Current version:** 4.1 (build 19)
+**Current version:** 4.2 (build 21)
 
 ## Beta status
 
@@ -58,7 +58,9 @@ The hardware signer is the final review authority. Confirm transaction details o
 - Construct exact-amount or send-max transactions
 - Choose low, normal, priority, or custom fees
 - Automatically focus the numeric custom-fee field
-- Select any derived change address, including a previously used address
+- Choose automatic or manual change handling, with up to four change outputs
+- Select derived change addresses, including previously used ones, through Change #512
+- Review separate destination and change address cards, including each output amount, before signing
 - Review destination, amount, fee, inputs, and change before signing
 - Cancel and discard an in-memory transaction session
 - Display animated signing QR frames with play/pause control and a five-second interval
@@ -80,6 +82,8 @@ When a signed transaction returns, the iOS runtime:
 5. Broadcasts only that verified result—not the independently scanned object.
 
 Signing drafts are memory-only. Cancelling or leaving the flow discards the session instead of restoring an unfinished transaction after relaunch.
+
+For standard single-signature sends, the iPhone includes each selected input's exact receive/change derivation path in a compact KSPT v4 signing request. It verifies that the path matches the input script before sending it. Compatible M5 firmware independently derives and checks every input key and any identified change output against the transaction scripts before signing; incorrect hints fail rather than falling back to a bounded address search. Older KSPT v1 transactions remain supported by the M5's legacy signing path. KSPT v4 supports receive and change indices #1–512, and the returned signatures are still verified against the original transaction before broadcast.
 
 ## Transactions and CSV
 
