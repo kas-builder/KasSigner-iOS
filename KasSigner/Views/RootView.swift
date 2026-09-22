@@ -44,6 +44,131 @@ struct KasSignerLoadingView: View {
     }
 }
 
+struct AccountDiscoveryLoadingView: View {
+    let progress: Double
+    let detail: String
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        ZStack {
+            Color(.systemBackground)
+                .opacity(0.96)
+                .ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Image(systemName: "wallet.pass.fill")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundStyle(teal)
+
+                Text("Running address discovery…")
+                    .font(.title3.weight(.semibold))
+
+                ProgressView(value: progress)
+                    .tint(teal)
+                    .frame(maxWidth: 300)
+                    .animation(.linear(duration: 0.12), value: progress)
+
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+@MainActor
+final class AccountDiscoveryPresentationModel: ObservableObject {
+    @Published private(set) var isVisible = false
+    @Published private(set) var progress = 0.04
+    @Published private(set) var detail = "Preparing account discovery…"
+
+    private var startedAt: Date?
+    private var workCompletedAt: Date?
+    private var presentationTask: Task<Void, Never>?
+
+    func start() {
+        guard !isVisible else { return }
+
+        isVisible = true
+        progress = 0.04
+        detail = "Validating account…"
+        startedAt = Date()
+        workCompletedAt = nil
+
+        presentationTask?.cancel()
+        presentationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled,
+                  let self,
+                  let startedAt = self.startedAt {
+                let currentTime = Date()
+                let elapsed = currentTime.timeIntervalSince(startedAt)
+
+                if let completedAt = self.workCompletedAt {
+                    let readyStart = max(
+                        startedAt.addingTimeInterval(9.25),
+                        completedAt
+                    )
+                    if currentTime >= readyStart {
+                        let readyElapsed = currentTime.timeIntervalSince(readyStart)
+                        self.detail = "Account ready"
+                        self.progress = min(
+                            1,
+                            0.92 + (readyElapsed / 0.75) * 0.08
+                        )
+
+                        let minimumEnd = startedAt.addingTimeInterval(10)
+                        let completionEnd = readyStart.addingTimeInterval(0.75)
+                        if currentTime >= max(minimumEnd, completionEnd) {
+                            self.finish()
+                            return
+                        }
+                    } else {
+                        self.progress = min(
+                            0.92,
+                            0.04 + (elapsed / 9.25) * 0.88
+                        )
+                    }
+                } else {
+                    self.progress = min(
+                        0.92,
+                        0.04 + (elapsed / 10) * 0.88
+                    )
+                }
+
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    func updateDetail(_ detail: String) {
+        guard isVisible, workCompletedAt == nil else { return }
+        self.detail = detail
+    }
+
+    func complete() {
+        guard isVisible, workCompletedAt == nil else { return }
+        workCompletedAt = Date()
+    }
+
+    func cancel() {
+        presentationTask?.cancel()
+        finish()
+    }
+
+    private func finish() {
+        presentationTask = nil
+        isVisible = false
+        progress = 1
+        startedAt = nil
+        workCompletedAt = nil
+    }
+}
+
 struct RootView: View {
     private enum Tab: Hashable {
         case wallet
@@ -60,6 +185,8 @@ struct RootView: View {
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var discoveryPresentation =
+        AccountDiscoveryPresentationModel()
 
     @State private var selectedTab: Tab = .wallet
     @State private var showingAddWallet = false
@@ -92,7 +219,8 @@ struct RootView: View {
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-        .disabled(isInitialDiscoveryBlocking)
+        .disabled(isInitialDiscoveryBlocking || discoveryPresentation.isVisible)
+        .environmentObject(discoveryPresentation)
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
         .background {
             WalletTabContextMenu(
@@ -107,6 +235,7 @@ struct RootView: View {
         }
         .sheet(isPresented: $showingAddWallet) {
             AddWalletView()
+                .environmentObject(discoveryPresentation)
         }
         .alert(
             "Wallet Discovery Notice",
@@ -154,9 +283,25 @@ struct RootView: View {
             .allowsHitTesting(false)
         }
         .overlay {
-            if isInitialDiscoveryBlocking {
+            if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
                 initialDiscoveryOverlay
             }
+        }
+        .onAppear {
+            if isInitialDiscoveryBlocking {
+                discoveryPresentation.start()
+            }
+        }
+        .onChange(of: isInitialDiscoveryBlocking) { wasBlocking, isBlocking in
+            if isBlocking {
+                discoveryPresentation.start()
+            } else if wasBlocking {
+                discoveryPresentation.complete()
+            }
+        }
+        .onChange(of: syncService.initialDiscoveryProgress) { _, progress in
+            guard let progress else { return }
+            discoveryPresentation.updateDetail(progress.detail)
         }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
@@ -213,28 +358,16 @@ struct RootView: View {
 
     @ViewBuilder
     private var initialDiscoveryOverlay: some View {
-        ZStack {
-            Color(.systemBackground)
-                .opacity(0.96)
-                .ignoresSafeArea()
+        if let error = syncService.initialDiscoveryError {
+            ZStack {
+                Color(.systemBackground)
+                    .opacity(0.96)
+                    .ignoresSafeArea()
 
-            VStack(spacing: 18) {
-                Image(systemName: "wallet.pass.fill")
-                    .font(.system(size: 42, weight: .semibold))
-                    .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
-
-                if let progress = syncService.initialDiscoveryProgress {
-                    Text(progress.title)
-                        .font(.title3.weight(.semibold))
-                    ProgressView(value: progress.fraction)
-                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
-                        .frame(maxWidth: 300)
-                    Text(progress.detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 340)
-                } else if let error = syncService.initialDiscoveryError {
+                VStack(spacing: 18) {
+                    Image(systemName: "wallet.pass.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
                     Text("Wallet discovery paused")
                         .font(.title3.weight(.semibold))
                     Text(error)
@@ -249,20 +382,20 @@ struct RootView: View {
                     .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
 
                     Button("Cancel Import", role: .destructive) {
+                        discoveryPresentation.cancel()
                         syncService.reset()
                         walletStore.discardPendingImport()
                     }
-                } else {
-                    Text("Preparing wallet discovery…")
-                        .font(.title3.weight(.semibold))
-                    ProgressView()
-                        .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
                 }
-
+                .padding(28)
             }
-            .padding(28)
+            .accessibilityElement(children: .contain)
+        } else {
+            AccountDiscoveryLoadingView(
+                progress: discoveryPresentation.progress,
+                detail: discoveryPresentation.detail
+            )
         }
-        .accessibilityElement(children: .contain)
     }
 
     private func retryInitialDiscovery() {

@@ -113,6 +113,8 @@ struct AddWalletView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var discoveryPresentation:
+        AccountDiscoveryPresentationModel
 
     @State private var walletName = ""
     @State private var kpub = ""
@@ -149,16 +151,6 @@ struct AddWalletView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
-
-                if isImporting {
-                    Section {
-                        HStack {
-                            ProgressView()
-                            Text("Validating wallet and deriving addresses…")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
 
                 if let errorMessage {
                     Section {
@@ -218,6 +210,14 @@ struct AddWalletView: View {
                 }
             } message: { _ in
                 Text("This KasSigner account is already on this iPhone.")
+            }
+            .overlay {
+                if isImporting {
+                    AccountDiscoveryLoadingView(
+                        progress: discoveryPresentation.progress,
+                        detail: discoveryPresentation.detail
+                    )
+                }
             }
         }
         .tint(teal)
@@ -295,6 +295,7 @@ struct AddWalletView: View {
     private func importWallet() {
         isImporting = true
         errorMessage = nil
+        discoveryPresentation.start()
 
         let cleanedName = walletName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedKpub = kpub.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -306,6 +307,7 @@ struct AddWalletView: View {
                 if let existingProfile = walletStore.profiles.first(where: {
                     $0.network == "mainnet" && $0.kpub == imported.kpub
                 }) {
+                    discoveryPresentation.cancel()
                     duplicateProfile = existingProfile
                     isImporting = false
                     return
@@ -322,6 +324,7 @@ struct AddWalletView: View {
                 )
                 dismiss()
             } catch {
+                discoveryPresentation.cancel()
                 errorMessage = error.localizedDescription
             }
             isImporting = false
