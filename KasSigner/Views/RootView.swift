@@ -837,6 +837,7 @@ struct UTXOsView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var priceService: PriceService
     @Environment(\.openURL) private var openURL
 
     @State private var editingLabelUTXOID: String?
@@ -943,12 +944,20 @@ struct UTXOsView: View {
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 9) {
                     HStack(alignment: .top, spacing: 12) {
-                        Text(formatKas(utxo.amountKas))
-                            .font(.body.weight(.regular).monospacedDigit())
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .allowsTightening(true)
-                            .foregroundStyle(.primary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(formatKas(utxo.amountKas))
+                                .font(.body.weight(.regular).monospacedDigit())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .allowsTightening(true)
+                                .foregroundStyle(.primary)
+
+                            if let usdValue = usdValueText(for: utxo) {
+                                Text(usdValue)
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
                         Spacer()
 
@@ -1144,6 +1153,17 @@ struct UTXOsView: View {
 
     private func formatKas(_ amount: Double) -> String {
         amount.formatted(.number.precision(.fractionLength(0...8))) + "\u{00A0}KAS"
+    }
+
+    private func usdValueText(for utxo: WalletUTXO) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        return (utxo.amountKas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(0...2))
+        )
     }
 
     private func shortTransactionID(_ transactionID: String) -> String {
