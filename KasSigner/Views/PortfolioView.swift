@@ -1289,7 +1289,7 @@ struct PortfolioView: View {
     }
 }
 
-private struct KaspaPriceDetail: View {
+struct KaspaPriceDetail: View {
     private enum ConverterPriceMode: String, CaseIterable, Identifiable {
         case spot
         case manual
@@ -1327,6 +1327,7 @@ private struct KaspaPriceDetail: View {
     @ObservedObject var priceService: PriceService
     @ObservedObject var preferences: AppPreferences
     let accentColor: Color
+    var showsOnlyConverter = false
 
     @State private var selectedRange: TimeRange = .day
     @State private var points: [HistoricalPricePoint] = []
@@ -1351,7 +1352,24 @@ private struct KaspaPriceDetail: View {
         selectedPoint?.priceUSD ?? priceService.price(for: .usd) ?? points.last?.priceUSD
     }
 
+    @ViewBuilder
     var body: some View {
+        if showsOnlyConverter {
+            VStack(spacing: 18) {
+                converterCard
+                converterKeypad
+            }
+            .padding(.horizontal)
+            .tint(accentColor)
+            .task {
+                await priceService.refresh(preferences: preferences)
+            }
+        } else {
+            priceDetailBody
+        }
+    }
+
+    private var priceDetailBody: some View {
         ScrollView {
             VStack(spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {

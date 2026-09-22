@@ -18,6 +18,7 @@ struct WalletHomeView: View {
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @State private var showingAddWallet = false
     @State private var showingSecondaryCurrency = false
+    @State private var showingCurrencyConverter = false
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -46,6 +47,18 @@ struct WalletHomeView: View {
             }
             .sheet(isPresented: $showingAddWallet) {
                 AddWalletView()
+            }
+            .sheet(isPresented: $showingCurrencyConverter) {
+                NavigationStack {
+                    KaspaPriceDetail(
+                        priceService: priceService,
+                        preferences: preferences,
+                        accentColor: Color(red: 0.20, green: 0.62, blue: 0.57),
+                        showsOnlyConverter: true
+                    )
+                }
+                .presentationDetents([.fraction(0.62)])
+                .presentationDragIndicator(.visible)
             }
             .task {
                 async let walletRefresh: Void = refreshSelectedWallet(force: false)
@@ -173,6 +186,36 @@ struct WalletHomeView: View {
                     }
                     .padding()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    Button {
+                        showingCurrencyConverter = true
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Currency Converter")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text("Spot Price")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 8)
+
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.headline)
+                                .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            .thinMaterial,
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityHint("Opens the KAS and USD currency converter")
                 } else if syncService.state == .syncing {
                     HStack(spacing: 8) {
                         Image(systemName: "dot.radiowaves.left.and.right")
