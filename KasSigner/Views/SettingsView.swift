@@ -467,6 +467,13 @@ private struct OtherSettingsView: View {
                     Text("Use \(preferences.priceProvider.title) as the preferred API. Automatic fallback will remain available if it cannot be reached.")
                 }
             }
+
+            Section {
+                Toggle(
+                    "Show Converter in Wallet",
+                    isOn: $preferences.showsCurrencyConverterInWallet
+                )
+            }
         }
         .navigationTitle("Currency")
         .navigationBarTitleDisplayMode(.inline)

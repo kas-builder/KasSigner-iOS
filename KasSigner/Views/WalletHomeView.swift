@@ -206,36 +206,38 @@ struct WalletHomeView: View {
                     .padding()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-                    Button {
-                        currencyConverterDetent = .fraction(0.54)
-                        showingCurrencyConverter = true
-                    } label: {
-                        HStack(spacing: 12) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Currency Converter")
+                    if preferences.showsCurrencyConverterInWallet {
+                        Button {
+                            currencyConverterDetent = .fraction(0.54)
+                            showingCurrencyConverter = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Currency Converter")
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text("Spot Price")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
                                     .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text("Spot Price")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
+                                    .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
                             }
-
-                            Spacer(minLength: 8)
-
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                .font(.headline)
-                                .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                .thinMaterial,
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                         }
-                        .padding()
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            .thinMaterial,
-                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .buttonStyle(SubtlePressButtonStyle())
+                        .accessibilityHint("Opens the KAS and USD currency converter")
                     }
-                    .buttonStyle(SubtlePressButtonStyle())
-                    .accessibilityHint("Opens the KAS and USD currency converter")
                 } else if syncService.state == .syncing {
                     HStack(spacing: 8) {
                         Image(systemName: "dot.radiowaves.left.and.right")

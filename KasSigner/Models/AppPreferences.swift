@@ -160,6 +160,7 @@ final class AppPreferences: ObservableObject {
     @Published var customNodeURL: String { didSet { save() } }
     @Published var secondaryCurrency: SecondaryCurrency { didSet { save() } }
     @Published var priceProvider: PriceProviderChoice { didSet { save() } }
+    @Published var showsCurrencyConverterInWallet: Bool { didSet { save() } }
 
     private enum Key {
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
@@ -171,6 +172,7 @@ final class AppPreferences: ObservableObject {
         static let customNode = "kassigner.customNode.v1"
         static let secondaryCurrency = "kassigner.secondaryCurrency.v1"
         static let priceProvider = "kassigner.priceProvider.v1"
+        static let showsCurrencyConverterInWallet = "kassigner.showsCurrencyConverterInWallet.v1"
     }
 
     init() {
@@ -197,6 +199,9 @@ final class AppPreferences: ObservableObject {
         priceProvider = PriceProviderChoice(
             rawValue: defaults.string(forKey: Key.priceProvider) ?? ""
         ) ?? .automatic
+        showsCurrencyConverterInWallet = defaults.object(
+            forKey: Key.showsCurrencyConverterInWallet
+        ) as? Bool ?? false
     }
 
     var nodeConfiguration: [String: Any] {
@@ -216,5 +221,9 @@ final class AppPreferences: ObservableObject {
         defaults.set(customNodeURL, forKey: Key.customNode)
         defaults.set(secondaryCurrency.rawValue, forKey: Key.secondaryCurrency)
         defaults.set(priceProvider.rawValue, forKey: Key.priceProvider)
+        defaults.set(
+            showsCurrencyConverterInWallet,
+            forKey: Key.showsCurrencyConverterInWallet
+        )
     }
 }
