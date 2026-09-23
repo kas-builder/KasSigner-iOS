@@ -380,7 +380,7 @@ struct SendTransactionTypeSelectionView: View {
                     transactionTypeCard(
                         .standard,
                         title: "Standard Send",
-                        subtitle: "One or more recipients • 0–1 change outputs",
+                        subtitle: "1–4 recipients • 0–1 change output",
                         detail: "The simplest option with the lowest transaction fee.",
                         systemImage: "arrow.up.right"
                     )
@@ -388,7 +388,7 @@ struct SendTransactionTypeSelectionView: View {
                     transactionTypeCard(
                         .privacyFocused,
                         title: "Privacy-Focused Send",
-                        subtitle: "One or more recipients • 2–4 change outputs",
+                        subtitle: "1–4 recipients • 2–4 change outputs",
                         detail: "Splits change across fresh wallet addresses for added ambiguity.",
                         systemImage: "shield.lefthalf.filled"
                     )
@@ -396,7 +396,7 @@ struct SendTransactionTypeSelectionView: View {
                     transactionTypeCard(
                         .decoy,
                         title: "Decoy Transaction",
-                        subtitle: "One recipient • 4 change outputs",
+                        subtitle: "1 recipient • 4 change outputs",
                         detail: "Creates a matching decoy amount and additional change outputs.",
                         systemImage: "theatermasks"
                     )
