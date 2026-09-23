@@ -232,6 +232,14 @@ struct SendDestinationView: View {
                 || usesManualChangeAllocation)
     }
 
+    private var transactionTypeSubtitle: String {
+        switch transactionType {
+        case .standard: "Standard"
+        case .privacyFocused: "Privacy"
+        case .decoy: "Decoy"
+        }
+    }
+
     private var canContinue: Bool {
         let normalizedAddresses = ([destinationAddress] + additionalRecipients.map(\.address))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -309,7 +317,6 @@ struct SendDestinationView: View {
             .padding(.vertical, 12)
             .background(.ultraThinMaterial)
         }
-        .navigationTitle("Destination & Amount")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
         .toolbar {
@@ -318,6 +325,18 @@ struct SendDestinationView: View {
                     showingCancelConfirmation = true
                 } label: {
                     Label("Back", systemImage: "chevron.left")
+                }
+            }
+
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text("Destination & Amount")
+                        .font(.headline)
+
+                    Text(transactionTypeSubtitle)
+                        .font(.caption)
+                        .fontWeight(.regular)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
