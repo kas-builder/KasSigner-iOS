@@ -8,11 +8,14 @@ struct SendDestinationView: View {
     @Environment(\.dismiss) private var dismiss
     let profile: WalletProfile
     let selectedUTXOs: [WalletUTXO]
+    let transactionType: SendTransactionType
     let sessionID: UUID
     @Binding var showingSendFlow: Bool
 
     @State private var destinationAddress = ""
     @State private var amountText = ""
+    @State private var additionalRecipients: [SendRecipientDraft] = []
+    @State private var additionalRecipientValidity: [UUID: Bool] = [:]
     @State private var sendMax = false
     @State private var selectedFee: SendFeeChoice = .normal
     @State private var customFeeText = ""
@@ -27,6 +30,9 @@ struct SendDestinationView: View {
     @State private var resolvedChangeFeeSompi: UInt64?
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
+    @State private var livePlanTask: Task<Void, Never>?
+    @State private var isResolvingLivePlan = false
+    @State private var livePlanError: String?
     @FocusState private var customFeeFieldFocused: Bool
 
     @EnvironmentObject private var engine: KasSignerEngine
@@ -42,6 +48,26 @@ struct SendDestinationView: View {
 
     private var enteredAmountSompi: UInt64? {
         parseKasTextToSompi(amountText)
+    }
+
+    private var sendRecipients: [SendDraftRecipient]? {
+        guard let primaryAmount = enteredAmountSompi else { return nil }
+        var recipients = [SendDraftRecipient(address: destinationAddress, amountSompi: primaryAmount)]
+        for recipient in additionalRecipients {
+            guard let amount = parseKasTextToSompi(recipient.amountText), amount > 0 else {
+                return nil
+            }
+            recipients.append(SendDraftRecipient(address: recipient.address, amountSompi: amount))
+        }
+        return recipients
+    }
+
+    private var totalRecipientSompi: UInt64? {
+        sendRecipients?.reduce(into: UInt64?.some(0)) { total, recipient in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(recipient.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
     }
 
     private var destinationLooksValid: Bool {
@@ -72,7 +98,7 @@ struct SendDestinationView: View {
     }
 
     private var amountLooksValid: Bool {
-        guard let amount = enteredAmountSompi,
+        guard let amount = totalRecipientSompi,
               let selectedTotalSompi,
               let requestedFeeSompi
         else {
@@ -193,10 +219,10 @@ struct SendDestinationView: View {
     private var availableChangeSompi: UInt64? {
         guard !sendMax,
               let selectedTotalSompi,
-              let enteredAmountSompi,
+              let totalRecipientSompi,
               let requestedFeeSompi
         else { return sendMax ? 0 : nil }
-        let required = enteredAmountSompi.addingReportingOverflow(requestedFeeSompi)
+        let required = totalRecipientSompi.addingReportingOverflow(requestedFeeSompi)
         guard !required.overflow, selectedTotalSompi >= required.partialValue else { return nil }
         return selectedTotalSompi - required.partialValue
     }
@@ -207,18 +233,41 @@ struct SendDestinationView: View {
         return fee > 0
     }
 
+    private var requiresLiveChangePlan: Bool {
+        transactionType != .standard
+            || !additionalRecipients.isEmpty
+            || usesManualChangeAllocation
+    }
+
     private var canContinue: Bool {
-        destinationLooksValid
+        let normalizedAddresses = ([destinationAddress] + additionalRecipients.map(\.address))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        return destinationLooksValid
             && amountLooksValid
             && feeLooksValid
+            && (transactionType == .standard || !sendMax)
+            && (!requiresLiveChangePlan
+                || (!isResolvingLivePlan
+                    && livePlanError == nil
+                    && resolvedChangeFeeSompi != nil))
+            && additionalRecipients.allSatisfy {
+                !$0.address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && (parseKasTextToSompi($0.amountText) ?? 0) > 0
+                    && additionalRecipientValidity[$0.id] == true
+            }
+            && Set(normalizedAddresses).count == normalizedAddresses.count
     }
 
     var body: some View {
+        presentationContent
+    }
+
+    private var baseContent: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 14) {
-                        destinationCard
+                        destinationCards
                         changeAddressCard
                         amountCard
                         feeCard
@@ -279,39 +328,64 @@ struct SendDestinationView: View {
             }
         }
         .background(Color(.systemGroupedBackground))
+    }
+
+    private var stateContent: some View {
+        baseContent
         .onAppear {
             restoreSendSession()
         }
         .onDisappear {
             addressValidationTask?.cancel()
+            livePlanTask?.cancel()
         }
         .onChange(of: selectedFee) { _, _ in
             resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
             persistSendSession()
+            scheduleLivePlanResolution()
         }
         .onChange(of: customFeeText) { _, _ in
             resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
             persistSendSession()
+            scheduleLivePlanResolution()
         }
         .onChange(of: destinationAddress) { _, _ in
             resolvedChangeFeeSompi = nil
             persistSendSession()
+            scheduleLivePlanResolution()
         }
         .onChange(of: amountText) { _, _ in
             resolvedChangeFeeSompi = nil
             persistSendSession()
+            scheduleLivePlanResolution()
         }
         .onChange(of: sendMax) { _, _ in
             resolvedChangeFeeSompi = nil
             persistSendSession()
         }
-        .onChange(of: changeOutputs) { _, _ in persistSendSession() }
+        .onChange(of: changeOutputs) { _, _ in
+            resolvedChangeFeeSompi = nil
+            persistSendSession()
+            scheduleLivePlanResolution()
+        }
+        .onChange(of: additionalRecipients) { _, _ in
+            if additionalRecipients.isEmpty == false {
+                sendMax = false
+            }
+            persistSendSession()
+            scheduleLivePlanResolution()
+        }
         .onChange(of: syncService.feeEstimate) { _, _ in
             resolvedChangeFeeSompi = nil
             updateSendMaxAmount()
+            scheduleLivePlanResolution()
         }
+    }
+
+    private var presentationContent: some View {
+        stateContent
         .sheet(isPresented: $showingScanner) {
             QRScannerView { scannedValue in
                 let scanned = normalizedAddress(from: scannedValue)
@@ -323,10 +397,17 @@ struct SendDestinationView: View {
         .sheet(isPresented: $showingChangeAddressPicker) {
             ChangeAddressPickerView(
                 profileID: profile.id,
+                transactionType: transactionType,
                 availableChangeSompi: availableChangeSompi ?? 0,
                 selectedOutputs: $changeOutputs,
                 resolvePlan: { outputs in
                     try await resolveChangePlan(outputs)
+                },
+                completeStandardSelection: { outputs in
+                    changeOutputs = outputs
+                    usesManualChangeAllocation = true
+                    resolvedChangeFeeSompi = nil
+                    scheduleLivePlanResolution(immediately: true)
                 },
                 completePlan: { outputs, plan in
                     changeOutputs = outputs
@@ -364,6 +445,26 @@ struct SendDestinationView: View {
         }
     }
 
+    @ViewBuilder
+    private var destinationCards: some View {
+        destinationCard
+        ForEach($additionalRecipients) { $recipient in
+            AdditionalRecipientCard(
+                recipient: $recipient,
+                onRemove: { removeAdditionalRecipient(id: recipient.id) },
+                onValidationChange: { isValid in
+                    additionalRecipientValidity[recipient.id] = isValid
+                }
+            )
+            .environmentObject(engine)
+        }
+    }
+
+    private func removeAdditionalRecipient(id: UUID) {
+        additionalRecipients.removeAll { $0.id == id }
+        additionalRecipientValidity[id] = nil
+    }
+
     @MainActor
     private func resolveChangePlan(
         _ outputs: [PlannedChangeOutput]
@@ -373,16 +474,16 @@ struct SendDestinationView: View {
         ) else {
             throw SendVerificationError.walletStateChanged
         }
-        guard let amountSompi = enteredAmountSompi,
+        guard let recipients = sendRecipients,
               let feeSompi = provisionalFeeSompi
         else {
             throw SendVerificationError.invalidFeeArithmetic
         }
         let draft = try SendDraft(
             profile: activeProfile,
+            transactionType: transactionType,
             selectedUTXOs: selectedUTXOs,
-            destination: destinationAddress,
-            amountSompi: amountSompi,
+            recipients: recipients,
             feeSompi: feeSompi,
             feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
             usesExactFee: selectedFee == .custom,
@@ -398,6 +499,58 @@ struct SendDestinationView: View {
             resolvedOutputs[index].amountSompi = plan.amountsSompi[index]
         }
         return (resolvedOutputs, plan)
+    }
+
+    private func scheduleLivePlanResolution(immediately: Bool = false) {
+        guard requiresLiveChangePlan else { return }
+        livePlanTask?.cancel()
+        livePlanError = nil
+        guard destinationLooksValid,
+              enteredAmountSompi != nil,
+              provisionalFeeSompi != nil
+        else { return }
+
+        livePlanTask = Task { @MainActor in
+            if !immediately {
+                try? await Task.sleep(for: .milliseconds(300))
+            }
+            guard !Task.isCancelled else { return }
+            await resolveLivePlan()
+        }
+    }
+
+    @MainActor
+    private func resolveLivePlan() async {
+        guard !isResolvingLivePlan,
+              let selectedTotalSompi,
+              let recipientTotal = totalRecipientSompi,
+              let feeSompi = provisionalFeeSompi
+        else { return }
+        let required = recipientTotal.addingReportingOverflow(feeSompi)
+        guard !required.overflow, selectedTotalSompi >= required.partialValue else {
+            livePlanError = "The selected UTXOs cannot cover this transaction."
+            return
+        }
+
+        isResolvingLivePlan = true
+        defer { isResolvingLivePlan = false }
+        do {
+            var outputs = changeOutputs
+            if transactionType != .decoy,
+               outputs.contains(where: { $0.amountSompi == 0 }) {
+                outputs = try ChangeOutputPlanner.autoSplit(
+                    availableChangeSompi: selectedTotalSompi - required.partialValue,
+                    selectedOutputs: outputs,
+                    minimumOutputSompi: 66_900
+                )
+            }
+            let resolved = try await resolveChangePlan(outputs)
+            resolvedChangeFeeSompi = resolved.plan.feeSompi
+            livePlanError = nil
+        } catch {
+            resolvedChangeFeeSompi = nil
+            livePlanError = error.localizedDescription
+        }
     }
 
     @MainActor
@@ -455,11 +608,24 @@ struct SendDestinationView: View {
             var plannedChangeOutputs: [PlannedChangeOutput] = []
             var plannedAvailableChangeSompi = availableChangeSompi
 
-            if usesManualChangeAllocation,
+            let requiresExplicitChangePlan = usesManualChangeAllocation
+                || transactionType != .standard
+                || !additionalRecipients.isEmpty
+
+            if requiresExplicitChangePlan,
                !sendMax,
                let availableChangeSompi,
                availableChangeSompi > 0 {
-                let resolved = try await resolveChangePlan(changeOutputs)
+                var outputsToResolve = changeOutputs
+                if transactionType != .decoy,
+                   outputsToResolve.contains(where: { $0.amountSompi == 0 }) {
+                    outputsToResolve = try ChangeOutputPlanner.autoSplit(
+                        availableChangeSompi: availableChangeSompi,
+                        selectedOutputs: outputsToResolve,
+                        minimumOutputSompi: 66_900
+                    )
+                }
+                let resolved = try await resolveChangePlan(outputsToResolve)
                 plannedChangeOutputs = resolved.outputs
                 plannedAvailableChangeSompi = resolved.plan.availableChangeSompi
                 transactionFeeSompi = resolved.plan.feeSompi
@@ -467,7 +633,7 @@ struct SendDestinationView: View {
                 resolvedChangeFeeSompi = resolved.plan.feeSompi
             }
 
-            if usesManualChangeAllocation,
+            if requiresExplicitChangePlan,
                let plannedAvailableChangeSompi,
                plannedAvailableChangeSompi > 0 {
                 guard !plannedChangeOutputs.isEmpty else {
@@ -494,17 +660,20 @@ struct SendDestinationView: View {
                 guard plannedTotal == plannedAvailableChangeSompi else {
                     throw SendVerificationError.changeAmountMismatch
                 }
-            } else if usesManualChangeAllocation && !plannedChangeOutputs.isEmpty {
+            } else if requiresExplicitChangePlan && !plannedChangeOutputs.isEmpty {
                 throw SendVerificationError.changeAmountMismatch
             }
 
             // Provisional runtime checkpoint only. Final fee selection will use
             // the exact verified transaction mass.
+            guard let recipients = sendRecipients else {
+                throw SendDraftError.emptyDestination
+            }
             let draft = try SendDraft(
                 profile: activeProfile,
+                transactionType: transactionType,
                 selectedUTXOs: selectedUTXOs,
-                destination: destinationAddress,
-                amountSompi: amountSompi,
+                recipients: recipients,
                 feeSompi: transactionFeeSompi,
                 feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
                 usesExactFee: selectedFee == .custom,
@@ -548,26 +717,21 @@ struct SendDestinationView: View {
                 throw SendVerificationError.missingOutputs
             }
 
-            let normalizedDestination = destinationAddress
-                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                .lowercased()
-
-            let destinationOutputs = outputs.filter { output in
-                output.address?
-                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-                    .lowercased() == normalizedDestination
+            let verifiedRecipients = draft.recipients
+            for recipient in verifiedRecipients {
+                let normalizedAddress = recipient.address.lowercased()
+                let matches = outputs.filter {
+                    $0.address?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        == normalizedAddress
+                        && $0.amountSompi == recipient.amountSompi
+                }
+                guard matches.count == 1 else {
+                    throw SendVerificationError.destinationMismatch
+                }
             }
-
-            guard destinationOutputs.count == 1,
-                  let builtDestinationAmount = destinationOutputs.first?.amountSompi,
-                  builtDestinationAmount > 0,
-                  sendMax || builtDestinationAmount == amountSompi
-            else {
-                throw SendVerificationError.destinationMismatch
+            let verifiedRecipientTotal = verifiedRecipients.reduce(0) {
+                $0 + $1.amountSompi
             }
-            let verifiedAmountSompi = sendMax
-                ? builtDestinationAmount
-                : amountSompi
 
             guard let totalInput = summary.totalInputSompi,
                   let totalOutput = summary.totalOutputSompi,
@@ -584,7 +748,7 @@ struct SendDestinationView: View {
             }
 
             let afterAmount = totalInput.subtractingReportingOverflow(
-                verifiedAmountSompi
+                verifiedRecipientTotal
             )
             guard !afterAmount.overflow else {
                 throw SendVerificationError.invalidFeeArithmetic
@@ -599,7 +763,7 @@ struct SendDestinationView: View {
             let verifiedChangeSompi = afterFee.partialValue
 
             let verifiedChangeOutputs: [PlannedChangeOutput]
-            if usesManualChangeAllocation {
+            if requiresExplicitChangePlan {
                 verifiedChangeOutputs = plannedChangeOutputs
             } else if verifiedChangeSompi > 0 {
                 guard activeProfile.changeAddresses.indices.contains(
@@ -629,9 +793,10 @@ struct SendDestinationView: View {
                     throw SendVerificationError.invalidOutput
                 }
 
-                let isDestination =
-                    address == normalizedDestination
-                    && outputAmount == verifiedAmountSompi
+                let isDestination = verifiedRecipients.contains {
+                    $0.address.lowercased() == address
+                        && $0.amountSompi == outputAmount
+                }
 
                 let isWalletChange = verifiedChangeOutputs.contains {
                     $0.id == address && $0.amountSompi == outputAmount
@@ -643,9 +808,11 @@ struct SendDestinationView: View {
             }
 
             guard verifiedChangeSompi == verifiedChangeOutputs.reduce(0, { $0 + $1.amountSompi }),
-                  outputs.count == 1 + verifiedChangeOutputs.count,
-                  countedOutputsMatch(outputs, destination: normalizedDestination, amount: verifiedAmountSompi, changeOutputs: verifiedChangeOutputs)
+                  outputs.count == verifiedRecipients.count + verifiedChangeOutputs.count,
+                  countedOutputsMatch(outputs, recipients: verifiedRecipients, changeOutputs: verifiedChangeOutputs)
             else { throw SendVerificationError.changeAddressMismatch }
+
+            let normalizedDestination = verifiedRecipients[0].address.lowercased()
 
             unsignedPSKB = pskb
             if var session = walletStore.sendSession(
@@ -657,9 +824,15 @@ struct SendDestinationView: View {
                 session.sendMax = sendMax
                 session.feeChoice = selectedFee.rawValue
                 session.customFeeText = customFeeText
-                session.changeOutputs = usesManualChangeAllocation
+                session.changeOutputs = requiresExplicitChangePlan
                     ? verifiedChangeOutputs
                     : changeOutputs
+                session.recipients = verifiedRecipients.map {
+                    SendRecipientDraft(
+                        address: $0.address,
+                        amountText: formatPlainKas(sompi: $0.amountSompi)
+                    )
+                }
                 session.usesManualChangeAllocation = usesManualChangeAllocation
                 session.unsignedPSKB = pskb
                 session.verifiedDigest = SHA256.hash(
@@ -671,7 +844,8 @@ struct SendDestinationView: View {
             verifiedReview = VerifiedTransactionReview(
                 profileID: activeProfile.id,
                 destination: normalizedDestination,
-                amountSompi: verifiedAmountSompi,
+                amountSompi: verifiedRecipients[0].amountSompi,
+                recipients: verifiedRecipients,
                 feeSompi: reportedFee,
                 changeSompi: verifiedChangeSompi,
                 changeOutputs: verifiedChangeOutputs,
@@ -706,11 +880,18 @@ struct SendDestinationView: View {
         ) else { return }
         destinationAddress = session.destination
         amountText = session.amountText
+        if let primaryRecipient = session.recipients.first {
+            destinationAddress = primaryRecipient.address
+            amountText = primaryRecipient.amountText
+        }
+        additionalRecipients = Array(session.recipients.dropFirst())
         sendMax = session.sendMax
         selectedFee = SendFeeChoice(rawValue: session.feeChoice) ?? .normal
         customFeeText = session.customFeeText
         changeOutputs = session.changeOutputs
-        usesManualChangeAllocation = session.usesManualChangeAllocation
+        usesManualChangeAllocation = transactionType == .standard
+            ? session.usesManualChangeAllocation
+            : true
         if !destinationAddress.isEmpty {
             validateDestinationAddress(destinationAddress)
         }
@@ -723,6 +904,16 @@ struct SendDestinationView: View {
         ) else { return }
         session.destination = destinationAddress
         session.amountText = amountText
+        if session.recipients.isEmpty {
+            session.recipients = [SendRecipientDraft(
+                address: destinationAddress,
+                amountText: amountText
+            )]
+        } else {
+            session.recipients[0].address = destinationAddress
+            session.recipients[0].amountText = amountText
+        }
+        session.recipients = [session.recipients[0]] + additionalRecipients
         session.sendMax = sendMax
         session.feeChoice = selectedFee.rawValue
         session.customFeeText = customFeeText
@@ -775,11 +966,13 @@ struct SendDestinationView: View {
 
     private func countedOutputsMatch(
         _ outputs: [PSKTSummaryOutput],
-        destination: String,
-        amount: UInt64,
+        recipients: [SendDraftRecipient],
         changeOutputs: [PlannedChangeOutput]
     ) -> Bool {
-        var expected: [String: Int] = ["\(destination)|\(amount)": 1]
+        var expected: [String: Int] = [:]
+        for recipient in recipients {
+            expected["\(recipient.address.lowercased())|\(recipient.amountSompi)", default: 0] += 1
+        }
         for output in changeOutputs {
             expected["\(output.id)|\(output.amountSompi)", default: 0] += 1
         }
@@ -802,6 +995,18 @@ struct SendDestinationView: View {
                     .font(.headline)
 
                 Spacer()
+
+                if transactionType != .decoy,
+                   additionalRecipients.count < 3 {
+                    Button {
+                        additionalRecipients.append(SendRecipientDraft())
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.headline)
+                    }
+                    .tint(accentColor)
+                    .accessibilityLabel("Add destination")
+                }
 
                 if isValidatingAddress {
                     ProgressView()
@@ -953,7 +1158,7 @@ struct SendDestinationView: View {
                         updateSendMaxAmount()
                     }
                 }
-                .disabled(selectedTotalSompi == nil)
+                .disabled(selectedTotalSompi == nil || transactionType != .standard)
 
             HStack {
                 Text("Selected input")
@@ -972,6 +1177,21 @@ struct SendDestinationView: View {
                 )
                 .font(.caption)
                 .foregroundStyle(.red)
+            }
+
+            if transactionType != .standard {
+                if isResolvingLivePlan {
+                    HStack(spacing: 7) {
+                        ProgressView().controlSize(.small)
+                        Text("Calculating exact transaction fee…")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if let livePlanError {
+                    Text(livePlanError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1089,6 +1309,9 @@ struct SendDestinationView: View {
                        let normalized = result.normalized,
                        normalized != destinationAddress {
                         destinationAddress = normalized
+                    }
+                    if result.valid {
+                        scheduleLivePlanResolution()
                     }
                 }
             } catch {
@@ -1211,11 +1434,109 @@ struct SendDestinationView: View {
     }
 }
 
+private struct AdditionalRecipientCard: View {
+    @Binding var recipient: SendRecipientDraft
+    let onRemove: () -> Void
+    let onValidationChange: (Bool) -> Void
+
+    @EnvironmentObject private var engine: KasSignerEngine
+    @State private var validation: AddressValidationResult?
+    @State private var isValidating = false
+    @State private var validationTask: Task<Void, Never>?
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Additional Destination")
+                    .font(.headline)
+                Spacer()
+                if isValidating {
+                    ProgressView().controlSize(.small)
+                } else if !recipient.address.isEmpty {
+                    Image(systemName: validation?.valid == true ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(validation?.valid == true ? accentColor : .red)
+                }
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "minus.circle.fill")
+                }
+                .accessibilityLabel("Remove destination")
+            }
+
+            TextField("kaspa:...", text: $recipient.address, axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(.subheadline, design: .monospaced))
+                .lineLimit(2...4)
+                .padding(12)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+
+            HStack(spacing: 10) {
+                TextField("0", text: $recipient.amountText)
+                    .keyboardType(.decimalPad)
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                Text("KAS")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+
+            if let validation, !recipient.address.isEmpty {
+                Text(validation.valid ? "Valid Kaspa address." : (validation.reason ?? "Invalid Kaspa address."))
+                    .font(.caption)
+                    .foregroundStyle(validation.valid ? accentColor : .red)
+            }
+        }
+        .padding(14)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 15))
+        .onChange(of: recipient.address) { _, address in validate(address) }
+        .task { validate(recipient.address) }
+        .onDisappear { validationTask?.cancel() }
+    }
+
+    private func validate(_ address: String) {
+        validationTask?.cancel()
+        validation = nil
+        onValidationChange(false)
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            isValidating = false
+            return
+        }
+        isValidating = true
+        validationTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            do {
+                let result = try await engine.validateAddress(trimmed)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    validation = result
+                    isValidating = false
+                    onValidationChange(result.valid)
+                    if result.valid, let normalized = result.normalized {
+                        recipient.address = normalized
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    validation = AddressValidationResult(valid: false, network: nil, normalized: nil, reason: error.localizedDescription)
+                    isValidating = false
+                    onValidationChange(false)
+                }
+            }
+        }
+    }
+}
+
 private struct VerifiedTransactionReview: Identifiable, Hashable {
     let id = UUID()
     let profileID: UUID
     let destination: String
     let amountSompi: UInt64
+    let recipients: [SendDraftRecipient]
     let feeSompi: UInt64
     let changeSompi: UInt64
     let changeOutputs: [PlannedChangeOutput]
@@ -1227,6 +1548,10 @@ private struct VerifiedTransactionReview: Identifiable, Hashable {
     let destinationVerified: Bool
     let changeVerified: Bool
     let feeVerified: Bool
+
+    var recipientTotalSompi: UInt64 {
+        recipients.reduce(0) { $0 &+ $1.amountSompi }
+    }
 
     static func == (
         lhs: VerifiedTransactionReview,
@@ -1297,7 +1622,7 @@ private struct VerifiedTransactionReviewView: View {
             )
 
             securityRow(
-                "Destination and amount match",
+                "All destinations and amounts match",
                 passed: review.destinationVerified
             )
 
@@ -1417,7 +1742,16 @@ private struct VerifiedTransactionSummaryCards: View {
     var body: some View {
         VStack(spacing: 16) {
             transactionCard
-            destinationCard
+            ForEach(Array(review.recipients.enumerated()), id: \.offset) { index, recipient in
+                addressCard(
+                    title: review.recipients.count == 1
+                        ? "Destination"
+                        : "Destination \(index + 1)",
+                    amountSompi: recipient.amountSompi,
+                    address: recipient.address,
+                    accessibilityLabel: "Copy destination \(index + 1)"
+                )
+            }
             ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
                 addressCard(
                     title: review.changeOutputs.count == 1
@@ -1437,7 +1771,7 @@ private struct VerifiedTransactionSummaryCards: View {
             Text("Transaction")
                 .font(.title3.weight(.semibold))
 
-            valueRow("Amount", value: formatKas(review.amountSompi))
+            valueRow("Amount", value: formatKas(review.recipientTotalSompi))
             Divider()
             valueRow("Fee", value: formatKas(review.feeSompi))
             Divider()
@@ -1448,15 +1782,6 @@ private struct VerifiedTransactionSummaryCards: View {
         .background(
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 15, style: .continuous)
-        )
-    }
-
-    private var destinationCard: some View {
-        addressCard(
-            title: "Destination",
-            amountSompi: review.amountSompi,
-            address: review.destination,
-            accessibilityLabel: "Copy destination"
         )
     }
 
@@ -2028,8 +2353,10 @@ private struct VerifiedSigningPreparationView: View {
             let recorded = walletStore.recordBroadcastedTransaction(
                 profileID: review.profileID,
                 transactionID: transactionID,
-                destination: review.destination,
-                amountSompi: review.amountSompi,
+                destination: review.recipients.count == 1
+                    ? review.destination
+                    : "\(review.recipients.count) Destinations",
+                amountSompi: review.recipientTotalSompi,
                 feeSompi: review.feeSompi,
                 committedChangeIndices: review.changeOutputs.map(\.addressIndex)
             )
@@ -2179,18 +2506,13 @@ private struct VerifiedSigningPreparationView: View {
             throw SendVerificationError.missingOutputs
         }
 
-        let destination = review.destination.lowercased()
-        let destinationMatches = outputs.filter {
-            $0.address?
+        var expected: [String: Int] = [:]
+        for recipient in review.recipients {
+            let address = recipient.address
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .lowercased() == destination
-                && $0.amountSompi == review.amountSompi
+                .lowercased()
+            expected["\(address)|\(recipient.amountSompi)", default: 0] += 1
         }
-        guard destinationMatches.count == 1 else {
-            throw SendVerificationError.destinationMismatch
-        }
-
-        var expected: [String: Int] = ["\(destination)|\(review.amountSompi)": 1]
         for output in review.changeOutputs {
             expected["\(output.id)|\(output.amountSompi)", default: 0] += 1
         }
@@ -2203,12 +2525,12 @@ private struct VerifiedSigningPreparationView: View {
             else { throw SendVerificationError.invalidOutput }
             actual["\(address)|\(amount)", default: 0] += 1
         }
-        let amountAndChange = review.amountSompi.addingReportingOverflow(review.changeSompi)
+        let amountAndChange = review.recipientTotalSompi.addingReportingOverflow(review.changeSompi)
         let expectedInput = amountAndChange.partialValue.addingReportingOverflow(review.feeSompi)
         guard !amountAndChange.overflow,
               !expectedInput.overflow,
               actual == expected,
-              outputs.count == 1 + review.changeOutputs.count,
+              outputs.count == review.recipients.count + review.changeOutputs.count,
               summary.totalInputSompi == expectedInput.partialValue,
               summary.totalOutputSompi == amountAndChange.partialValue,
               summary.feeSompi == review.feeSompi
@@ -2494,43 +2816,85 @@ private struct ChangeAddressPickerView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var walletStore: WalletStore
     let profileID: UUID
+    let transactionType: SendTransactionType
     let availableChangeSompi: UInt64
     @Binding var selectedOutputs: [PlannedChangeOutput]
     let resolvePlan: ([PlannedChangeOutput]) async throws -> (
         outputs: [PlannedChangeOutput],
         plan: ChangeFeePlan
     )
+    let completeStandardSelection: ([PlannedChangeOutput]) -> Void
     let completePlan: ([PlannedChangeOutput], ChangeFeePlan) -> Void
     @State private var draftOutputs: [PlannedChangeOutput] = []
     @State private var isGenerating = false
     @State private var generationError: String?
     @State private var selectionError: String?
     @State private var showingAllocation = false
+    @State private var isResolvingSelection = false
 
     private var profile: WalletProfile? {
         walletStore.profiles.first { $0.id == profileID }
     }
 
+    private var minimumSelectionCount: Int {
+        switch transactionType {
+        case .standard: 1
+        case .privacyFocused: 2
+        case .decoy: 4
+        }
+    }
+
+    private var maximumSelectionCount: Int {
+        switch transactionType {
+        case .standard: 1
+        case .privacyFocused: 4
+        case .decoy: 4
+        }
+    }
+
+    private var selectionCountIsValid: Bool {
+        (minimumSelectionCount...maximumSelectionCount).contains(draftOutputs.count)
+    }
+
     var body: some View {
         NavigationStack {
-            List {
-                if let profile {
-                    addressRows(profile)
-                    generateButton(profile)
-                }
-            }
-            .navigationTitle("Change Addresses")
-            .navigationBarTitleDisplayMode(.inline)
-            .onAppear { draftOutputs = selectedOutputs }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
-                        showingAllocation = true
+            ScrollViewReader { proxy in
+                List {
+                    if let profile {
+                        addressRows(profile)
+                        generateButton(profile)
                     }
-                    .disabled(draftOutputs.isEmpty)
+                }
+                .navigationTitle("Change Addresses")
+                .navigationBarTitleDisplayMode(.inline)
+                .onAppear {
+                    draftOutputs = selectedOutputs
+                    let target = selectedOutputs.first?.addressIndex
+                        ?? profile?.nextChangeIndex
+                    guard let target else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        proxy.scrollTo(target, anchor: .center)
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") { dismiss() }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Done") {
+                            if transactionType == .standard {
+                                selectedOutputs = draftOutputs
+                                completeStandardSelection(draftOutputs)
+                                dismiss()
+                            } else if transactionType == .decoy {
+                                Task { await completeDecoySelection() }
+                            } else {
+                                showingAllocation = true
+                            }
+                        }
+                        .disabled(!selectionCountIsValid || isResolvingSelection)
+                    }
                 }
             }
             .navigationDestination(isPresented: $showingAllocation) {
@@ -2573,6 +2937,7 @@ private struct ChangeAddressPickerView: View {
             ) {
                 toggle(index: index, address: address)
             }
+            .id(index)
             .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
@@ -2594,13 +2959,31 @@ private struct ChangeAddressPickerView: View {
             draftOutputs.remove(at: selectedIndex)
             return
         }
-        guard draftOutputs.count < ChangeOutputPlanner.maximumOutputCount else {
-            selectionError = "Select no more than four change addresses."
+        guard draftOutputs.count < maximumSelectionCount else {
+            selectionError = maximumSelectionCount == 1
+                ? "Standard Send uses one change address. Deselect it before choosing another."
+                : "This transaction type uses no more than \(maximumSelectionCount) change addresses."
             return
         }
         draftOutputs.append(
             PlannedChangeOutput(addressIndex: index, address: address, amountSompi: 0)
         )
+    }
+
+    @MainActor
+    private func completeDecoySelection() async {
+        guard !isResolvingSelection else { return }
+        isResolvingSelection = true
+        defer { isResolvingSelection = false }
+        do {
+            let resolved = try await resolvePlan(draftOutputs)
+            draftOutputs = resolved.outputs
+            selectedOutputs = resolved.outputs
+            completePlan(resolved.outputs, resolved.plan)
+            dismiss()
+        } catch {
+            selectionError = error.localizedDescription
+        }
     }
 
     private func generateAddress(from profile: WalletProfile) async {

@@ -396,9 +396,11 @@ enum ChangeOutputPlanner {
 struct SendSession: Identifiable, Equatable {
     let id: UUID
     let profileID: UUID
+    let transactionType: SendTransactionType
     var selectedUTXOs: [WalletUTXO]
     var changeOutputs: [PlannedChangeOutput]
     var usesManualChangeAllocation: Bool
+    var recipients: [SendRecipientDraft]
     var destination: String
     var amountText: String
     var sendMax: Bool
@@ -409,6 +411,18 @@ struct SendSession: Identifiable, Equatable {
     var stage: SendSessionStage
     let createdAt: Date
     var updatedAt: Date
+}
+
+struct SendRecipientDraft: Identifiable, Equatable {
+    let id: UUID
+    var address: String
+    var amountText: String
+
+    init(id: UUID = UUID(), address: String = "", amountText: String = "") {
+        self.id = id
+        self.address = address
+        self.amountText = amountText
+    }
 }
 
 private final class WalletTransactionCache {
@@ -589,25 +603,44 @@ final class WalletStore: ObservableObject {
     }
 
     @discardableResult
-    func beginSendSession(profileID: UUID, selectedUTXOs: [WalletUTXO]) -> SendSession? {
+    func beginSendSession(
+        profileID: UUID,
+        selectedUTXOs: [WalletUTXO],
+        transactionType: SendTransactionType = .standard
+    ) -> SendSession? {
         guard !selectedUTXOs.isEmpty,
-              let profile = profiles.first(where: { $0.id == profileID }),
-              profile.changeAddresses.indices.contains(profile.nextChangeIndex)
+              let profile = profiles.first(where: { $0.id == profileID })
         else { return nil }
+
+        let initialChangeCount: Int
+        switch transactionType {
+        case .standard:
+            initialChangeCount = 1
+        case .privacyFocused:
+            initialChangeCount = 2
+        case .decoy:
+            initialChangeCount = 4
+        }
+        let initialIndices = profile.nextChangeIndex..<(profile.nextChangeIndex + initialChangeCount)
+        guard initialIndices.allSatisfy(profile.changeAddresses.indices.contains) else {
+            return nil
+        }
 
         let now = Date()
         let session = SendSession(
             id: UUID(),
             profileID: profileID,
+            transactionType: transactionType,
             selectedUTXOs: selectedUTXOs,
-            changeOutputs: [
+            changeOutputs: initialIndices.map { index in
                 PlannedChangeOutput(
-                    addressIndex: profile.nextChangeIndex,
-                    address: profile.changeAddresses[profile.nextChangeIndex],
+                    addressIndex: index,
+                    address: profile.changeAddresses[index],
                     amountSompi: 0
                 )
-            ],
+            },
             usesManualChangeAllocation: false,
+            recipients: [SendRecipientDraft()],
             destination: "",
             amountText: "",
             sendMax: false,

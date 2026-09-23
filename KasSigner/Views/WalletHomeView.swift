@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-enum SendTransactionType: String, CaseIterable, Identifiable, Hashable {
+enum SendTransactionType: String, CaseIterable, Identifiable, Codable, Hashable {
     case standard
     case privacyFocused
     case decoy
@@ -540,7 +540,8 @@ struct SendUTXOSelectionView: View {
                     Button {
                         guard let session = walletStore.beginSendSession(
                             profileID: profile.id,
-                            selectedUTXOs: selectedUTXOs
+                            selectedUTXOs: selectedUTXOs,
+                            transactionType: transactionType
                         ) else {
                             showingSessionError = true
                             return
@@ -573,6 +574,7 @@ struct SendUTXOSelectionView: View {
                 SendDestinationView(
                     profile: profile,
                     selectedUTXOs: session.selectedUTXOs,
+                    transactionType: session.transactionType,
                     sessionID: activeSessionID,
                     showingSendFlow: $showingSendFlow
                 )
@@ -592,7 +594,18 @@ struct SendUTXOSelectionView: View {
         .alert("Send could not begin", isPresented: $showingSessionError) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text("No fresh change address is available. Refresh the wallet and try again.")
+            Text(sendSessionErrorMessage)
+        }
+    }
+
+    private var sendSessionErrorMessage: String {
+        switch transactionType {
+        case .standard:
+            "No fresh change address is available. Refresh the wallet and try again."
+        case .privacyFocused:
+            "Privacy-Focused Send requires at least two available change addresses. Refresh the wallet and try again."
+        case .decoy:
+            "Decoy Transaction requires at least four available change addresses. Refresh the wallet and try again."
         }
     }
 

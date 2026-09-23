@@ -35,11 +35,45 @@ pub struct ExplicitChangeOutput {
     pub amount_sompi: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct ExplicitRecipient {
+    pub address: String,
+    pub amount_sompi: u64,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ExplicitChangeFeePlan {
     pub fee_sompi: u64,
     pub available_change_sompi: u64,
     pub amounts_sompi: Vec<u64>,
+}
+
+fn validate_transaction_mode_change_count(
+    transaction_mode: &str,
+    change_count: usize,
+) -> Result<(), String> {
+    match transaction_mode {
+        "standard" if change_count <= 1 => Ok(()),
+        "privacyFocused" if (2..=4).contains(&change_count) => Ok(()),
+        "decoy" if change_count == 4 => Ok(()),
+        "standard" => Err("Standard Send supports at most one change output".into()),
+        "privacyFocused" => {
+            Err("Privacy-Focused Send requires two to four change outputs".into())
+        }
+        "decoy" => Err("Decoy Transaction requires exactly four change outputs".into()),
+        _ => Err("Unknown transaction type".into()),
+    }
+}
+
+fn securely_shuffle_outputs<T>(outputs: &mut [T]) -> Result<(), String> {
+    for upper in (1..outputs.len()).rev() {
+        let mut bytes = [0u8; 8];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|_| "Secure output randomization is unavailable".to_string())?;
+        let index = (u64::from_le_bytes(bytes) % (upper as u64 + 1)) as usize;
+        outputs.swap(upper, index);
+    }
+    Ok(())
 }
 
 fn validate_explicit_change_outputs(
@@ -148,8 +182,8 @@ fn fee_for_mass(compute_mass: u64, transaction_mass: u64, fee_rate: f64) -> Resu
 
 pub fn plan_explicit_change_fee(
     wallet: &WalletData,
-    dest_address: &str,
-    amount_sompi: u64,
+    transaction_mode: &str,
+    recipients: Vec<ExplicitRecipient>,
     exact_fee_sompi: u64,
     fee_rate_sompi_per_gram: f64,
     mut change_outputs: Vec<ExplicitChangeOutput>,
@@ -161,17 +195,50 @@ pub fn plan_explicit_change_fee(
     if change_outputs.is_empty() {
         return Err("Select at least one change address".into());
     }
-    if amount_sompi == 0 || is_dust(amount_sompi) {
-        return Err("The destination amount would be dust".into());
+    validate_transaction_mode_change_count(transaction_mode, change_outputs.len())?;
+    if recipients.is_empty() || recipients.len() > 4 {
+        return Err("A transaction requires one to four recipients".into());
     }
+    if transaction_mode == "decoy" && recipients.len() != 1 {
+        return Err("Decoy Transaction supports exactly one recipient".into());
+    }
+    if recipients.iter().any(|recipient| recipient.amount_sompi == 0 || is_dust(recipient.amount_sompi)) {
+        return Err("Every destination amount must be above the dust limit".into());
+    }
+    let recipient_total = recipients.iter().try_fold(0u64, |total, recipient| {
+        total.checked_add(recipient.amount_sompi)
+            .ok_or_else(|| "Recipient total overflow".to_string())
+    })?;
+    let decoy_amount = recipients[0].amount_sompi;
 
-    let dest_script = crate::address::address_to_script_pubkey(dest_address)?;
-    let (_, change_scripts) = validate_explicit_change_outputs(wallet, &change_outputs)?;
     let selected_total = selected.iter().try_fold(0u64, |total, utxo| {
         total
             .checked_add(utxo.amount)
             .ok_or_else(|| "Selected UTXO total overflow".to_string())
     })?;
+    if transaction_mode == "decoy" {
+        let tentative_remainder = selected_total
+            .checked_sub(recipient_total)
+            .and_then(|value| value.checked_sub(decoy_amount))
+            .ok_or_else(|| "Selected UTXOs cannot fund the matching decoy amount".to_string())?;
+        let first = tentative_remainder.saturating_mul(29) / 100;
+        let second = tentative_remainder.saturating_mul(33) / 100;
+        let third = tentative_remainder
+            .checked_sub(first)
+            .and_then(|value| value.checked_sub(second))
+            .ok_or_else(|| "Decoy change allocation overflow".to_string())?;
+        for (output, amount) in change_outputs
+            .iter_mut()
+            .zip([decoy_amount, first, second, third])
+        {
+            output.amount_sompi = amount;
+        }
+    }
+
+    let recipient_scripts = recipients.iter()
+        .map(|recipient| crate::address::address_to_script_pubkey(&recipient.address))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (_, change_scripts) = validate_explicit_change_outputs(wallet, &change_outputs)?;
     let fixed_change = change_outputs
         .iter()
         .take(change_outputs.len() - 1)
@@ -180,15 +247,15 @@ pub fn plan_explicit_change_fee(
                 .checked_add(output.amount_sompi)
                 .ok_or_else(|| "Change output total overflow".to_string())
         })?;
-    let mut script_lengths = Vec::with_capacity(1 + change_scripts.len());
-    script_lengths.push(dest_script.len());
+    let mut script_lengths = Vec::with_capacity(recipient_scripts.len() + change_scripts.len());
+    script_lengths.extend(recipient_scripts.iter().map(Vec::len));
     script_lengths.extend(change_scripts.iter().map(Vec::len));
     let compute_mass = standard_compute_mass(selected.len(), &script_lengths)?;
     let inputs: Vec<(u64, u64)> = selected.iter().map(|utxo| (utxo.amount, 1)).collect();
 
     for _ in 0..64 {
-        let mut storage_outputs = Vec::with_capacity(1 + change_outputs.len());
-        storage_outputs.push((amount_sompi, 1));
+        let mut storage_outputs = Vec::with_capacity(recipients.len() + change_outputs.len());
+        storage_outputs.extend(recipients.iter().map(|recipient| (recipient.amount_sompi, 1)));
         storage_outputs.extend(change_outputs.iter().map(|output| (output.amount_sompi, 1)));
         let mass = compute_mass.max(storage_mass_estimate(&inputs, &storage_outputs));
         if mass > MAX_STANDARD_MASS {
@@ -210,9 +277,43 @@ pub fn plan_explicit_change_fee(
             fee_for_mass(compute_mass, mass, fee_rate_sompi_per_gram)?
         };
         let available_change = selected_total
-            .checked_sub(amount_sompi)
+            .checked_sub(recipient_total)
             .and_then(|value| value.checked_sub(fee))
             .ok_or_else(|| "Selected UTXOs cannot cover the amount and fee".to_string())?;
+        if transaction_mode == "decoy" {
+            let remainder = available_change
+                .checked_sub(decoy_amount)
+                .ok_or_else(|| "Selected UTXOs cannot fund the matching decoy amount".to_string())?;
+            let first = remainder.saturating_mul(29) / 100;
+            let second = remainder.saturating_mul(33) / 100;
+            let third = remainder
+                .checked_sub(first)
+                .and_then(|value| value.checked_sub(second))
+                .ok_or_else(|| "Decoy change allocation overflow".to_string())?;
+            if [first, second, third].into_iter().any(|value| value == 0 || is_dust(value)) {
+                return Err(
+                    "Insufficient selected funds for four valid Decoy Transaction change outputs"
+                        .into(),
+                );
+            }
+            let next_amounts = [decoy_amount, first, second, third];
+            if change_outputs
+                .iter()
+                .map(|output| output.amount_sompi)
+                .eq(next_amounts)
+            {
+                return Ok(ExplicitChangeFeePlan {
+                    fee_sompi: fee,
+                    available_change_sompi: available_change,
+                    amounts_sompi: next_amounts.to_vec(),
+                });
+            }
+            for (output, amount) in change_outputs.iter_mut().zip(next_amounts) {
+                output.amount_sompi = amount;
+            }
+            continue;
+        }
+
         let final_amount = available_change.checked_sub(fixed_change).ok_or_else(|| {
             "The earlier change amounts leave no value for the final output".to_string()
         })?;
@@ -1388,20 +1489,44 @@ pub async fn create_send_pskb_selected(
 /// to full mass, dust change is absorbed, and standard mass is enforced.
 pub async fn create_send_pskb_with_utxos(
     wallet: &WalletData,
-    dest_address: &str,
-    amount_sompi: u64,
+    transaction_mode: &str,
+    recipients: Vec<ExplicitRecipient>,
     exact_fee_sompi: u64,
     fee_rate_sompi_per_gram: f64,
     send_max: bool,
     change_outputs: Vec<ExplicitChangeOutput>,
     selected: Vec<crate::rpc::UtxoEntry>,
 ) -> Result<String, String> {
-    let dest_script = crate::address::address_to_script_pubkey(dest_address)?;
+    if recipients.is_empty() || recipients.len() > 4 {
+        return Err("A transaction requires one to four recipients".into());
+    }
+    if transaction_mode == "decoy" && recipients.len() != 1 {
+        return Err("Decoy Transaction supports exactly one recipient".into());
+    }
+    let recipient_scripts = recipients.iter()
+        .map(|recipient| crate::address::address_to_script_pubkey(&recipient.address))
+        .collect::<Result<Vec<_>, _>>()?;
+    let recipient_total = recipients.iter().try_fold(0u64, |total, recipient| {
+        total.checked_add(recipient.amount_sompi)
+            .ok_or_else(|| "Recipient total overflow".to_string())
+    })?;
+    let primary_amount = recipients[0].amount_sompi;
 
     if selected.is_empty() {
         return Err("No UTXOs provided".into());
     }
     validate_input_derivations(wallet, &selected)?;
+
+    validate_transaction_mode_change_count(transaction_mode, change_outputs.len())?;
+    if transaction_mode == "decoy"
+        && change_outputs
+            .iter()
+            .filter(|output| output.amount_sompi == primary_amount)
+            .count()
+            != 1
+    {
+        return Err("Decoy Transaction requires one change output matching the recipient amount".into());
+    }
 
     let (explicit_change_total, explicit_change_scripts) =
         validate_explicit_change_outputs(wallet, &change_outputs)?;
@@ -1416,40 +1541,43 @@ pub async fn create_send_pskb_with_utxos(
         .map(|address| crate::address::address_to_script_pubkey(address))
         .transpose()?;
     let plan = if change_outputs.is_empty() {
+        if recipients.len() != 1 {
+            return Err("Multiple destinations require an explicit change plan".into());
+        }
         standard_send_plan(
             &selected,
-            amount_sompi,
-            dest_script.len(),
+            primary_amount,
+            recipient_scripts[0].len(),
             fallback_change_script
                 .as_ref()
                 .map(Vec::len)
-                .unwrap_or(dest_script.len()),
+                .unwrap_or(recipient_scripts[0].len()),
             fee_rate_sompi_per_gram,
             exact_fee_sompi,
             send_max,
         )?
     } else {
-        if amount_sompi == 0 || is_dust(amount_sompi) {
-            return Err("The destination amount would be dust".into());
+        if recipients.iter().any(|recipient| recipient.amount_sompi == 0 || is_dust(recipient.amount_sompi)) {
+            return Err("Every destination amount must be above the dust limit".into());
         }
         let selected_total = selected.iter().try_fold(0u64, |total, utxo| {
             total
                 .checked_add(utxo.amount)
                 .ok_or_else(|| "Selected UTXO total overflow".to_string())
         })?;
-        let total_outputs = amount_sompi
+        let total_outputs = recipient_total
             .checked_add(explicit_change_total)
             .ok_or_else(|| "Transaction output total overflow".to_string())?;
         let actual_fee = selected_total
             .checked_sub(total_outputs)
             .ok_or_else(|| "Change amounts exceed the selected input total".to_string())?;
-        let mut script_lengths = Vec::with_capacity(1 + explicit_change_scripts.len());
-        script_lengths.push(dest_script.len());
+        let mut script_lengths = Vec::with_capacity(recipient_scripts.len() + explicit_change_scripts.len());
+        script_lengths.extend(recipient_scripts.iter().map(Vec::len));
         script_lengths.extend(explicit_change_scripts.iter().map(Vec::len));
         let compute_mass = standard_compute_mass(selected.len(), &script_lengths)?;
         let inputs: Vec<(u64, u64)> = selected.iter().map(|utxo| (utxo.amount, 1)).collect();
-        let mut storage_outputs = Vec::with_capacity(1 + change_outputs.len());
-        storage_outputs.push((amount_sompi, 1));
+        let mut storage_outputs = Vec::with_capacity(recipients.len() + change_outputs.len());
+        storage_outputs.extend(recipients.iter().map(|recipient| (recipient.amount_sompi, 1)));
         storage_outputs.extend(change_outputs.iter().map(|output| (output.amount_sompi, 1)));
         let mass = compute_mass.max(storage_mass_estimate(&inputs, &storage_outputs));
         if mass > MAX_STANDARD_MASS {
@@ -1479,7 +1607,7 @@ pub async fn create_send_pskb_with_utxos(
             }
         }
         StandardSendPlan {
-            amount: amount_sompi,
+            amount: recipient_total,
             fee: actual_fee,
             change: explicit_change_total,
             mass,
@@ -1488,7 +1616,11 @@ pub async fn create_send_pskb_with_utxos(
     let _verified_mass = plan.mass;
     let _verified_fee = plan.fee;
 
-    let mut outputs = vec![(plan.amount, dest_script)];
+    let mut outputs: Vec<(u64, Vec<u8>)> = recipients
+        .iter()
+        .zip(recipient_scripts)
+        .map(|(recipient, script)| (recipient.amount_sompi, script))
+        .collect();
     if change_outputs.is_empty() {
         if plan.change > 0 {
             outputs.push((
@@ -1508,6 +1640,9 @@ pub async fn create_send_pskb_with_utxos(
         }
     }
 
+    if transaction_mode != "standard" {
+        securely_shuffle_outputs(&mut outputs)?;
+    }
     serialize_pskb_single_sig_v4(&selected, &outputs, wallet)
 }
 
@@ -1726,15 +1861,14 @@ fn serialize_pskb_single_sig_inner(
     }
 
     let mut outputs_json = Vec::<serde_json::Value>::with_capacity(outputs.len());
-    for (output_index, (amount, script)) in outputs.iter().enumerate() {
+    for (amount, script) in outputs {
         let spk_hex = format!("0000{}", hex::encode(script));
         let mut proprietaries = serde_json::json!({});
-        if output_index > 0 {
-            if let Some(wallet) = v4_wallet {
-                let index = wallet.change_addresses.iter().position(|address| {
+        if let Some(wallet) = v4_wallet {
+            if let Some(index) = wallet.change_addresses.iter().position(|address| {
                     crate::address::address_to_script_pubkey(address)
                         .as_ref().is_ok_and(|candidate| candidate == script)
-                }).ok_or_else(|| format!("Change output {} has no wallet path", output_index))?;
+                }) {
                 if index > 511 {
                     return Err("Change derivation index exceeds M5 v4 range".into());
                 }
@@ -2922,6 +3056,61 @@ mod standard_send_tests {
     }
 
     #[test]
+    fn transaction_modes_enforce_their_change_output_counts() {
+        assert!(validate_transaction_mode_change_count("standard", 0).is_ok());
+        assert!(validate_transaction_mode_change_count("standard", 1).is_ok());
+        assert!(validate_transaction_mode_change_count("standard", 2).is_err());
+        assert!(validate_transaction_mode_change_count("privacyFocused", 2).is_ok());
+        assert!(validate_transaction_mode_change_count("privacyFocused", 4).is_ok());
+        assert!(validate_transaction_mode_change_count("privacyFocused", 1).is_err());
+        assert!(validate_transaction_mode_change_count("decoy", 4).is_ok());
+        assert!(validate_transaction_mode_change_count("decoy", 3).is_err());
+    }
+
+    #[test]
+    fn decoy_plan_creates_one_matching_and_three_additional_change_outputs() {
+        let wallet = wallet_with_change_count(4);
+        let selected = vec![utxo(1_000_000_000, 0)];
+        let outputs = wallet
+            .change_addresses
+            .iter()
+            .map(|address| ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: 0,
+            })
+            .collect();
+        let recipient_amount = 100_000_000;
+
+        let plan = plan_explicit_change_fee(
+            &wallet,
+            "decoy",
+            vec![ExplicitRecipient {
+                address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+                amount_sompi: recipient_amount,
+            }],
+            0,
+            150.0,
+            outputs,
+            &selected,
+        )
+        .unwrap();
+
+        assert_eq!(plan.amounts_sompi.len(), 4);
+        assert_eq!(
+            plan.amounts_sompi
+                .iter()
+                .filter(|amount| **amount == recipient_amount)
+                .count(),
+            1
+        );
+        assert!(plan.amounts_sompi.iter().all(|amount| !is_dust(*amount)));
+        assert_eq!(
+            recipient_amount + plan.amounts_sompi.iter().sum::<u64>() + plan.fee_sompi,
+            1_000_000_000
+        );
+    }
+
+    #[test]
     fn explicit_change_fee_plan_converges_and_preserves_the_output_total() {
         let wallet = wallet_with_change_count(3);
         let selected = vec![utxo(500_000_000, 0)];
@@ -2934,8 +3123,11 @@ mod standard_send_tests {
 
         let plan = plan_explicit_change_fee(
             &wallet,
-            &crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
-            100_000_000,
+            "privacyFocused",
+            vec![ExplicitRecipient {
+                address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+                amount_sompi: 100_000_000,
+            }],
             0,
             150.0,
             outputs,
@@ -2960,8 +3152,11 @@ mod standard_send_tests {
 
         let plan = plan_explicit_change_fee(
             &wallet,
-            &crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
-            100_000_000,
+            "privacyFocused",
+            vec![ExplicitRecipient {
+                address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+                amount_sompi: 100_000_000,
+            }],
             500_000,
             0.0,
             outputs,

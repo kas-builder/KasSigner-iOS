@@ -107,7 +107,9 @@ struct SendDraftInput: Encodable, Hashable {
 
 struct SendDraft {
     let profile: WalletProfile
+    let transactionType: SendTransactionType
     let selectedInputs: [SendDraftInput]
+    let recipients: [SendDraftRecipient]
     let destination: String
     let amountSompi: UInt64
     let feeSompi: UInt64
@@ -119,24 +121,34 @@ struct SendDraft {
 
     init(
         profile: WalletProfile,
+        transactionType: SendTransactionType = .standard,
         selectedUTXOs: [WalletUTXO],
-        destination: String,
-        amountSompi: UInt64,
+        recipients: [SendDraftRecipient],
         feeSompi: UInt64,
         feeRateSompiPerGram: Double,
         usesExactFee: Bool,
         sendMax: Bool,
         changeOutputs: [PlannedChangeOutput] = []
     ) throws {
-        let destination = destination.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        guard !destination.isEmpty else {
+        guard !recipients.isEmpty, recipients.count <= 4 else {
             throw SendDraftError.emptyDestination
         }
-
-        guard amountSompi > 0 else {
+        guard transactionType != .decoy || recipients.count == 1 else {
+            throw SendDraftError.tooManyRecipientsForDecoy
+        }
+        let normalizedRecipients = recipients.map {
+            SendDraftRecipient(
+                address: $0.address.trimmingCharacters(in: .whitespacesAndNewlines),
+                amountSompi: $0.amountSompi
+            )
+        }
+        guard normalizedRecipients.allSatisfy({ !$0.address.isEmpty }) else {
+            throw SendDraftError.emptyDestination
+        }
+        guard Set(normalizedRecipients.map { $0.address.lowercased() }).count == normalizedRecipients.count else {
+            throw SendDraftError.duplicateRecipient
+        }
+        guard normalizedRecipients.allSatisfy({ $0.amountSompi > 0 }) else {
             throw SendDraftError.zeroAmount
         }
 
@@ -172,7 +184,13 @@ struct SendDraft {
             selectedTotalSompi = addition.partialValue
         }
 
-        let required = amountSompi.addingReportingOverflow(feeSompi)
+        let recipientTotal = normalizedRecipients.reduce(into: UInt64?.some(0)) { total, recipient in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(recipient.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+        guard let recipientTotal else { throw SendDraftError.requiredTotalOverflow }
+        let required = recipientTotal.addingReportingOverflow(feeSompi)
 
         guard !required.overflow else {
             throw SendDraftError.requiredTotalOverflow
@@ -183,9 +201,11 @@ struct SendDraft {
         }
 
         self.profile = profile
+        self.transactionType = transactionType
         self.selectedInputs = selectedInputs
-        self.destination = destination
-        self.amountSompi = amountSompi
+        self.recipients = normalizedRecipients
+        self.destination = normalizedRecipients[0].address
+        self.amountSompi = normalizedRecipients[0].amountSompi
         self.feeSompi = feeSompi
         self.feeRateSompiPerGram = feeRateSompiPerGram
         self.usesExactFee = usesExactFee
@@ -197,6 +217,8 @@ struct SendDraft {
 
 enum SendDraftError: LocalizedError {
     case emptyDestination
+    case duplicateRecipient
+    case tooManyRecipientsForDecoy
     case zeroAmount
     case noSelectedInputs
     case tooManySelectedInputs
@@ -213,6 +235,10 @@ enum SendDraftError: LocalizedError {
         switch self {
         case .emptyDestination:
             return "The destination address is empty."
+        case .duplicateRecipient:
+            return "Each destination address may be used only once."
+        case .tooManyRecipientsForDecoy:
+            return "Decoy Transaction supports exactly one recipient."
         case .zeroAmount:
             return "The send amount must be greater than zero."
         case .noSelectedInputs:
@@ -236,6 +262,16 @@ enum SendDraftError: LocalizedError {
         case let .unresolvedInputDerivation(outpoint):
             return "The selected UTXO \(outpoint) could not be matched to a receive or change address in this wallet."
         }
+    }
+}
+
+struct SendDraftRecipient: Codable, Equatable {
+    let address: String
+    let amountSompi: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case address
+        case amountSompi = "amount_sompi"
     }
 }
 
@@ -615,7 +651,9 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
 
         let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
-        guard let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8) else {
+        let recipientsData = try JSONEncoder().encode(draft.recipients)
+        guard let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8),
+              let recipientsJSON = String(data: recipientsData, encoding: .utf8) else {
             throw EngineError.invalidResponse
         }
 
@@ -624,8 +662,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
             try {
                 const value = await window.kaspi.buildUnsignedPSKB(
                     wallet,
-                    destination,
-                    amountSompi,
+                    transactionMode,
+                    recipientsJSON,
                     feeSompi,
                     feeRateSompiPerGram,
                     usesExactFee,
@@ -643,8 +681,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
             """,
             arguments: [
                 "wallet": wallet,
-                "destination": draft.destination,
-                "amountSompi": String(draft.amountSompi),
+                "transactionMode": draft.transactionType.rawValue,
+                "recipientsJSON": recipientsJSON,
                 "feeSompi": String(draft.feeSompi),
                 "feeRateSompiPerGram": draft.feeRateSompiPerGram,
                 "usesExactFee": draft.usesExactFee,
@@ -700,8 +738,10 @@ final class KasSignerEngine: NSObject, ObservableObject {
         ]
         let utxosData = try JSONEncoder().encode(draft.selectedInputs)
         let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
+        let recipientsData = try JSONEncoder().encode(draft.recipients)
         guard let utxosJSON = String(data: utxosData, encoding: .utf8),
-              let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8)
+              let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8),
+              let recipientsJSON = String(data: recipientsData, encoding: .utf8)
         else {
             throw EngineError.invalidResponse
         }
@@ -711,8 +751,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
             try {
                 const value = window.kaspi.planChangeOutputs(
                     wallet,
-                    destination,
-                    amountSompi,
+                    transactionMode,
+                    recipientsJSON,
                     feeSompi,
                     feeRateSompiPerGram,
                     usesExactFee,
@@ -726,8 +766,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
             """,
             arguments: [
                 "wallet": wallet,
-                "destination": draft.destination,
-                "amountSompi": String(draft.amountSompi),
+                "transactionMode": draft.transactionType.rawValue,
+                "recipientsJSON": recipientsJSON,
                 "feeSompi": String(draft.feeSompi),
                 "feeRateSompiPerGram": draft.feeRateSompiPerGram,
                 "usesExactFee": draft.usesExactFee,

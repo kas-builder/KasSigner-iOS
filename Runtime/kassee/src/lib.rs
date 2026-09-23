@@ -432,8 +432,8 @@ fn parse_explicit_utxos(utxos_json: &str) -> Result<Vec<rpc::UtxoEntry>, JsValue
 #[wasm_bindgen]
 pub fn plan_send_change_outputs_with_utxos(
     wallet_json: &str,
-    dest_address: &str,
-    amount_sompi: u64,
+    transaction_mode: &str,
+    recipients_json: &str,
     exact_fee_sompi: u64,
     fee_rate_sompi_per_gram: f64,
     change_outputs_json: &str,
@@ -441,13 +441,15 @@ pub fn plan_send_change_outputs_with_utxos(
 ) -> Result<String, JsValue> {
     let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
         .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let recipients: Vec<kspt::ExplicitRecipient> = serde_json::from_str(recipients_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad recipients: {}", e)))?;
     let change_outputs: Vec<kspt::ExplicitChangeOutput> = serde_json::from_str(change_outputs_json)
         .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
     let utxos = parse_explicit_utxos(utxos_json)?;
     let plan = kspt::plan_explicit_change_fee(
         &wallet,
-        dest_address,
-        amount_sompi,
+        transaction_mode,
+        recipients,
         exact_fee_sompi,
         fee_rate_sompi_per_gram,
         change_outputs,
@@ -461,8 +463,8 @@ pub fn plan_send_change_outputs_with_utxos(
 #[wasm_bindgen]
 pub async fn create_send_pskb_with_utxos(
     wallet_json: &str,
-    dest_address: &str,
-    amount_sompi: u64,
+    transaction_mode: &str,
+    recipients_json: &str,
     exact_fee_sompi: u64,
     fee_rate_sompi_per_gram: f64,
     send_max: bool,
@@ -471,13 +473,15 @@ pub async fn create_send_pskb_with_utxos(
 ) -> Result<String, JsValue> {
     let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
         .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    let recipients: Vec<kspt::ExplicitRecipient> = serde_json::from_str(recipients_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad recipients: {}", e)))?;
     let change_outputs: Vec<kspt::ExplicitChangeOutput> = serde_json::from_str(change_outputs_json)
         .map_err(|e| JsValue::from_str(&format!("Bad change outputs: {}", e)))?;
     let utxos = parse_explicit_utxos(utxos_json)?;
     kspt::create_send_pskb_with_utxos(
         &wallet,
-        dest_address,
-        amount_sompi,
+        transaction_mode,
+        recipients,
         exact_fee_sompi,
         fee_rate_sompi_per_gram,
         send_max,

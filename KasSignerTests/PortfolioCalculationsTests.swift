@@ -1571,6 +1571,50 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testSendSessionTransactionTypesSelectRequiredFreshChangeAddresses() throws {
+        let store = WalletStore()
+        let profile = WalletProfile(
+            name: "Mode Wallet",
+            kpub: "kpub-mode-test",
+            changeAddresses: (0..<6).map { "kaspa:change-\($0)" },
+            nextChangeIndex: 1
+        )
+        store.add(profile)
+        let utxo = WalletUTXO(
+            txID: String(repeating: "b", count: 64),
+            index: 0,
+            amount: 1_000_000_000,
+            scriptPublicKey: [0x20],
+            blockDAAScore: 1,
+            covenantID: nil
+        )
+
+        let standard = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .standard
+        ))
+        XCTAssertEqual(standard.transactionType, .standard)
+        XCTAssertEqual(standard.changeOutputs.map(\.addressIndex), [1])
+
+        let privacy = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .privacyFocused
+        ))
+        XCTAssertEqual(privacy.transactionType, .privacyFocused)
+        XCTAssertEqual(privacy.changeOutputs.map(\.addressIndex), [1, 2])
+
+        let decoy = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .decoy
+        ))
+        XCTAssertEqual(decoy.transactionType, .decoy)
+        XCTAssertEqual(decoy.changeOutputs.map(\.addressIndex), [1, 2, 3, 4])
+    }
+
+    @MainActor
     func testImportedWalletIsNotPersistedUntilDiscoveryCommits() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)
