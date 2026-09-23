@@ -722,6 +722,15 @@ struct PortfolioView: View {
             HStack {
                 Text("Transactions")
                     .font(.headline)
+
+                Spacer()
+
+                Button(action: presentNewTransactionEditor) {
+                    Image(systemName: "plus")
+                        .font(.headline)
+                }
+                .tint(activePortfolioColor)
+                .accessibilityLabel("New Portfolio Transaction")
             }
 
             if displayedTransactions.isEmpty {
