@@ -1,6 +1,14 @@
 import SwiftUI
 import UIKit
 
+enum SendTransactionType: String, CaseIterable, Identifiable, Hashable {
+    case standard
+    case privacyFocused
+    case decoy
+
+    var id: Self { self }
+}
+
 struct WalletHomeView: View {
     private enum WalletRoute: Hashable {
         case receive(UUID)
@@ -254,9 +262,8 @@ struct WalletHomeView: View {
             _ = await (walletRefresh, priceRefresh)
         }
         .navigationDestination(isPresented: $showingSendFlow) {
-            SendUTXOSelectionView(
+            SendTransactionTypeSelectionView(
                 profile: profile,
-                clearSelectionOnAppear: true,
                 showingSendFlow: $showingSendFlow
             )
         }
@@ -355,8 +362,144 @@ struct WalletHomeView: View {
     }
 }
 
+struct SendTransactionTypeSelectionView: View {
+    let profile: WalletProfile
+    @Binding var showingSendFlow: Bool
+
+    @State private var selectedType: SendTransactionType = .standard
+    @State private var showingUTXOSelection = false
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Choose how this transaction should be structured.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.bottom, 2)
+
+                    transactionTypeCard(
+                        .standard,
+                        title: "Standard Send",
+                        subtitle: "One or more recipients • 0–1 change outputs",
+                        detail: "The simplest option with the lowest transaction fee.",
+                        systemImage: "arrow.up.right"
+                    )
+
+                    transactionTypeCard(
+                        .privacyFocused,
+                        title: "Privacy-Focused Send",
+                        subtitle: "One or more recipients • 2–4 change outputs",
+                        detail: "Splits change across fresh wallet addresses for added ambiguity.",
+                        systemImage: "shield.lefthalf.filled"
+                    )
+
+                    transactionTypeCard(
+                        .decoy,
+                        title: "Decoy Transaction",
+                        subtitle: "One recipient • 4 change outputs",
+                        detail: "Creates a matching decoy amount and additional change outputs.",
+                        systemImage: "theatermasks"
+                    )
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .background(Color(.systemGroupedBackground))
+
+            Button {
+                showingUTXOSelection = true
+            } label: {
+                Text("Continue")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(accentColor)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+        }
+        .navigationTitle("Transaction Type")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
+        .navigationDestination(isPresented: $showingUTXOSelection) {
+            SendUTXOSelectionView(
+                profile: profile,
+                transactionType: selectedType,
+                clearSelectionOnAppear: true,
+                showingSendFlow: $showingSendFlow
+            )
+        }
+    }
+
+    private func transactionTypeCard(
+        _ type: SendTransactionType,
+        title: String,
+        subtitle: String,
+        detail: String,
+        systemImage: String
+    ) -> some View {
+        Button {
+            selectedType = type
+        } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(accentColor)
+                    .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text(subtitle)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(accentColor)
+
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: selectedType == type ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(selectedType == type ? accentColor : Color.secondary)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selectedType == type
+                    ? accentColor.opacity(0.12)
+                    : Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        selectedType == type ? accentColor : Color.clear,
+                        lineWidth: 1.5
+                    )
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(SubtlePressButtonStyle())
+        .accessibilityLabel("\(title). \(subtitle). \(detail)")
+        .accessibilityAddTraits(selectedType == type ? .isSelected : [])
+    }
+}
+
 struct SendUTXOSelectionView: View {
     let profile: WalletProfile
+    let transactionType: SendTransactionType
     let clearSelectionOnAppear: Bool
     @Binding var showingSendFlow: Bool
 
