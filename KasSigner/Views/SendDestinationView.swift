@@ -14,6 +14,8 @@ struct SendDestinationView: View {
 
     @State private var destinationAddress = ""
     @State private var amountText = ""
+    @State private var usdAmountText = ""
+    @State private var amountEntryUsesUSD = false
     @State private var additionalRecipients: [SendRecipientDraft] = []
     @State private var additionalRecipientValidity: [UUID: Bool] = [:]
     @State private var sendMax = false
@@ -40,6 +42,7 @@ struct SendDestinationView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var priceService: PriceService
     @State private var addressValidation: AddressValidationResult?
     @State private var isValidatingAddress = false
     @State private var addressValidationTask: Task<Void, Never>?
@@ -268,8 +271,8 @@ struct SendDestinationView: View {
                 ScrollView {
                     VStack(spacing: 14) {
                         destinationCards
-                        changeAddressCard
                         amountCard
+                        changeAddressCard
                         feeCard
                     }
                     .padding(.horizontal, 14)
@@ -1114,26 +1117,50 @@ struct SendDestinationView: View {
 
     private var amountCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            VStack(alignment: .leading, spacing: 4) {
                 Text("Amount")
                     .font(.headline)
 
-                Spacer()
-
-                Text(selectedTotalText)
-                    .font(.caption.weight(.semibold).monospacedDigit())
+                Text(selectedTotalSummaryText)
+                    .font(.footnote.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
 
             HStack(spacing: 10) {
-                TextField("0", text: $amountText)
+                TextField("0", text: amountEntryText)
                     .keyboardType(.decimalPad)
                     .font(.title3.weight(.semibold).monospacedDigit())
                     .disabled(sendMax)
 
-                Text("KAS")
-                    .font(.subheadline.weight(.semibold))
+                Button {
+                    toggleAmountEntryCurrency()
+                } label: {
+                    HStack(spacing: 7) {
+                        Text(amountEntryUsesUSD ? "USD" : "KAS")
+                            .font(.subheadline.weight(.semibold))
+
+                        VStack(spacing: -3) {
+                            Image(systemName: "arrow.left")
+                            Image(systemName: "arrow.right")
+                        }
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 15, height: 20)
+                        .symbolRenderingMode(.monochrome)
+                    }
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(usdSpotPrice == nil)
+                .accessibilityLabel(
+                    amountEntryUsesUSD
+                        ? "Amount entered in US dollars"
+                        : "Amount entered in KAS"
+                )
+                .accessibilityHint("Double tap to switch between KAS and US dollars.")
             }
             .padding(12)
             .background(
@@ -1143,6 +1170,7 @@ struct SendDestinationView: View {
                     style: .continuous
                 )
             )
+            .sensoryFeedback(.selection, trigger: amountEntryUsesUSD)
 
             Toggle("Send Max", isOn: $sendMax)
                 .font(.subheadline.weight(.semibold))
@@ -1159,17 +1187,6 @@ struct SendDestinationView: View {
                     }
                 }
                 .disabled(selectedTotalSompi == nil || transactionType != .standard)
-
-            HStack {
-                Text("Selected input")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Spacer()
-
-                Text(selectedTotalText)
-                    .font(.caption.weight(.semibold).monospacedDigit())
-            }
 
             if !amountText.isEmpty && !amountLooksValid {
                 Text(
@@ -1205,9 +1222,92 @@ struct SendDestinationView: View {
         )
     }
 
+    private var amountEntryText: Binding<String> {
+        Binding(
+            get: {
+                amountEntryUsesUSD ? usdAmountText : amountText
+            },
+            set: { newValue in
+                if amountEntryUsesUSD {
+                    usdAmountText = newValue
+                    updateKASAmountFromUSD(newValue)
+                } else {
+                    amountText = newValue
+                }
+            }
+        )
+    }
+
+    private var usdSpotPrice: Double? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+        return price
+    }
+
+    private func toggleAmountEntryCurrency() {
+        if amountEntryUsesUSD {
+            amountEntryUsesUSD = false
+            return
+        }
+
+        guard usdSpotPrice != nil else { return }
+        syncUSDAmountFromKASIfNeeded()
+        amountEntryUsesUSD = true
+    }
+
+    private func syncUSDAmountFromKASIfNeeded() {
+        guard let price = usdSpotPrice else { return }
+        guard let sompi = parseKasTextToSompi(amountText) else {
+            usdAmountText = ""
+            return
+        }
+
+        let kas = Double(sompi) / 100_000_000
+        usdAmountText = formatUSDInput(kas * price)
+    }
+
+    private func updateKASAmountFromUSD(_ text: String) {
+        guard let price = usdSpotPrice else { return }
+        let normalized = text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+
+        guard !normalized.isEmpty else {
+            amountText = ""
+            return
+        }
+
+        guard let usd = Double(normalized),
+              usd.isFinite,
+              usd >= 0 else {
+            amountText = ""
+            return
+        }
+
+        let sompi = (usd / price * 100_000_000).rounded()
+        guard sompi.isFinite,
+              sompi >= 0,
+              sompi < Double(UInt64.max) else {
+            amountText = ""
+            return
+        }
+
+        amountText = formatPlainKas(sompi: UInt64(sompi))
+    }
+
+    private func formatUSDInput(_ value: Double) -> String {
+        value.formatted(
+            .number
+                .grouping(.never)
+                .precision(.fractionLength(0...5))
+        )
+    }
+
     private func updateSendMaxAmount() {
         guard sendMax, let maximumSendSompi else { return }
         amountText = formatPlainKas(sompi: maximumSendSompi)
+        syncUSDAmountFromKASIfNeeded()
     }
 
     @MainActor
@@ -1396,11 +1496,20 @@ struct SendDestinationView: View {
         return total.partialValue
     }
 
-    private var selectedTotalText: String {
+    private var selectedTotalSummaryText: String {
         guard let selectedTotalSompi else {
-            return "Invalid total"
+            return "Available balance: Invalid"
         }
-        return formatKas(sompi: selectedTotalSompi)
+        if amountEntryUsesUSD,
+           let price = usdSpotPrice {
+            let kas = Double(selectedTotalSompi) / 100_000_000
+            let usdText = (kas * price).formatted(
+                .currency(code: "USD")
+                    .precision(.fractionLength(2))
+            )
+            return "Available balance: \(usdText)"
+        }
+        return "Available balance: \(formatKas(sompi: selectedTotalSompi))"
     }
 
     private func formatKas(sompi: UInt64) -> String {
