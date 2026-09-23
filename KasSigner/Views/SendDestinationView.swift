@@ -35,6 +35,7 @@ struct SendDestinationView: View {
     @State private var livePlanTask: Task<Void, Never>?
     @State private var isResolvingLivePlan = false
     @State private var livePlanError: String?
+    @State private var isRefreshingSendMaxFee = false
     @FocusState private var customFeeFieldFocused: Bool
 
     @EnvironmentObject private var engine: KasSignerEngine
@@ -120,14 +121,8 @@ struct SendDestinationView: View {
         }
 
         switch selectedFee {
-        case .low:
-            return fee.lowSompiPerGram
-
         case .normal:
             return fee.normalSompiPerGram
-
-        case .priority:
-            return fee.prioritySompiPerGram
 
         case .custom:
             return nil
@@ -148,14 +143,8 @@ struct SendDestinationView: View {
         let feeAmount = formatKas(sompi: requestedFeeSompi)
 
         switch selectedFee {
-        case .low:
-            return "Low • \(feeAmount) • \(formatFeeRate(fee.lowSompiPerGram)) sompi/gram"
-
         case .normal:
             return "Normal • \(feeAmount) • \(formatFeeRate(fee.normalSompiPerGram)) sompi/gram"
-
-        case .priority:
-            return "Priority • \(feeAmount) • \(formatFeeRate(fee.prioritySompiPerGram)) sompi/gram"
 
         case .custom:
             return ""
@@ -174,7 +163,7 @@ struct SendDestinationView: View {
             }
             return customFeeSompi
 
-        case .low, .normal, .priority:
+        case .normal:
             guard let fee = syncService.feeEstimate,
                   fee.normalSompiPerGram > 0,
                   let selectedRate = selectedFeeRateSompiPerGram
@@ -237,9 +226,10 @@ struct SendDestinationView: View {
     }
 
     private var requiresLiveChangePlan: Bool {
-        transactionType != .standard
-            || !additionalRecipients.isEmpty
-            || usesManualChangeAllocation
+        !sendMax
+            && (transactionType != .standard
+                || !additionalRecipients.isEmpty
+                || usesManualChangeAllocation)
     }
 
     private var canContinue: Bool {
@@ -248,6 +238,7 @@ struct SendDestinationView: View {
         return destinationLooksValid
             && amountLooksValid
             && feeLooksValid
+            && !isRefreshingSendMaxFee
             && (transactionType == .standard || !sendMax)
             && (!requiresLiveChangePlan
                 || (!isResolvingLivePlan
@@ -364,9 +355,16 @@ struct SendDestinationView: View {
             persistSendSession()
             scheduleLivePlanResolution()
         }
-        .onChange(of: sendMax) { _, _ in
+        .onChange(of: sendMax) { _, enabled in
             resolvedChangeFeeSompi = nil
             persistSendSession()
+            if enabled {
+                amountText = ""
+                usdAmountText = ""
+                Task {
+                    await refreshFeeEstimateForSendMax()
+                }
+            }
         }
         .onChange(of: changeOutputs) { _, _ in
             resolvedChangeFeeSompi = nil
@@ -1175,18 +1173,11 @@ struct SendDestinationView: View {
             Toggle("Send Max", isOn: $sendMax)
                 .font(.subheadline.weight(.semibold))
                 .tint(accentColor)
-                .onChange(of: sendMax) { _, enabled in
-                    if enabled {
-                        if requestedFeeSompi == nil {
-                            amountText = ""
-                            Task {
-                                await refreshFeeEstimateForSendMax()
-                            }
-                        }
-                        updateSendMaxAmount()
-                    }
-                }
-                .disabled(selectedTotalSompi == nil || transactionType != .standard)
+                .disabled(
+                    selectedTotalSompi == nil
+                        || transactionType != .standard
+                        || isRefreshingSendMaxFee
+                )
 
             if !amountText.isEmpty && !amountLooksValid {
                 Text(
@@ -1312,11 +1303,15 @@ struct SendDestinationView: View {
 
     @MainActor
     private func refreshFeeEstimateForSendMax() async {
+        guard !isRefreshingSendMaxFee else { return }
         guard let activeProfile = walletStore.profiles.first(
             where: { $0.id == profile.id }
         ) else {
             return
         }
+
+        isRefreshingSendMaxFee = true
+        defer { isRefreshingSendMaxFee = false }
 
         await syncService.refresh(
             profile: activeProfile,
@@ -3064,6 +3059,20 @@ private struct ChangeAddressPickerView: View {
     }
 
     private func toggle(index: Int, address: String) {
+        if transactionType == .standard {
+            guard !draftOutputs.contains(where: { $0.addressIndex == index }) else {
+                return
+            }
+            draftOutputs = [
+                PlannedChangeOutput(
+                    addressIndex: index,
+                    address: address,
+                    amountSompi: 0
+                )
+            ]
+            return
+        }
+
         if let selectedIndex = draftOutputs.firstIndex(where: { $0.addressIndex == index }) {
             draftOutputs.remove(at: selectedIndex)
             return
@@ -3431,21 +3440,15 @@ private struct ChangeAddressSelectionRow: View {
 }
 
 private enum SendFeeChoice: String, CaseIterable, Identifiable {
-    case low
     case normal
-    case priority
     case custom
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .low:
-            return "Low"
         case .normal:
             return "Normal"
-        case .priority:
-            return "Priority"
         case .custom:
             return "Custom"
         }
@@ -3453,12 +3456,8 @@ private enum SendFeeChoice: String, CaseIterable, Identifiable {
 
     var detail: String {
         switch self {
-        case .low:
-            return "Lower network fee. Confirmation may take longer during congestion."
         case .normal:
             return "Balanced network fee for typical transactions."
-        case .priority:
-            return "Higher fee for faster inclusion during congestion."
         case .custom:
             return "Enter a custom fee in KAS."
         }
