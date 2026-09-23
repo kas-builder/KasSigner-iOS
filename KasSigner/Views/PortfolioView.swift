@@ -1328,6 +1328,7 @@ struct KaspaPriceDetail: View {
     @ObservedObject var preferences: AppPreferences
     let accentColor: Color
     var showsOnlyConverter = false
+    var onConverterModeChange: ((Bool) -> Void)?
 
     @State private var selectedRange: TimeRange = .day
     @State private var points: [HistoricalPricePoint] = []
@@ -1345,6 +1346,7 @@ struct KaspaPriceDetail: View {
     @State private var manualRateKAS = "1"
     @FocusState private var converterFieldFocused: Bool
     @State private var showingConverter = false
+    @State private var converterSheetDetent: PresentationDetent = .fraction(0.54)
     @State private var activeConverterInput = "KAS"
     @State private var converterInputPrimed = true
 
@@ -1456,7 +1458,10 @@ struct KaspaPriceDetail: View {
                 }
                 .padding(.horizontal)
             }
-            .presentationDetents([.fraction(0.62)])
+            .presentationDetents(
+                [.fraction(0.54), .fraction(0.62)],
+                selection: $converterSheetDetent
+            )
             .presentationDragIndicator(.visible)
         }
         .task {
@@ -1529,18 +1534,6 @@ struct KaspaPriceDetail: View {
                         .frame(width: 20, height: 38, alignment: .center)
                     converterRateField(title: "USD", text: $converterManualPrice)
                 }
-            } else {
-                HStack(alignment: .bottom, spacing: 10) {
-                    converterStaticRateField(title: "KAS", value: "1")
-                    Text("=")
-                        .font(.title2)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 20, height: 38, alignment: .center)
-                    converterStaticRateField(
-                        title: "USD Price",
-                        value: converterRate.map(formatUSDConverterValue) ?? "—"
-                    )
-                }
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -1557,7 +1550,14 @@ struct KaspaPriceDetail: View {
             in: RoundedRectangle(cornerRadius: 18, style: .continuous)
         )
         .onAppear(perform: initializeConverter)
-        .onChange(of: converterPriceModeRaw) { _, _ in resetConverterFields() }
+        .onChange(of: converterPriceModeRaw) { _, _ in
+            resetConverterFields()
+            let isManual = converterPriceMode == .manual
+            withAnimation(.easeInOut(duration: 0.25)) {
+                converterSheetDetent = isManual ? .fraction(0.62) : .fraction(0.54)
+            }
+            onConverterModeChange?(isManual)
+        }
         .onChange(of: priceService.prices[.usd]) { _, _ in
             guard converterPriceMode == .spot else { return }
             initializeConverter()

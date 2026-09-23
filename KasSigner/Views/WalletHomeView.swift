@@ -19,6 +19,7 @@ struct WalletHomeView: View {
     @State private var showingAddWallet = false
     @State private var showingSecondaryCurrency = false
     @State private var showingCurrencyConverter = false
+    @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -54,10 +55,20 @@ struct WalletHomeView: View {
                         priceService: priceService,
                         preferences: preferences,
                         accentColor: Color(red: 0.20, green: 0.62, blue: 0.57),
-                        showsOnlyConverter: true
+                        showsOnlyConverter: true,
+                        onConverterModeChange: { isManual in
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                currencyConverterDetent = isManual
+                                    ? .fraction(0.62)
+                                    : .fraction(0.54)
+                            }
+                        }
                     )
                 }
-                .presentationDetents([.fraction(0.62)])
+                .presentationDetents(
+                    [.fraction(0.54), .fraction(0.62)],
+                    selection: $currencyConverterDetent
+                )
                 .presentationDragIndicator(.visible)
             }
             .task {
@@ -188,6 +199,7 @@ struct WalletHomeView: View {
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
                     Button {
+                        currencyConverterDetent = .fraction(0.54)
                         showingCurrencyConverter = true
                     } label: {
                         HStack(spacing: 12) {
