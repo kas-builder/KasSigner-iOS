@@ -377,12 +377,6 @@ struct SendTransactionTypeSelectionView: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Choose how this transaction should be structured.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.bottom, 2)
-
                     transactionTypeCard(
                         .standard,
                         title: "Standard Send",
