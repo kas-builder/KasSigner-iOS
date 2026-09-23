@@ -502,6 +502,7 @@ struct SendUTXOSelectionView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var priceService: PriceService
     @State private var showingUTXOSelectionLimit = false
     @State private var showingDestination = false
     @State private var showingSessionError = false
@@ -685,9 +686,20 @@ struct SendUTXOSelectionView: View {
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {
-                    Text(formatKas(sompi: utxo.amount))
-                        .font(.body.weight(.regular).monospacedDigit())
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(formatKas(sompi: utxo.amount))
+                            .font(.body.weight(.regular).monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .allowsTightening(true)
+                            .foregroundStyle(.primary)
+
+                        if let usdValue = usdValueText(for: utxo) {
+                            Text(usdValue)
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     Spacer()
 
@@ -766,5 +778,16 @@ struct SendUTXOSelectionView: View {
             )
 
         return "\(whole).\(fractionalText) KAS"
+    }
+
+    private func usdValueText(for utxo: WalletUTXO) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        return (utxo.amountKas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(0...2))
+        )
     }
 }
