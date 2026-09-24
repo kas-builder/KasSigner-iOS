@@ -110,6 +110,51 @@ fn validate_explicit_change_outputs(
     Ok((total, scripts))
 }
 
+const MINIMUM_DECOY_CHANGE_SOMPI: u64 = 66_900;
+
+fn split_decoy_remainder(
+    remainder: u64,
+    decoy_amount: u64,
+    weights: [u8; 3],
+) -> Result<[u64; 3], String> {
+    if remainder < MINIMUM_DECOY_CHANGE_SOMPI * 3 {
+        return Err("Insufficient selected funds for four valid Decoy Transaction change outputs".into());
+    }
+    let weight_total = weights.iter().map(|weight| *weight as u128).sum::<u128>();
+    let first = (remainder as u128 * weights[0] as u128 / weight_total) as u64;
+    let second = (remainder as u128 * weights[1] as u128 / weight_total) as u64;
+
+    // A second output matching the payment would defeat the one-decoy rule.
+    // Small adjustments preserve both the total and the balanced shape.
+    let adjustments = [0i64, -1, 1, -2, 2, -3, 3, -4, 4];
+    for first_adjustment in adjustments {
+        for second_adjustment in adjustments {
+            let adjusted_first = first.checked_add_signed(first_adjustment);
+            let adjusted_second = second.checked_add_signed(second_adjustment);
+            let (Some(adjusted_first), Some(adjusted_second)) =
+                (adjusted_first, adjusted_second)
+            else {
+                continue;
+            };
+            let Some(adjusted_third) = remainder
+                .checked_sub(adjusted_first)
+                .and_then(|value| value.checked_sub(adjusted_second))
+            else {
+                continue;
+            };
+            let amounts = [adjusted_first, adjusted_second, adjusted_third];
+            if amounts.iter().all(|amount| {
+                *amount >= MINIMUM_DECOY_CHANGE_SOMPI
+                    && !is_dust(*amount)
+                    && *amount != decoy_amount
+            }) {
+                return Ok(amounts);
+            }
+        }
+    }
+    Err("This payment amount cannot produce exactly one matching decoy output with the selected funds".into())
+}
+
 /// Mirrors rusty-kaspa wallet/core/src/tx/mass.rs `MassCalculator::is_dust`.
 fn is_dust(amount: u64) -> bool {
     match amount.checked_mul(1000) {
@@ -216,22 +261,27 @@ pub fn plan_explicit_change_fee(
             .checked_add(utxo.amount)
             .ok_or_else(|| "Selected UTXO total overflow".to_string())
     })?;
+    let automatic_decoy_split = transaction_mode == "decoy"
+        && change_outputs.iter().skip(1).all(|output| output.amount_sompi == 0);
+    let decoy_weights = if automatic_decoy_split {
+        let mut bytes = [0u8; 3];
+        getrandom::getrandom(&mut bytes)
+            .map_err(|_| "Secure decoy change splitting is unavailable".to_string())?;
+        Some(bytes.map(|byte| 75 + byte % 51))
+    } else {
+        None
+    };
     if transaction_mode == "decoy" {
-        let tentative_remainder = selected_total
-            .checked_sub(recipient_total)
-            .and_then(|value| value.checked_sub(decoy_amount))
-            .ok_or_else(|| "Selected UTXOs cannot fund the matching decoy amount".to_string())?;
-        let first = tentative_remainder.saturating_mul(29) / 100;
-        let second = tentative_remainder.saturating_mul(33) / 100;
-        let third = tentative_remainder
-            .checked_sub(first)
-            .and_then(|value| value.checked_sub(second))
-            .ok_or_else(|| "Decoy change allocation overflow".to_string())?;
-        for (output, amount) in change_outputs
-            .iter_mut()
-            .zip([decoy_amount, first, second, third])
-        {
-            output.amount_sompi = amount;
+        change_outputs[0].amount_sompi = decoy_amount;
+        if let Some(weights) = decoy_weights {
+            let tentative_remainder = selected_total
+                .checked_sub(recipient_total)
+                .and_then(|value| value.checked_sub(decoy_amount))
+                .ok_or_else(|| "Selected UTXOs cannot fund the matching decoy amount".to_string())?;
+            let amounts = split_decoy_remainder(tentative_remainder, decoy_amount, weights)?;
+            for (output, amount) in change_outputs.iter_mut().skip(1).zip(amounts) {
+                output.amount_sompi = amount;
+            }
         }
     }
 
@@ -284,19 +334,32 @@ pub fn plan_explicit_change_fee(
             let remainder = available_change
                 .checked_sub(decoy_amount)
                 .ok_or_else(|| "Selected UTXOs cannot fund the matching decoy amount".to_string())?;
-            let first = remainder.saturating_mul(29) / 100;
-            let second = remainder.saturating_mul(33) / 100;
-            let third = remainder
-                .checked_sub(first)
-                .and_then(|value| value.checked_sub(second))
-                .ok_or_else(|| "Decoy change allocation overflow".to_string())?;
-            if [first, second, third].into_iter().any(|value| value == 0 || is_dust(value)) {
-                return Err(
-                    "Insufficient selected funds for four valid Decoy Transaction change outputs"
-                        .into(),
-                );
-            }
-            let next_amounts = [decoy_amount, first, second, third];
+            let remaining_amounts = if let Some(weights) = decoy_weights {
+                split_decoy_remainder(remainder, decoy_amount, weights)?
+            } else {
+                let first = change_outputs[1].amount_sompi;
+                let second = change_outputs[2].amount_sompi;
+                let third = remainder
+                    .checked_sub(first)
+                    .and_then(|value| value.checked_sub(second))
+                    .ok_or_else(|| "The other change amounts leave no value for the final output".to_string())?;
+                let amounts = [first, second, third];
+                if amounts.iter().any(|amount| {
+                    *amount < MINIMUM_DECOY_CHANGE_SOMPI || is_dust(*amount)
+                }) {
+                    return Err("Insufficient selected funds for four valid Decoy Transaction change outputs".into());
+                }
+                if amounts.contains(&decoy_amount) {
+                    return Err("Only one change output may match the destination amount".into());
+                }
+                amounts
+            };
+            let next_amounts = [
+                decoy_amount,
+                remaining_amounts[0],
+                remaining_amounts[1],
+                remaining_amounts[2],
+            ];
             if change_outputs
                 .iter()
                 .map(|output| output.amount_sompi)
@@ -3108,6 +3171,133 @@ mod standard_send_tests {
             recipient_amount + plan.amounts_sompi.iter().sum::<u64>() + plan.fee_sompi,
             1_000_000_000
         );
+    }
+
+    #[test]
+    fn decoy_balanced_split_never_creates_a_second_matching_amount() {
+        let recipient_amount = 100_000_000;
+        let remainder = recipient_amount * 3;
+        let split = split_decoy_remainder(
+            remainder,
+            recipient_amount,
+            [100, 100, 100],
+        )
+        .unwrap();
+        assert_eq!(split.iter().sum::<u64>(), remainder);
+        assert!(split.iter().all(|amount| *amount != recipient_amount));
+        assert!(split.iter().all(|amount| *amount >= MINIMUM_DECOY_CHANGE_SOMPI));
+    }
+
+    #[test]
+    fn decoy_plan_preserves_manual_change_amounts_and_locked_match() {
+        let wallet = wallet_with_change_count(4);
+        let selected = vec![utxo(1_000_000_000, 0)];
+        let outputs = wallet.change_addresses.iter().enumerate().map(|(index, address)| {
+            ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: if index == 0 { 0 } else { 150_000_000 },
+            }
+        }).collect();
+        let recipient_amount = 100_000_000;
+        let plan = plan_explicit_change_fee(
+            &wallet,
+            "decoy",
+            vec![ExplicitRecipient {
+                address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+                amount_sompi: recipient_amount,
+            }],
+            0,
+            150.0,
+            outputs,
+            &selected,
+        ).unwrap();
+        assert_eq!(plan.amounts_sompi[0], recipient_amount);
+        assert_eq!(plan.amounts_sompi[1], 150_000_000);
+        assert_eq!(plan.amounts_sompi[2], 150_000_000);
+        assert_eq!(plan.amounts_sompi.iter().filter(|amount| **amount == recipient_amount).count(), 1);
+        assert_eq!(recipient_amount + plan.amounts_sompi.iter().sum::<u64>() + plan.fee_sompi, 1_000_000_000);
+    }
+
+    #[test]
+    fn decoy_plan_rejects_insufficient_funds_and_extra_matching_amounts() {
+        let wallet = wallet_with_change_count(4);
+        let recipient_amount = 100_000_000;
+        let recipient = ExplicitRecipient {
+            address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+            amount_sompi: recipient_amount,
+        };
+        let automatic_outputs = wallet.change_addresses.iter().map(|address| ExplicitChangeOutput {
+            address: address.clone(),
+            amount_sompi: 0,
+        }).collect();
+        assert!(plan_explicit_change_fee(
+            &wallet, "decoy", vec![recipient.clone()], 0, 150.0,
+            automatic_outputs, &[utxo(200_000_000, 0)],
+        ).is_err());
+
+        let manual_outputs = wallet.change_addresses.iter().enumerate().map(|(index, address)| {
+            ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: if index == 1 { recipient_amount } else { 150_000_000 },
+            }
+        }).collect();
+        assert!(plan_explicit_change_fee(
+            &wallet, "decoy", vec![recipient], 0, 150.0,
+            manual_outputs, &[utxo(1_000_000_000, 0)],
+        ).unwrap_err().contains("Only one change output"));
+    }
+
+    #[test]
+    fn decoy_builder_preserves_the_planned_outputs() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        let wallet = wallet_with_change_count(4);
+        let selected = vec![derived_utxo(&wallet, "change", 0)];
+        let recipient = ExplicitRecipient {
+            address: crate::address::encode_p2pk_address(&[99; 32], "kaspa"),
+            amount_sompi: 50_000_000,
+        };
+        let blank_outputs: Vec<_> = wallet.change_addresses.iter().map(|address| {
+            ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: 0,
+            }
+        }).collect();
+        let plan = plan_explicit_change_fee(
+            &wallet, "decoy", vec![recipient.clone()], 0, 150.0,
+            blank_outputs, &selected,
+        ).unwrap();
+        let planned_outputs: Vec<_> = wallet.change_addresses.iter()
+            .zip(plan.amounts_sompi.iter())
+            .map(|(address, amount)| ExplicitChangeOutput {
+                address: address.clone(),
+                amount_sompi: *amount,
+            })
+            .collect();
+        let future = create_send_pskb_with_utxos(
+            &wallet, "decoy", vec![recipient], 0, 150.0, false,
+            planned_outputs, selected,
+        );
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        let wire = match Future::poll(future.as_mut(), &mut context) {
+            Poll::Ready(result) => result.unwrap(),
+            Poll::Pending => panic!("Decoy builder unexpectedly suspended"),
+        };
+        let bytes = hex::decode(&wire).unwrap();
+        let root: serde_json::Value =
+            serde_json::from_slice(&hex::decode(&bytes[4..]).unwrap()).unwrap();
+        let outputs = root[0]["outputs"].as_array().unwrap();
+        assert_eq!(outputs.len(), 5);
+        let mut actual_amounts: Vec<_> = outputs.iter()
+            .map(|output| output["amount"].as_u64().unwrap())
+            .collect();
+        let mut expected_amounts = plan.amounts_sompi;
+        expected_amounts.push(50_000_000);
+        actual_amounts.sort_unstable();
+        expected_amounts.sort_unstable();
+        assert_eq!(actual_amounts, expected_amounts);
     }
 
     #[test]

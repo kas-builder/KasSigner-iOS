@@ -45,6 +45,10 @@ struct SendDestinationView: View {
     @State private var livePlanTask: Task<Void, Never>?
     @State private var isResolvingLivePlan = false
     @State private var livePlanError: String?
+    @State private var decoyFreshnessWarning: String?
+    @State private var warnedDecoyAddresses: [String]?
+    @State private var acknowledgedDecoyAddresses: [String]?
+    @State private var isCheckingDecoyFreshness = false
     @State private var isRefreshingSendMaxFee = false
     @FocusState private var customFeeFieldFocused: Bool
 
@@ -109,6 +113,17 @@ struct SendDestinationView: View {
             let addition = current.addingReportingOverflow(utxo.amount)
             total = addition.overflow ? nil : addition.partialValue
         }
+    }
+
+    private var decoyMaxAmountSompi: UInt64? {
+        guard let selectedTotalSompi,
+              let feeSompi = requestedFeeSompi else { return nil }
+        let minimumOtherChange: UInt64 = 200_700
+        let afterFee = selectedTotalSompi.subtractingReportingOverflow(feeSompi)
+        guard !afterFee.overflow else { return nil }
+        let afterMinimumChange = afterFee.partialValue.subtractingReportingOverflow(minimumOtherChange)
+        guard !afterMinimumChange.overflow else { return nil }
+        return afterMinimumChange.partialValue / 2
     }
 
     private var amountLooksValid: Bool {
@@ -249,6 +264,7 @@ struct SendDestinationView: View {
             && amountLooksValid
             && feeLooksValid
             && !isRefreshingSendMaxFee
+            && !isCheckingDecoyFreshness
             && (transactionType == .standard || !sendMax)
             && (!requiresLiveChangePlan
                 || (!isResolvingLivePlan
@@ -271,6 +287,9 @@ struct SendDestinationView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(spacing: 14) {
+                        if transactionType == .decoy {
+                            decoyFundingCard
+                        }
                         destinationCards
                         amountCard
                         changeAddressCard
@@ -421,6 +440,7 @@ struct SendDestinationView: View {
                 profileID: profile.id,
                 transactionType: transactionType,
                 availableChangeSompi: availableChangeSompi ?? 0,
+                matchingDecoySompi: enteredAmountSompi,
                 selectedOutputs: $changeOutputs,
                 resolvePlan: { outputs in
                     try await resolveChangePlan(outputs)
@@ -443,6 +463,9 @@ struct SendDestinationView: View {
                     changeOutputs = outputs
                     usesManualChangeAllocation = true
                     resolvedChangeFeeSompi = plan.feeSompi
+                    if transactionType == .decoy {
+                        acknowledgedDecoyAddresses = outputs.map(\.id)
+                    }
                 }
             )
             .environmentObject(engine)
@@ -452,6 +475,31 @@ struct SendDestinationView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(buildErrorMessage)
+        }
+        .confirmationDialog(
+            "Change address freshness",
+            isPresented: Binding(
+                get: { decoyFreshnessWarning != nil },
+                set: { if !$0 { decoyFreshnessWarning = nil } }
+            )
+        ) {
+            Button("Continue Anyway", role: .destructive) {
+                guard warnedDecoyAddresses == changeOutputs.map(\.id) else {
+                    decoyFreshnessWarning = nil
+                    Task { await buildFirstVerifiedPSKB() }
+                    return
+                }
+                acknowledgedDecoyAddresses = warnedDecoyAddresses
+                decoyFreshnessWarning = nil
+                Task { await buildFirstVerifiedPSKB() }
+            }
+            Button("Choose Change Addresses") {
+                decoyFreshnessWarning = nil
+                showingChangeAddressPicker = true
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(decoyFreshnessWarning ?? "")
         }
         .alert("Cancel transaction?", isPresented: $showingCancelConfirmation) {
             Button("Keep Editing", role: .cancel) {}
@@ -603,6 +651,26 @@ struct SendDestinationView: View {
     @MainActor
     private func buildFirstVerifiedPSKB() async {
         guard !isBuildingPSKB else { return }
+
+        if transactionType == .decoy,
+           acknowledgedDecoyAddresses != changeOutputs.map(\.id) {
+            guard !isCheckingDecoyFreshness else { return }
+            isCheckingDecoyFreshness = true
+            let checkedOutputs = changeOutputs
+            let warning = await changeAddressFreshnessWarning(
+                for: checkedOutputs,
+                profileID: profile.id,
+                walletStore: walletStore
+            )
+            isCheckingDecoyFreshness = false
+            guard checkedOutputs.map(\.id) == changeOutputs.map(\.id) else { return }
+            if let warning {
+                warnedDecoyAddresses = checkedOutputs.map(\.id)
+                decoyFreshnessWarning = warning
+                return
+            }
+            acknowledgedDecoyAddresses = checkedOutputs.map(\.id)
+        }
 
         guard let requestedFeeSompi else {
             showBuildError(
@@ -890,6 +958,7 @@ struct SendDestinationView: View {
             }
             verifiedReview = VerifiedTransactionReview(
                 profileID: activeProfile.id,
+                transactionType: transactionType,
                 destination: normalizedDestination,
                 amountSompi: verifiedRecipients[0].amountSompi,
                 recipients: verifiedRecipients,
@@ -1009,6 +1078,61 @@ struct SendDestinationView: View {
         }
         .buttonStyle(.plain)
         .disabled(sendMax)
+    }
+
+    private var decoyFundingCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "info.circle.fill")
+                    .foregroundStyle(accentColor)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Decoy funding estimate")
+                        .font(.subheadline.weight(.semibold))
+                    Text("One change output matches your payment, so the maximum is about half your selected balance after fees and minimum change amounts.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(spacing: 8) {
+                fundingEstimateRow("Selected inputs", value: selectedTotalSompi.map(formatKas(sompi:)) ?? "—")
+                fundingEstimateRow(
+                    "Max amount to send",
+                    value: decoyMaxAmountSompi.map { "About \(formatKas(sompi: $0))" }
+                        ?? (requestedFeeSompi == nil ? "Fee estimate loading" : "Insufficient funds"),
+                    valueColor: decoyMaxAmountSompi == nil && requestedFeeSompi != nil ? .red : .primary
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.secondarySystemGroupedBackground))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.primary.opacity(0.045), lineWidth: 1)
+        }
+    }
+
+    private func fundingEstimateRow(
+        _ title: String,
+        value: String,
+        valueColor: Color = .primary
+    ) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .fontWeight(.medium)
+                .monospacedDigit()
+                .foregroundStyle(valueColor)
+        }
+        .font(.footnote)
     }
 
     private func countedOutputsMatch(
@@ -1684,6 +1808,7 @@ private struct AdditionalRecipientCard: View {
 private struct VerifiedTransactionReview: Identifiable, Hashable {
     let id = UUID()
     let profileID: UUID
+    let transactionType: SendTransactionType
     let destination: String
     let amountSompi: UInt64
     let recipients: [SendDraftRecipient]
@@ -1897,15 +2022,20 @@ private struct VerifiedTransactionSummaryCards: View {
             }
             ForEach(Array(review.changeOutputs.enumerated()), id: \.element.id) { index, output in
                 addressCard(
-                    title: review.changeOutputs.count == 1
-                        ? "Change"
-                        : "Change \(index + 1)",
+                    title: changeOutputTitle(index: index, count: review.changeOutputs.count),
                     amountSompi: output.amountSompi,
                     address: output.address,
                     accessibilityLabel: "Copy change address"
                 )
             }
         }
+    }
+
+    private func changeOutputTitle(index: Int, count: Int) -> String {
+        let title = count == 1 ? "Change" : "Change \(index + 1)"
+        return review.transactionType == .decoy && index == 0
+            ? "\(title) (Decoy)"
+            : title
     }
 
     private var transactionCard: some View {
@@ -2953,6 +3083,73 @@ private enum SendVerificationError: LocalizedError {
     }
 }
 
+@MainActor
+private func changeAddressFreshnessWarning(
+    for outputs: [PlannedChangeOutput],
+    profileID: UUID,
+    walletStore: WalletStore
+) async -> String? {
+    var usedIndices: [Int] = []
+    var uncheckedIndices: [Int] = []
+    let toCheck = outputs.filter { output in
+        if walletStore.isChangeAddressLocallyUsed(output.address, profileID: profileID) {
+            usedIndices.append(output.addressIndex + 1)
+            return false
+        }
+        return true
+    }
+
+    let checked = await withTaskGroup(
+        of: (Int, AddressUsageStatus).self,
+        returning: [(Int, AddressUsageStatus)].self
+    ) { group in
+        for output in toCheck {
+            group.addTask {
+                let status = (try? await AddressUsageChecker.shared.status(for: output.address))
+                    ?? .unavailable
+                return (output.addressIndex + 1, status)
+            }
+        }
+        var results: [(Int, AddressUsageStatus)] = []
+        for await result in group {
+            results.append(result)
+        }
+        return results
+    }
+    for (index, status) in checked {
+        switch status {
+        case .used: usedIndices.append(index)
+        case .fresh: break
+        case .checking, .unavailable: uncheckedIndices.append(index)
+        }
+    }
+
+    var messages: [String] = []
+    if !usedIndices.isEmpty {
+        let addresses = usedIndices.sorted().map { "#\($0)" }.joined(separator: ", ")
+        if usedIndices.count == 1 {
+            messages.append("Change address \(addresses) has been used before.")
+        } else {
+            messages.append("Change addresses \(addresses) have been used before.")
+        }
+    }
+    if !uncheckedIndices.isEmpty {
+        let addresses = uncheckedIndices.sorted().map { "#\($0)" }.joined(separator: ", ")
+        if uncheckedIndices.count == 1 {
+            messages.append("Freshness could not be verified for change address \(addresses).")
+        } else {
+            messages.append("Freshness could not be verified for change addresses \(addresses).")
+        }
+    }
+    guard !messages.isEmpty else { return nil }
+    if usedIndices.count + uncheckedIndices.count == 1 {
+        messages.append("Using this address may weaken this decoy transaction. You can choose a different address or continue anyway.")
+    } else {
+        messages.append("Using these addresses may weaken this decoy transaction. You can choose different addresses or continue anyway.")
+    }
+    return messages.joined(separator: " ")
+}
+
 private struct ChangeAddressPickerView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var engine: KasSignerEngine
@@ -2960,6 +3157,7 @@ private struct ChangeAddressPickerView: View {
     let profileID: UUID
     let transactionType: SendTransactionType
     let availableChangeSompi: UInt64
+    let matchingDecoySompi: UInt64?
     @Binding var selectedOutputs: [PlannedChangeOutput]
     let resolvePlan: ([PlannedChangeOutput]) async throws -> (
         outputs: [PlannedChangeOutput],
@@ -2975,14 +3173,17 @@ private struct ChangeAddressPickerView: View {
     @State private var isGenerating = false
     @State private var generationError: String?
     @State private var selectionError: String?
+    @State private var freshnessWarning: String?
+    @State private var warnedOutputIDs: [String]?
     @State private var showingAllocation = false
     @State private var isResolvingSelection = false
-    @State private var preparedPrivacyPlan: ChangeFeePlan?
+    @State private var preparedPlan: ChangeFeePlan?
 
     init(
         profileID: UUID,
         transactionType: SendTransactionType,
         availableChangeSompi: UInt64,
+        matchingDecoySompi: UInt64?,
         selectedOutputs: Binding<[PlannedChangeOutput]>,
         resolvePlan: @escaping ([PlannedChangeOutput]) async throws -> (
             outputs: [PlannedChangeOutput],
@@ -2998,6 +3199,7 @@ private struct ChangeAddressPickerView: View {
         self.profileID = profileID
         self.transactionType = transactionType
         self.availableChangeSompi = availableChangeSompi
+        self.matchingDecoySompi = matchingDecoySompi
         _selectedOutputs = selectedOutputs
         self.resolvePlan = resolvePlan
         self.preparePrivacyPlan = preparePrivacyPlan
@@ -3071,11 +3273,12 @@ private struct ChangeAddressPickerView: View {
                 }
             }
             .navigationDestination(isPresented: $showingAllocation) {
-                if let preparedPrivacyPlan {
+                if let preparedPlan {
                     ChangeAllocationView(
                         transactionType: transactionType,
-                        availableChangeSompi: preparedPrivacyPlan.availableChangeSompi,
-                        initialFeeSompi: preparedPrivacyPlan.feeSompi,
+                        matchingDecoySompi: matchingDecoySompi,
+                        availableChangeSompi: preparedPlan.availableChangeSompi,
+                        initialFeeSompi: preparedPlan.feeSompi,
                         outputs: $draftOutputs,
                         resolvePlan: resolvePlan
                     ) { resolvedOutputs, plan in
@@ -3099,6 +3302,25 @@ private struct ChangeAddressPickerView: View {
             } message: {
                 Text(generationError ?? selectionError ?? "Unknown error")
             }
+            .confirmationDialog(
+                "Change address freshness",
+                isPresented: Binding(
+                    get: { freshnessWarning != nil },
+                    set: { if !$0 { freshnessWarning = nil } }
+                )
+            ) {
+                Button("Continue Anyway", role: .destructive) {
+                    freshnessWarning = nil
+                    if warnedOutputIDs == draftOutputs.map(\.id) {
+                        Task { await prepareDecoySelection() }
+                    } else {
+                        Task { await completeDecoySelection() }
+                    }
+                }
+                Button("Choose Different Addresses", role: .cancel) {}
+            } message: {
+                Text(freshnessWarning ?? "")
+            }
         }
     }
 
@@ -3110,7 +3332,8 @@ private struct ChangeAddressPickerView: View {
                 index: index,
                 address: address,
                 isSelected: draftOutputs.contains { $0.addressIndex == index },
-                isLocallyUsed: walletStore.isChangeAddressLocallyUsed(address, profileID: profileID)
+                isLocallyUsed: walletStore.isChangeAddressLocallyUsed(address, profileID: profileID),
+                allowsUnverifiedSelection: transactionType == .decoy
             ) {
                 toggle(index: index, address: address)
             }
@@ -3132,6 +3355,7 @@ private struct ChangeAddressPickerView: View {
     }
 
     private func toggle(index: Int, address: String) {
+        guard !isResolvingSelection else { return }
         if transactionType == .standard {
             guard !draftOutputs.contains(where: { $0.addressIndex == index }) else {
                 return
@@ -3148,6 +3372,11 @@ private struct ChangeAddressPickerView: View {
 
         if let selectedIndex = draftOutputs.firstIndex(where: { $0.addressIndex == index }) {
             draftOutputs.remove(at: selectedIndex)
+            if transactionType == .decoy {
+                for outputIndex in draftOutputs.indices {
+                    draftOutputs[outputIndex].amountSompi = 0
+                }
+            }
             return
         }
         guard draftOutputs.count < maximumSelectionCount else {
@@ -3159,19 +3388,43 @@ private struct ChangeAddressPickerView: View {
         draftOutputs.append(
             PlannedChangeOutput(addressIndex: index, address: address, amountSompi: 0)
         )
+        if transactionType == .decoy {
+            for outputIndex in draftOutputs.indices {
+                draftOutputs[outputIndex].amountSompi = 0
+            }
+        }
     }
 
     @MainActor
     private func completeDecoySelection() async {
         guard !isResolvingSelection else { return }
         isResolvingSelection = true
+        let checkedOutputs = draftOutputs
+        let warning = await changeAddressFreshnessWarning(
+            for: checkedOutputs,
+            profileID: profileID,
+            walletStore: walletStore
+        )
+        isResolvingSelection = false
+        guard checkedOutputs.map(\.id) == draftOutputs.map(\.id) else { return }
+        if let warning {
+            warnedOutputIDs = checkedOutputs.map(\.id)
+            freshnessWarning = warning
+            return
+        }
+        await prepareDecoySelection()
+    }
+
+    @MainActor
+    private func prepareDecoySelection() async {
+        guard !isResolvingSelection else { return }
+        isResolvingSelection = true
         defer { isResolvingSelection = false }
         do {
             let resolved = try await resolvePlan(draftOutputs)
             draftOutputs = resolved.outputs
-            selectedOutputs = resolved.outputs
-            completePlan(resolved.outputs, resolved.plan)
-            dismiss()
+            preparedPlan = resolved.plan
+            showingAllocation = true
         } catch {
             selectionError = error.localizedDescription
         }
@@ -3185,7 +3438,7 @@ private struct ChangeAddressPickerView: View {
         do {
             let prepared = try await preparePrivacyPlan(draftOutputs)
             draftOutputs = prepared.outputs
-            preparedPrivacyPlan = prepared.plan
+            preparedPlan = prepared.plan
             showingAllocation = true
         } catch {
             selectionError = error.localizedDescription
@@ -3213,6 +3466,7 @@ private struct ChangeAddressPickerView: View {
 
 private struct ChangeAllocationView: View {
     let transactionType: SendTransactionType
+    let matchingDecoySompi: UInt64?
     @Binding var outputs: [PlannedChangeOutput]
     let resolvePlan: ([PlannedChangeOutput]) async throws -> (
         outputs: [PlannedChangeOutput],
@@ -3231,6 +3485,7 @@ private struct ChangeAllocationView: View {
 
     init(
         transactionType: SendTransactionType,
+        matchingDecoySompi: UInt64?,
         availableChangeSompi: UInt64,
         initialFeeSompi: UInt64,
         outputs: Binding<[PlannedChangeOutput]>,
@@ -3241,6 +3496,7 @@ private struct ChangeAllocationView: View {
         complete: @escaping ([PlannedChangeOutput], ChangeFeePlan) -> Void
     ) {
         self.transactionType = transactionType
+        self.matchingDecoySompi = matchingDecoySompi
         _availableChangeSompi = State(initialValue: availableChangeSompi)
         _resolvedFeeSompi = State(initialValue: initialFeeSompi)
         _outputs = outputs
@@ -3340,21 +3596,27 @@ private struct ChangeAllocationView: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top) {
-                Text(outputs.count == 1 ? "Change" : "Change \(index + 1)")
+                Text(changeOutputTitle(index: index, count: outputs.count))
                     .font(.title3.weight(.semibold))
 
                 Spacer(minLength: 12)
 
                 VStack(alignment: .trailing, spacing: 3) {
                     HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        TextField("0", text: amountBinding(at: index))
-                            .keyboardType(.decimalPad)
-                            .font(.subheadline.weight(.semibold).monospacedDigit())
-                            .multilineTextAlignment(.trailing)
-                            .frame(
-                                width: amountFieldWidth(at: index),
-                                alignment: .trailing
-                            )
+                        if transactionType == .decoy && index == 0 {
+                            Text(formatPlainKas(output.amountSompi))
+                                .font(.subheadline.weight(.semibold).monospacedDigit())
+                                .accessibilityLabel("Decoy amount matches destination amount")
+                        } else {
+                            TextField("0", text: amountBinding(at: index))
+                                .keyboardType(.decimalPad)
+                                .font(.subheadline.weight(.semibold).monospacedDigit())
+                                .multilineTextAlignment(.trailing)
+                                .frame(
+                                    width: amountFieldWidth(at: index),
+                                    alignment: .trailing
+                                )
+                        }
 
                         Text("KAS")
                             .font(.subheadline.weight(.semibold).monospacedDigit())
@@ -3390,6 +3652,13 @@ private struct ChangeAllocationView: View {
         )
     }
 
+    private func changeOutputTitle(index: Int, count: Int) -> String {
+        let title = count == 1 ? "Change" : "Change \(index + 1)"
+        return transactionType == .decoy && index == 0
+            ? "\(title) (Decoy)"
+            : title
+    }
+
     private func valueRow(
         _ title: String,
         value: String,
@@ -3421,12 +3690,22 @@ private struct ChangeAllocationView: View {
 
     private var isValidAllocation: Bool {
         guard availableChangeSompi > 0,
-              (2...ChangeOutputPlanner.maximumOutputCount).contains(outputs.count),
+              (transactionType == .decoy
+                ? outputs.count == 4
+                : (2...ChangeOutputPlanner.maximumOutputCount).contains(outputs.count)),
               outputs.count <= ChangeOutputPlanner.maximumOutputCount,
               let allocatedSompi,
               allocatedSompi == availableChangeSompi
         else { return false }
-        return outputs.allSatisfy { $0.amountSompi >= minimumOutputSompi }
+        guard outputs.allSatisfy({ $0.amountSompi >= minimumOutputSompi }) else {
+            return false
+        }
+        if transactionType == .decoy {
+            guard let matchingDecoySompi,
+                  outputs[0].amountSompi == matchingDecoySompi else { return false }
+            return outputs.filter { $0.amountSompi == matchingDecoySompi }.count == 1
+        }
+        return true
     }
 
     private var canFinish: Bool {
@@ -3464,7 +3743,7 @@ private struct ChangeAllocationView: View {
 
     private func resetAmounts() {
         resolvedFeeSompi = nil
-        for index in outputs.indices {
+        for index in outputs.indices where transactionType != .decoy || index != 0 {
             outputs[index].amountSompi = 0
             if amountTexts.indices.contains(index) {
                 amountTexts[index] = ""
@@ -3478,11 +3757,20 @@ private struct ChangeAllocationView: View {
         isResolvingFee = true
         defer { isResolvingFee = false }
         do {
-            let split = try ChangeOutputPlanner.autoSplit(
-                availableChangeSompi: availableChangeSompi,
-                selectedOutputs: outputs,
-                minimumOutputSompi: minimumOutputSompi
-            )
+            let split: [PlannedChangeOutput]
+            if transactionType == .decoy {
+                split = outputs.enumerated().map { index, output in
+                    var updated = output
+                    if index != 0 { updated.amountSompi = 0 }
+                    return updated
+                }
+            } else {
+                split = try ChangeOutputPlanner.autoSplit(
+                    availableChangeSompi: availableChangeSompi,
+                    selectedOutputs: outputs,
+                    minimumOutputSompi: minimumOutputSompi
+                )
+            }
             let resolved = try await resolvePlan(split)
             updateAllocation(from: resolved)
         } catch {
@@ -3580,6 +3868,7 @@ private struct ChangeAddressSelectionRow: View {
     let address: String
     let isSelected: Bool
     let isLocallyUsed: Bool
+    let allowsUnverifiedSelection: Bool
     let select: () -> Void
     @State private var status: AddressUsageStatus = .checking
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
@@ -3617,7 +3906,7 @@ private struct ChangeAddressSelectionRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(status == .checking || status == .unavailable)
+        .disabled(!allowsUnverifiedSelection && (status == .checking || status == .unavailable))
         .task(id: address) {
             guard !isLocallyUsed else {
                 status = .used

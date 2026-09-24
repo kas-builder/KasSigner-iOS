@@ -2,7 +2,7 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 import UIKit
 
-enum AddressUsageStatus: Equatable {
+enum AddressUsageStatus: Equatable, Sendable {
     case checking
     case fresh
     case used
