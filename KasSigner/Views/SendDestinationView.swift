@@ -3290,7 +3290,7 @@ private struct ChangeAllocationView: View {
             Section {
                 ForEach(outputs.indices, id: \.self) { index in
                     allocationOutputCard(outputs[index], index: index)
-                        .listRowInsets(EdgeInsets(top: 5, leading: 0, bottom: 5, trailing: 0))
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 5, trailing: 0))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 }
@@ -3334,6 +3334,7 @@ private struct ChangeAllocationView: View {
                     .disabled(isResolvingFee)
             }
         }
+        .contentMargins(.top, 8, for: .scrollContent)
         .navigationTitle("Change Allocation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
