@@ -80,6 +80,7 @@ private enum AddressChain: String, CaseIterable, Identifiable {
 
 struct ReceiveView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @ScaledMetric(relativeTo: .body) private var addressFontSize: CGFloat = 15.5
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
@@ -218,34 +219,20 @@ struct ReceiveView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 12) {
-                        Button {
-                            copyCurrentAddress()
-                        } label: {
-                            Text(twoLineAddress)
-                                .font(.system(size: 15.5, weight: .regular, design: .monospaced))
-                                .foregroundStyle(.primary)
-                                .multilineTextAlignment(.center)
-                                .lineLimit(2)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .frame(maxWidth: .infinity)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(SubtlePressButtonStyle())
-                        .accessibilityHint("Copies the full receive address")
-
-                        Button {
-                            copyCurrentAddress()
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.title3.weight(.semibold))
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(SubtlePressButtonStyle())
-                        .accessibilityLabel("Copy receive address")
+                    Button {
+                        copyCurrentAddress()
+                    } label: {
+                        Text(twoLineAddress)
+                            .font(.system(size: addressFontSize, weight: .regular, design: .monospaced))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(Rectangle())
                     }
-                    .padding(.leading, 16)
-                    .padding(.trailing, 8)
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityHint("Copies the full receive address")
+                    .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(
                         .thinMaterial,
