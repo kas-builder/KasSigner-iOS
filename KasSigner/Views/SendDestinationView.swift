@@ -2052,7 +2052,24 @@ private struct VerifiedTransactionSummaryCards: View {
             Divider()
             valueRow("Fee", value: formatKas(review.feeSompi))
             Divider()
-            valueRow("Change", value: formatKas(review.changeSompi))
+            HStack(alignment: .firstTextBaseline) {
+                Text("Change")
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(formatKas(review.changeSompi))
+                        .font(.body.weight(.semibold).monospacedDigit())
+
+                    if let changeAddressSummary {
+                        Text(changeAddressSummary)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .multilineTextAlignment(.trailing)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
@@ -2060,6 +2077,14 @@ private struct VerifiedTransactionSummaryCards: View {
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 15, style: .continuous)
         )
+    }
+
+    private var changeAddressSummary: String? {
+        switch review.changeOutputs.count {
+        case 0: nil
+        case 1: "Returning to 1 address"
+        default: "Split across \(review.changeOutputs.count) addresses"
+        }
     }
 
     private func addressCard(
