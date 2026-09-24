@@ -509,6 +509,33 @@ struct ActivityView: View {
 
             Divider()
 
+            NavigationLink {
+                graphDestination(for: transaction)
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.up.right")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                        .frame(width: 22)
+
+                    Text("Show Transaction Graph")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.primary)
+
+                    Spacer()
+
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                }
+                .frame(minHeight: 32)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(SubtlePressButtonStyle())
+            .accessibilityHint("Opens a visual map of transaction inputs and outputs")
+
+            Divider()
+
             HStack(alignment: .center, spacing: 8) {
                 Text("Label")
                     .font(.caption.weight(.semibold))
@@ -720,6 +747,23 @@ struct ActivityView: View {
         direction == .sent ? "arrow.up.right" : "arrow.down.left"
     }
 
+    @ViewBuilder
+    private func graphDestination(for transaction: WalletTransaction) -> some View {
+        if let profile = walletStore.profiles.first(where: {
+            $0.id == transaction.profileID
+        }) {
+            TransactionGraphDetailView(
+                transaction: transaction,
+                profile: profile
+            )
+        } else {
+            ContentUnavailableView(
+                "Wallet Unavailable",
+                systemImage: "wallet.pass"
+            )
+        }
+    }
+
     private func directionColor(_ direction: WalletTransactionDirection) -> Color {
         direction == .sent ? .orange : .green
     }
@@ -756,5 +800,435 @@ struct ActivityView: View {
             fromSompi: sompi,
             decimalPlaces: preferences.kasBalanceDecimalPlaces
         ) + " KAS"
+    }
+}
+
+private struct TransactionGraphDetailView: View {
+    let transaction: WalletTransaction
+    let profile: WalletProfile
+
+    @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var preferences: AppPreferences
+
+    @State private var graph: TransactionGraphDetails?
+    @State private var loadError: String?
+    @State private var isLoading = true
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                graphContent
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle("Transaction Graph")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: transaction.transactionID) {
+            await loadGraph()
+        }
+    }
+
+    @ViewBuilder
+    private var graphContent: some View {
+        if isLoading {
+            VStack(spacing: 12) {
+                ProgressView()
+                Text("Loading transaction graph…")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 220)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+        } else if let graph {
+            TransactionFlowGraphView(graph: graph)
+        } else {
+            ContentUnavailableView {
+                Label("Graph Unavailable", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(loadError ?? "The transaction details could not be loaded.")
+            } actions: {
+                Button("Try Again") {
+                    Task { await loadGraph() }
+                }
+                .buttonStyle(.bordered)
+            }
+            .frame(maxWidth: .infinity, minHeight: 220)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+        }
+    }
+
+    @MainActor
+    private func loadGraph() async {
+        isLoading = true
+        loadError = nil
+        do {
+            graph = try await syncService.transactionGraph(
+                transactionID: transaction.transactionID,
+                profile: profile
+            )
+        } catch {
+            graph = nil
+            loadError = error.localizedDescription
+        }
+        isLoading = false
+    }
+}
+
+private struct TransactionFlowGraphView: View {
+    let graph: TransactionGraphDetails
+
+    private enum GraphRow: Hashable {
+        case input(String)
+        case output(Int)
+    }
+
+    private struct GraphAddressButtonStyle: ButtonStyle {
+        let row: GraphRow
+        @Binding var pressedRow: GraphRow?
+
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .onChange(of: configuration.isPressed) { _, isPressed in
+                    if isPressed {
+                        pressedRow = row
+                    } else if pressedRow == row {
+                        pressedRow = nil
+                    }
+                }
+        }
+    }
+
+    @EnvironmentObject private var preferences: AppPreferences
+    @Environment(\.openURL) private var openURL
+
+    @State private var selectedRow: GraphRow?
+    @State private var pressedRow: GraphRow?
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+    private let maximumVisibleNodes = 6
+
+    private func isHighlighted(_ row: GraphRow) -> Bool {
+        (pressedRow ?? selectedRow) == row
+    }
+
+    private var visibleInputs: [TransactionGraphInput] {
+        Array(graph.inputs.prefix(maximumVisibleNodes))
+    }
+
+    private var visibleOutputs: [TransactionGraphOutput] {
+        Array(graph.outputs.prefix(maximumVisibleNodes))
+    }
+
+    private var rightRowCount: Int {
+        visibleOutputs.count + (graph.feeSompi == nil ? 0 : 1)
+    }
+
+    private var graphHeight: CGFloat {
+        CGFloat(max(3, visibleInputs.count, rightRowCount)) * 52 + 44
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Inputs")
+                Spacer()
+                Text("Outputs")
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.secondary)
+
+            GeometryReader { proxy in
+                ZStack {
+                    graphLines(size: proxy.size)
+
+                    HStack(spacing: 0) {
+                        let bridgeLength = centerBridgeLength(for: proxy.size.width)
+                        let curveRunway = curveRunwayLength(for: proxy.size.width)
+                        let sideColumnWidth = (
+                            proxy.size.width - bridgeLength - curveRunway * 2
+                        ) / 2
+
+                        inputColumn
+                            .frame(width: sideColumnWidth)
+
+                        Color.clear
+                            .frame(width: curveRunway)
+
+                        Color.clear
+                            .frame(width: bridgeLength)
+
+                        Color.clear
+                            .frame(width: curveRunway)
+
+                        outputColumn
+                            .frame(width: sideColumnWidth)
+                    }
+                    .frame(maxHeight: .infinity)
+                }
+            }
+            .frame(height: graphHeight)
+
+            if graph.inputs.count > maximumVisibleNodes || graph.outputs.count > maximumVisibleNodes {
+                Text(overflowSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+        }
+        .padding(16)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+        )
+        .accessibilityElement(children: .contain)
+    }
+
+    private var inputColumn: some View {
+        VStack(spacing: 0) {
+            ForEach(visibleInputs) { input in
+                graphAddressLabel(
+                    address: input.address,
+                    fallback: compactOutpoint(input.outpoint),
+                    amount: input.amountSompi,
+                    alignment: .trailing,
+                    row: .input(input.id)
+                )
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var outputColumn: some View {
+        VStack(spacing: 0) {
+            ForEach(visibleOutputs) { output in
+                graphAddressLabel(
+                    address: output.address,
+                    fallback: "Output \(output.index)",
+                    amount: output.amountSompi,
+                    alignment: .leading,
+                    row: .output(output.id)
+                )
+            }
+
+            if let fee = graph.feeSompi {
+                graphLabel(
+                    title: "Fee",
+                    amount: fee,
+                    icon: "dollarsign.circle",
+                    alignment: .leading,
+                    highlighted: false
+                )
+            }
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    @ViewBuilder
+    private func graphAddressLabel(
+        address: String?,
+        fallback: String,
+        amount: UInt64?,
+        alignment: HorizontalAlignment,
+        row: GraphRow
+    ) -> some View {
+        let title = compactAddress(address, fallback: fallback)
+        if let address, isExplorerAddress(address) {
+            Button {
+                selectedRow = row
+                openURL(preferences.explorer.addressURL(address))
+            } label: {
+                graphLabel(
+                    title: title,
+                    amount: amount,
+                    icon: nil,
+                    alignment: alignment,
+                    highlighted: isHighlighted(row)
+                )
+            }
+            .buttonStyle(GraphAddressButtonStyle(row: row, pressedRow: $pressedRow))
+            .accessibilityLabel("Address \(address), \(amount.map(formatKas) ?? "amount unavailable")")
+            .accessibilityHint("Opens this address in the selected block explorer")
+        } else {
+            graphLabel(
+                title: title,
+                amount: amount,
+                icon: nil,
+                alignment: alignment,
+                highlighted: false
+            )
+        }
+    }
+
+    private func graphLabel(
+        title: String,
+        amount: UInt64?,
+        icon: String?,
+        alignment: HorizontalAlignment,
+        highlighted: Bool
+    ) -> some View {
+        HStack(spacing: 5) {
+            if alignment == .leading, let icon {
+                Image(systemName: icon)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(title == "Fee" ? .secondary : accentColor)
+                    .frame(width: 14)
+            }
+
+            VStack(alignment: alignment, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.monospaced())
+                    .foregroundStyle(highlighted ? accentColor : Color.primary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.86)
+                if let amount {
+                    Text(formatKas(amount))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(highlighted ? accentColor.opacity(0.82) : Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
+
+        }
+        .padding(.leading, alignment == .leading ? 3 : 0)
+        .padding(.trailing, alignment == .trailing ? 3 : 0)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func graphLines(size: CGSize) -> some View {
+        Canvas { context, _ in
+            let centerY = size.height / 2
+            let bridgeLength = centerBridgeLength(for: size.width)
+            let curveRunway = curveRunwayLength(for: size.width)
+            let sideColumnWidth = (size.width - bridgeLength - curveRunway * 2) / 2
+            let labelInset: CGFloat = 3
+            let inputEndpointX = sideColumnWidth - labelInset
+            let centerLeftX = sideColumnWidth + curveRunway
+            let centerRightX = centerLeftX + bridgeLength
+            let outputEndpointX = centerRightX + curveRunway + labelInset
+            let lineColor = Color.secondary.opacity(0.48)
+            let lineWidth: CGFloat = 1.25
+            let inputCenters = rowCenters(count: visibleInputs.count, height: size.height)
+            for (index, input) in visibleInputs.enumerated() {
+                let highlighted = isHighlighted(.input(input.id))
+                let y = inputCenters[index]
+                var path = Path()
+                path.move(to: CGPoint(x: inputEndpointX, y: y))
+                path.addCurve(
+                    to: CGPoint(x: centerLeftX, y: centerY),
+                    control1: CGPoint(x: inputEndpointX + curveRunway * 0.72, y: y),
+                    control2: CGPoint(x: centerLeftX - curveRunway * 0.72, y: centerY)
+                )
+                context.stroke(
+                    path,
+                    with: .color(highlighted ? accentColor.opacity(0.88) : lineColor),
+                    lineWidth: highlighted ? 2 : lineWidth
+                )
+            }
+
+            let outputCenters = rowCenters(count: rightRowCount, height: size.height)
+            for (index, output) in visibleOutputs.enumerated() {
+                let highlighted = isHighlighted(.output(output.id))
+                let y = outputCenters[index]
+                var path = Path()
+                path.move(to: CGPoint(x: centerRightX, y: centerY))
+                path.addCurve(
+                    to: CGPoint(x: outputEndpointX, y: y),
+                    control1: CGPoint(x: centerRightX + curveRunway * 0.72, y: centerY),
+                    control2: CGPoint(x: outputEndpointX - curveRunway * 0.72, y: y)
+                )
+                context.stroke(
+                    path,
+                    with: .color(highlighted ? accentColor.opacity(0.88) : lineColor),
+                    lineWidth: highlighted ? 2 : lineWidth
+                )
+            }
+
+            if graph.feeSompi != nil {
+                let y = outputCenters[visibleOutputs.count]
+                var path = Path()
+                path.move(to: CGPoint(x: centerRightX, y: centerY))
+                path.addCurve(
+                    to: CGPoint(x: outputEndpointX, y: y),
+                    control1: CGPoint(x: centerRightX + curveRunway * 0.72, y: centerY),
+                    control2: CGPoint(x: outputEndpointX - curveRunway * 0.72, y: y)
+                )
+                context.stroke(path, with: .color(lineColor), lineWidth: lineWidth)
+            }
+
+            var centerLine = Path()
+            centerLine.move(to: CGPoint(x: centerLeftX, y: centerY))
+            centerLine.addLine(to: CGPoint(x: centerRightX, y: centerY))
+            context.stroke(centerLine, with: .color(lineColor), lineWidth: lineWidth)
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func centerBridgeLength(for width: CGFloat) -> CGFloat {
+        min(max(width * 0.055, 20), 30)
+    }
+
+    private func curveRunwayLength(for width: CGFloat) -> CGFloat {
+        min(max(width * 0.085, 26), 34)
+    }
+
+    private func rowCenters(count: Int, height: CGFloat) -> [CGFloat] {
+        guard count > 0 else { return [] }
+        let rowHeight = height / CGFloat(count)
+        return (0..<count).map { rowHeight * (CGFloat($0) + 0.5) }
+    }
+
+    private func compactAddress(_ address: String?, fallback: String) -> String {
+        guard let address, !address.isEmpty else { return fallback }
+        let displayAddress = address.lowercased().hasPrefix("kaspa:")
+            ? String(address.dropFirst("kaspa:".count))
+            : address
+        guard displayAddress.count > 12 else { return displayAddress }
+        return String(displayAddress.prefix(6))
+            + "..."
+            + String(displayAddress.suffix(6))
+    }
+
+    private func isExplorerAddress(_ address: String) -> Bool {
+        let normalized = address.lowercased()
+        return (normalized.hasPrefix("kaspa:") || normalized.hasPrefix("kaspatest:"))
+            && !address.contains(where: \.isWhitespace)
+    }
+
+    private func compactOutpoint(_ outpoint: String) -> String {
+        guard let separator = outpoint.lastIndex(of: ":") else {
+            return String(outpoint.prefix(10))
+        }
+        return String(outpoint.prefix(8)) + "…" + outpoint[separator...]
+    }
+
+    private func formatKas(_ sompi: UInt64) -> String {
+        let whole = sompi / 100_000_000
+        let fractional = sompi % 100_000_000
+        guard fractional != 0 else { return "\(whole) KAS" }
+        let fractionalText = String(format: "%08llu", fractional)
+            .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
+        return "\(whole).\(fractionalText) KAS"
+    }
+
+    private var overflowSummary: String {
+        let hiddenInputs = max(0, graph.inputs.count - maximumVisibleNodes)
+        let hiddenOutputs = max(0, graph.outputs.count - maximumVisibleNodes)
+        if hiddenInputs > 0 && hiddenOutputs > 0 {
+            return "+\(hiddenInputs) inputs and +\(hiddenOutputs) outputs not shown"
+        }
+        if hiddenInputs > 0 { return "+\(hiddenInputs) inputs not shown" }
+        return "+\(hiddenOutputs) outputs not shown"
     }
 }

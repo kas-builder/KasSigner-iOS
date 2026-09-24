@@ -90,6 +90,29 @@ struct IndexedTransactionOutput: Decodable, Sendable {
     }
 }
 
+struct TransactionGraphInput: Identifiable, Equatable, Sendable {
+    let outpoint: String
+    let address: String?
+    let amountSompi: UInt64?
+
+    var id: String { outpoint }
+}
+
+struct TransactionGraphOutput: Identifiable, Equatable, Sendable {
+    let index: Int
+    let address: String?
+    let amountSompi: UInt64
+
+    var id: Int { index }
+}
+
+struct TransactionGraphDetails: Equatable, Sendable {
+    let transactionID: String
+    let inputs: [TransactionGraphInput]
+    let outputs: [TransactionGraphOutput]
+    let feeSompi: UInt64?
+}
+
 private struct ActiveAddressRequest: Encodable {
     let addresses: [String]
 }
@@ -255,6 +278,67 @@ struct TransactionHistoryClient: Sendable {
             receiveAddresses: Set(profile.receiveAddresses),
             changeAddresses: Set(profile.changeAddresses)
         ).first
+    }
+
+    func transactionGraph(
+        id: String,
+        for profile: WalletProfile
+    ) async throws -> TransactionGraphDetails? {
+        guard profile.network.lowercased() == "mainnet" else {
+            throw TransactionHistoryError.unsupportedNetwork
+        }
+        let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedID.isEmpty else { return nil }
+
+        var components = URLComponents(
+            url: baseURL.appending(path: "transactions").appending(path: normalizedID),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
+        ]
+        guard let url = components.url else {
+            throw TransactionHistoryError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        let (data, _) = try await data(for: request)
+        let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
+        let inputs = (indexed.inputs ?? []).enumerated().map { offset, input in
+            let hash = input.previousOutpointHash?.lowercased()
+            let outpoint: String
+            if let hash, let index = input.previousOutpointIndex {
+                outpoint = "\(hash):\(index)"
+            } else {
+                outpoint = "input-\(offset)"
+            }
+            return TransactionGraphInput(
+                outpoint: outpoint,
+                address: input.previousOutpointAddress,
+                amountSompi: input.previousOutpointAmount
+            )
+        }
+        let outputs = (indexed.outputs ?? []).enumerated().map { index, output in
+            TransactionGraphOutput(
+                index: index,
+                address: output.scriptPublicKeyAddress,
+                amountSompi: output.amount
+            )
+        }
+        let totalInput = inputs.compactMap(\.amountSompi).reduce(UInt64(0), &+)
+        let hasEveryInputAmount = inputs.allSatisfy { $0.amountSompi != nil }
+        let totalOutput = outputs.reduce(UInt64(0)) { $0 &+ $1.amountSompi }
+        let fee = hasEveryInputAmount && totalInput >= totalOutput
+            ? totalInput - totalOutput
+            : nil
+
+        return TransactionGraphDetails(
+            transactionID: indexed.transactionID?.lowercased() ?? normalizedID,
+            inputs: inputs,
+            outputs: outputs,
+            feeSompi: fee
+        )
     }
 
     func transactions(
@@ -768,6 +852,22 @@ final class WalletSyncService: ObservableObject {
         }
 
         virtualBlueScoreRefreshInFlight = false
+    }
+
+    func transactionGraph(
+        transactionID: String,
+        profile: WalletProfile
+    ) async throws -> TransactionGraphDetails {
+        guard isNetworkAvailable else {
+            throw URLError(.notConnectedToInternet)
+        }
+        guard let graph = try await transactionHistoryClient.transactionGraph(
+            id: transactionID,
+            for: profile
+        ) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        return graph
     }
 
     init() {
