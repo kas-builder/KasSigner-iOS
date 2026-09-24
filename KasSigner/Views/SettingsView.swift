@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct SettingsView: View {
-    let onWalletSelected: (() -> Void)?
+    let onWalletSelected: ((WalletProfile) -> Void)?
 
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
@@ -17,7 +17,7 @@ struct SettingsView: View {
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
 
-    init(onWalletSelected: (() -> Void)? = nil) {
+    init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
     }
 
@@ -28,9 +28,12 @@ struct SettingsView: View {
                     Section("Accounts") {
                         ForEach(walletStore.profiles) { profile in
                             Button {
-                                walletStore.selectedProfileID = profile.id
-                                syncService.preload(profile: profile)
-                                onWalletSelected?()
+                                if let onWalletSelected {
+                                    onWalletSelected(profile)
+                                } else {
+                                    walletStore.selectedProfileID = profile.id
+                                    syncService.preload(profile: profile)
+                                }
                             } label: {
                                 HStack {
                                     VStack(alignment: .leading) {

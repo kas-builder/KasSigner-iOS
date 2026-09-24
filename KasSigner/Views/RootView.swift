@@ -82,6 +82,61 @@ struct AccountDiscoveryLoadingView: View {
 }
 
 @MainActor
+final class AccountSwitchPresentationModel: ObservableObject {
+    @Published private(set) var isVisible = false
+    @Published private(set) var progress = 0.0
+
+    private var task: Task<Void, Never>?
+
+    func start() {
+        task?.cancel()
+        isVisible = true
+        progress = 0
+
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            withAnimation(.linear(duration: 3)) {
+                self.progress = 1
+            }
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            self.isVisible = false
+            self.progress = 0
+            self.task = nil
+        }
+    }
+}
+
+struct AccountSwitchLoadingView: View {
+    let progress: Double
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ProgressView(value: progress)
+                    .tint(teal)
+                    .frame(maxWidth: 260)
+
+                Text("Switching account")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Text("Loading UTXOs…")
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Switching account. Loading UTXOs.")
+    }
+}
+
+@MainActor
 final class AccountDiscoveryPresentationModel: ObservableObject {
     @Published private(set) var isVisible = false
     @Published private(set) var progress = 0.04
@@ -187,6 +242,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var discoveryPresentation =
         AccountDiscoveryPresentationModel()
+    @StateObject private var accountSwitchPresentation =
+        AccountSwitchPresentationModel()
 
     @State private var selectedTab: Tab = .wallet
     @State private var showingAddWallet = false
@@ -213,13 +270,17 @@ struct RootView: View {
                 .tag(Tab.utxos)
                 .tabItem { Label("UTXOs", systemImage: "square.stack.3d.up") }
 
-            SettingsView {
-                selectedTab = .wallet
+            SettingsView { profile in
+                selectWallet(profile)
             }
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-        .disabled(isInitialDiscoveryBlocking || discoveryPresentation.isVisible)
+        .disabled(
+            isInitialDiscoveryBlocking
+                || discoveryPresentation.isVisible
+                || accountSwitchPresentation.isVisible
+        )
         .environmentObject(discoveryPresentation)
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
         .background {
@@ -285,6 +346,15 @@ struct RootView: View {
         .overlay {
             if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
                 initialDiscoveryOverlay
+            }
+        }
+        .overlay {
+            if accountSwitchPresentation.isVisible {
+                AccountSwitchLoadingView(
+                    progress: accountSwitchPresentation.progress
+                )
+                .transition(.opacity)
+                .zIndex(10)
             }
         }
         .onAppear {
@@ -412,6 +482,7 @@ struct RootView: View {
     }
 
     private func selectWallet(_ profile: WalletProfile) {
+        let isChangingAccount = walletStore.selectedProfileID != profile.id
         notificationRefreshTask?.cancel()
         notificationRefreshTask = nil
         notificationRefreshRequested = false
@@ -421,6 +492,9 @@ struct RootView: View {
         walletStore.reloadCachedTransactions(profileID: profile.id)
         syncService.preload(profile: profile)
         selectedTab = .wallet
+        if isChangingAccount {
+            accountSwitchPresentation.start()
+        }
     }
 
     private var launchRefreshTaskID: String {
