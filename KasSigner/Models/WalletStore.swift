@@ -334,27 +334,67 @@ enum ChangeOutputPlanner {
             throw ChangeOutputPlanningError.insufficientChange
         }
 
-        var remaining = availableChangeSompi - reserved.partialValue
         var result = selectedOutputs
+        try secureShuffle(&result)
 
+        if result.count == 1 {
+            result[0].amountSompi = availableChangeSompi
+            return result
+        }
+
+        let outputCount = UInt64(result.count)
+        let average = availableChangeSompi / outputCount
+        let lowerBound = max(minimumOutputSompi, average - average / 4)
+        let upperBase = average.addingReportingOverflow(average / 4)
+        guard !upperBase.overflow else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+        let upperBound = upperBase.partialValue
+            + (average % 4 == 0 ? 0 : 1)
+
+        var remaining = availableChangeSompi
         for index in result.indices.dropLast() {
-            let randomRange = remaining.addingReportingOverflow(1)
-            guard !randomRange.overflow else {
+            let remainingCount = UInt64(result.count - index - 1)
+            let maximumForRemaining = upperBound.multipliedReportingOverflow(
+                by: remainingCount
+            )
+            let minimumForRemaining = lowerBound.multipliedReportingOverflow(
+                by: remainingCount
+            )
+            guard !maximumForRemaining.overflow,
+                  !minimumForRemaining.overflow,
+                  remaining >= minimumForRemaining.partialValue
+            else {
                 throw ChangeOutputPlanningError.insufficientChange
             }
-            let share = try secureRandom(upperBound: randomRange.partialValue)
-            result[index].amountSompi = minimumOutputSompi + share
+
+            let feasibleMinimum = max(
+                lowerBound,
+                remaining > maximumForRemaining.partialValue
+                    ? remaining - maximumForRemaining.partialValue
+                    : 0
+            )
+            let feasibleMaximum = min(
+                upperBound,
+                remaining - minimumForRemaining.partialValue
+            )
+            guard feasibleMinimum <= feasibleMaximum else {
+                throw ChangeOutputPlanningError.insufficientChange
+            }
+
+            let range = feasibleMaximum - feasibleMinimum + 1
+            let share = feasibleMinimum + (try secureRandom(upperBound: range))
+            result[index].amountSompi = share
             remaining -= share
         }
 
-        guard let finalIndex = result.indices.last else {
-            throw ChangeOutputPlanningError.noOutputs
-        }
-        let finalAmount = minimumOutputSompi.addingReportingOverflow(remaining)
-        guard !finalAmount.overflow else {
+        guard let finalIndex = result.indices.last,
+              remaining >= lowerBound,
+              remaining <= upperBound
+        else {
             throw ChangeOutputPlanningError.insufficientChange
         }
-        result[finalIndex].amountSompi = finalAmount.partialValue
+        result[finalIndex].amountSompi = remaining
 
         let verifiedTotal = result.reduce(into: UInt64?.some(0)) { total, output in
             guard let current = total else { return }
@@ -389,6 +429,16 @@ enum ChangeOutputPlanner {
             if value >= rejectionThreshold {
                 return value % upperBound
             }
+        }
+    }
+
+    private static func secureShuffle<T>(_ values: inout [T]) throws {
+        guard values.count > 1 else { return }
+        for upperIndex in stride(from: values.count - 1, through: 1, by: -1) {
+            let selectedIndex = Int(
+                try secureRandom(upperBound: UInt64(upperIndex + 1))
+            )
+            values.swapAt(upperIndex, selectedIndex)
         }
     }
 }

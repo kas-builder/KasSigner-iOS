@@ -423,6 +423,14 @@ struct SendDestinationView: View {
                 resolvePlan: { outputs in
                     try await resolveChangePlan(outputs)
                 },
+                preparePrivacyPlan: { outputs in
+                    guard destinationLooksValid,
+                          enteredAmountSompi != nil,
+                          provisionalFeeSompi != nil else {
+                        throw SendVerificationError.allocationNeedsValidAmount
+                    }
+                    return try await resolveBalancedChangePlan(outputs)
+                },
                 completeStandardSelection: { outputs in
                     changeOutputs = outputs
                     usesManualChangeAllocation = true
@@ -519,6 +527,23 @@ struct SendDestinationView: View {
             resolvedOutputs[index].amountSompi = plan.amountsSompi[index]
         }
         return (resolvedOutputs, plan)
+    }
+
+    @MainActor
+    private func resolveBalancedChangePlan(
+        _ selectedOutputs: [PlannedChangeOutput]
+    ) async throws -> (outputs: [PlannedChangeOutput], plan: ChangeFeePlan) {
+        guard let initialAvailable = availableChangeSompi,
+              initialAvailable > 0 else {
+            throw SendVerificationError.invalidFeeArithmetic
+        }
+
+        let split = try ChangeOutputPlanner.autoSplit(
+            availableChangeSompi: initialAvailable,
+            selectedOutputs: selectedOutputs,
+            minimumOutputSompi: 66_900
+        )
+        return try await resolveChangePlan(split)
     }
 
     private func scheduleLivePlanResolution(immediately: Bool = false) {
@@ -1853,6 +1878,7 @@ private struct VerifiedTransactionSummaryCards: View {
     let review: VerifiedTransactionReview
 
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
+    @EnvironmentObject private var priceService: PriceService
 
     private var accentColor: Color {
         Color(
@@ -1915,15 +1941,23 @@ private struct VerifiedTransactionSummaryCards: View {
         accessibilityLabel: String
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .top) {
                 Text(title)
                     .font(.title3.weight(.semibold))
 
                 Spacer()
 
-                Text(formatKas(amountSompi))
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-                    .multilineTextAlignment(.trailing)
+                VStack(alignment: .trailing, spacing: 3) {
+                    Text(formatKas(amountSompi))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+
+                    if let usdValue = formatUSD(amountSompi) {
+                        Text(usdValue)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .multilineTextAlignment(.trailing)
             }
 
             Button {
@@ -2010,6 +2044,18 @@ private struct VerifiedTransactionSummaryCards: View {
             )
 
         return "\(whole).\(fractionalText) KAS"
+    }
+
+    private func formatUSD(_ sompi: UInt64) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        let kas = Double(sompi) / 100_000_000
+        return (kas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(0...2))
+        )
     }
 }
 
@@ -2890,6 +2936,7 @@ private enum SendVerificationError: LocalizedError {
     case invalidOutput
     case unknownOutput
     case invalidFeeArithmetic
+    case allocationNeedsValidAmount
     case customFeeMismatch
     case changeAddressUnavailable
     case changeAddressMismatch
@@ -2916,6 +2963,8 @@ private enum SendVerificationError: LocalizedError {
             return "The built transaction contains an unknown output."
         case .invalidFeeArithmetic:
             return "The built transaction fee arithmetic is invalid."
+        case .allocationNeedsValidAmount:
+            return "Enter a valid destination and amount before allocating change."
         case .customFeeMismatch:
             return "The fee encoded in the transaction does not match the custom fee you entered."
         case .changeAddressUnavailable:
@@ -2946,6 +2995,10 @@ private struct ChangeAddressPickerView: View {
         outputs: [PlannedChangeOutput],
         plan: ChangeFeePlan
     )
+    let preparePrivacyPlan: ([PlannedChangeOutput]) async throws -> (
+        outputs: [PlannedChangeOutput],
+        plan: ChangeFeePlan
+    )
     let completeStandardSelection: ([PlannedChangeOutput]) -> Void
     let completePlan: ([PlannedChangeOutput], ChangeFeePlan) -> Void
     @State private var draftOutputs: [PlannedChangeOutput] = []
@@ -2954,6 +3007,34 @@ private struct ChangeAddressPickerView: View {
     @State private var selectionError: String?
     @State private var showingAllocation = false
     @State private var isResolvingSelection = false
+    @State private var preparedPrivacyPlan: ChangeFeePlan?
+
+    init(
+        profileID: UUID,
+        transactionType: SendTransactionType,
+        availableChangeSompi: UInt64,
+        selectedOutputs: Binding<[PlannedChangeOutput]>,
+        resolvePlan: @escaping ([PlannedChangeOutput]) async throws -> (
+            outputs: [PlannedChangeOutput],
+            plan: ChangeFeePlan
+        ),
+        preparePrivacyPlan: @escaping ([PlannedChangeOutput]) async throws -> (
+            outputs: [PlannedChangeOutput],
+            plan: ChangeFeePlan
+        ),
+        completeStandardSelection: @escaping ([PlannedChangeOutput]) -> Void,
+        completePlan: @escaping ([PlannedChangeOutput], ChangeFeePlan) -> Void
+    ) {
+        self.profileID = profileID
+        self.transactionType = transactionType
+        self.availableChangeSompi = availableChangeSompi
+        _selectedOutputs = selectedOutputs
+        self.resolvePlan = resolvePlan
+        self.preparePrivacyPlan = preparePrivacyPlan
+        self.completeStandardSelection = completeStandardSelection
+        self.completePlan = completePlan
+        _draftOutputs = State(initialValue: selectedOutputs.wrappedValue)
+    }
 
     private var profile: WalletProfile? {
         walletStore.profiles.first { $0.id == profileID }
@@ -2991,8 +3072,7 @@ private struct ChangeAddressPickerView: View {
                 .navigationTitle("Change Addresses")
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
-                    draftOutputs = selectedOutputs
-                    let target = selectedOutputs.first?.addressIndex
+                    let target = draftOutputs.first?.addressIndex
                         ?? profile?.nextChangeIndex
                     guard let target else { return }
                     Task { @MainActor in
@@ -3013,7 +3093,7 @@ private struct ChangeAddressPickerView: View {
                             } else if transactionType == .decoy {
                                 Task { await completeDecoySelection() }
                             } else {
-                                showingAllocation = true
+                                Task { await completePrivacySelection() }
                             }
                         }
                         .disabled(!selectionCountIsValid || isResolvingSelection)
@@ -3021,15 +3101,17 @@ private struct ChangeAddressPickerView: View {
                 }
             }
             .navigationDestination(isPresented: $showingAllocation) {
-                ChangeAllocationView(
-                    availableChangeSompi: availableChangeSompi,
-                    outputs: $draftOutputs,
-                    resolvePlan: resolvePlan
-                ) { resolvedOutputs, plan in
-                    draftOutputs = resolvedOutputs
-                    selectedOutputs = resolvedOutputs
-                    completePlan(resolvedOutputs, plan)
-                    dismiss()
+                if let preparedPrivacyPlan {
+                    ChangeAllocationView(
+                        availableChangeSompi: preparedPrivacyPlan.availableChangeSompi,
+                        outputs: $draftOutputs,
+                        resolvePlan: resolvePlan
+                    ) { resolvedOutputs, plan in
+                        draftOutputs = resolvedOutputs
+                        selectedOutputs = resolvedOutputs
+                        completePlan(resolvedOutputs, plan)
+                        dismiss()
+                    }
                 }
             }
             .alert("Change addresses", isPresented: Binding(
@@ -3123,6 +3205,21 @@ private struct ChangeAddressPickerView: View {
         }
     }
 
+    @MainActor
+    private func completePrivacySelection() async {
+        guard !isResolvingSelection else { return }
+        isResolvingSelection = true
+        defer { isResolvingSelection = false }
+        do {
+            let prepared = try await preparePrivacyPlan(draftOutputs)
+            draftOutputs = prepared.outputs
+            preparedPrivacyPlan = prepared.plan
+            showingAllocation = true
+        } catch {
+            selectionError = error.localizedDescription
+        }
+    }
+
     private func generateAddress(from profile: WalletProfile) async {
         isGenerating = true
         defer { isGenerating = false }
@@ -3150,10 +3247,13 @@ private struct ChangeAllocationView: View {
     )
     let complete: ([PlannedChangeOutput], ChangeFeePlan) -> Void
 
+    @EnvironmentObject private var priceService: PriceService
+
     @State private var availableChangeSompi: UInt64
     @State private var resolvedFeeSompi: UInt64?
     @State private var allocationError: String?
     @State private var isResolvingFee = false
+    @State private var amountTexts: [String]
     private let minimumOutputSompi: UInt64 = 66_900
 
     init(
@@ -3169,6 +3269,11 @@ private struct ChangeAllocationView: View {
         _outputs = outputs
         self.resolvePlan = resolvePlan
         self.complete = complete
+        _amountTexts = State(
+            initialValue: outputs.wrappedValue.map {
+                Self.formatAmountForField($0.amountSompi)
+            }
+        )
     }
 
     var body: some View {
@@ -3177,9 +3282,26 @@ private struct ChangeAllocationView: View {
                 ForEach(outputs.indices, id: \.self) { index in
                     VStack(alignment: .leading, spacing: 8) {
                         outputTitle(outputs[index])
-                        TextField("0", text: amountBinding(at: index))
-                            .keyboardType(.decimalPad)
-                            .font(.body.monospacedDigit())
+                        HStack(alignment: .firstTextBaseline, spacing: 5) {
+                            TextField("0", text: amountBinding(at: index))
+                                .keyboardType(.decimalPad)
+                                .font(.body.monospacedDigit())
+                                .frame(
+                                    width: amountFieldWidth(at: index),
+                                    alignment: .leading
+                                )
+
+                            Text("KAS")
+                                .font(.body)
+
+                            Spacer(minLength: 0)
+                        }
+
+                        if let usdValue = formatUSD(outputs[index].amountSompi) {
+                            Text(usdValue)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(.vertical, 3)
                 }
@@ -3199,8 +3321,8 @@ private struct ChangeAllocationView: View {
             }
 
             Section {
-                Button("Auto Split") {
-                    Task { await autoSplit() }
+                Button("Balanced Split") {
+                    Task { await balanceOutputs() }
                 }
                 .disabled(availableChangeSompi == 0 || isResolvingFee)
                 Button("Reset", role: .destructive) { resetAmounts() }
@@ -3264,7 +3386,7 @@ private struct ChangeAllocationView: View {
 
     private var isValidAllocation: Bool {
         guard availableChangeSompi > 0,
-              !outputs.isEmpty,
+              (2...ChangeOutputPlanner.maximumOutputCount).contains(outputs.count),
               outputs.count <= ChangeOutputPlanner.maximumOutputCount,
               let allocatedSompi,
               allocatedSompi == availableChangeSompi
@@ -3273,11 +3395,6 @@ private struct ChangeAllocationView: View {
     }
 
     private var canFinish: Bool {
-        if availableChangeSompi == 0 {
-            return !outputs.isEmpty
-                && outputs.count <= ChangeOutputPlanner.maximumOutputCount
-                && Set(outputs.map(\.id)).count == outputs.count
-        }
         return isValidAllocation
     }
 
@@ -3292,42 +3409,35 @@ private struct ChangeAllocationView: View {
     private func amountBinding(at index: Int) -> Binding<String> {
         Binding(
             get: {
-                outputs[index].amountSompi == 0
-                    ? ""
-                    : formatPlainKas(outputs[index].amountSompi)
+                amountTexts.indices.contains(index) ? amountTexts[index] : ""
             },
             set: { text in
+                guard amountTexts.indices.contains(index),
+                      outputs.indices.contains(index) else { return }
+                amountTexts[index] = text
                 outputs[index].amountSompi = parseAmount(text) ?? 0
-                if index != outputs.indices.last {
-                    assignRemainderToLast()
-                }
             }
         )
     }
 
-    private func assignRemainderToLast() {
-        guard let last = outputs.indices.last else { return }
-        let earlier = outputs.indices.dropLast().reduce(into: UInt64?.some(0)) { total, index in
-            guard let current = total else { return }
-            let addition = current.addingReportingOverflow(outputs[index].amountSompi)
-            total = addition.overflow ? nil : addition.partialValue
-        }
-        guard let earlier, earlier <= availableChangeSompi else {
-            outputs[last].amountSompi = 0
-            return
-        }
-        outputs[last].amountSompi = availableChangeSompi - earlier
+    private func amountFieldWidth(at index: Int) -> CGFloat {
+        let text = amountTexts.indices.contains(index) ? amountTexts[index] : ""
+        let characterCount = max(text.count, 1)
+        return min(max(CGFloat(characterCount) * 10.5 + 6, 24), 230)
     }
 
     private func resetAmounts() {
         resolvedFeeSompi = nil
         for index in outputs.indices {
             outputs[index].amountSompi = 0
+            if amountTexts.indices.contains(index) {
+                amountTexts[index] = ""
+            }
         }
     }
 
     @MainActor
-    private func autoSplit() async {
+    private func balanceOutputs() async {
         guard !isResolvingFee else { return }
         isResolvingFee = true
         defer { isResolvingFee = false }
@@ -3338,9 +3448,7 @@ private struct ChangeAllocationView: View {
                 minimumOutputSompi: minimumOutputSompi
             )
             let resolved = try await resolvePlan(split)
-            outputs = resolved.outputs
-            availableChangeSompi = resolved.plan.availableChangeSompi
-            resolvedFeeSompi = resolved.plan.feeSompi
+            updateAllocation(from: resolved)
         } catch {
             allocationError = error.localizedDescription
         }
@@ -3353,13 +3461,40 @@ private struct ChangeAllocationView: View {
         defer { isResolvingFee = false }
         do {
             let resolved = try await resolvePlan(outputs)
-            outputs = resolved.outputs
-            availableChangeSompi = resolved.plan.availableChangeSompi
-            resolvedFeeSompi = resolved.plan.feeSompi
+            guard resolved.outputs == outputs,
+                  resolved.plan.availableChangeSompi == availableChangeSompi else {
+                updateAllocation(from: resolved)
+                allocationError = "The fee was refreshed and the available change changed. Review the updated amounts, then tap Done again."
+                return
+            }
             complete(resolved.outputs, resolved.plan)
         } catch {
             allocationError = error.localizedDescription
         }
+    }
+
+    private func updateAllocation(
+        from resolved: (outputs: [PlannedChangeOutput], plan: ChangeFeePlan)
+    ) {
+        outputs = resolved.outputs
+        amountTexts = resolved.outputs.map {
+            Self.formatAmountForField($0.amountSompi)
+        }
+        availableChangeSompi = resolved.plan.availableChangeSompi
+        resolvedFeeSompi = resolved.plan.feeSompi
+    }
+
+    private static func formatAmountForField(_ sompi: UInt64) -> String {
+        let whole = sompi / 100_000_000
+        let fractional = sompi % 100_000_000
+        guard fractional != 0 else { return String(whole) }
+        let fractionText = String(format: "%08llu", fractional)
+            .replacingOccurrences(
+                of: "0+$",
+                with: "",
+                options: .regularExpression
+            )
+        return "\(whole).\(fractionText)"
     }
 
     private func parseAmount(_ text: String) -> UInt64? {
@@ -3382,6 +3517,18 @@ private struct ChangeAllocationView: View {
 
     private func formatKas(_ sompi: UInt64) -> String {
         "\(formatPlainKas(sompi)) KAS"
+    }
+
+    private func formatUSD(_ sompi: UInt64) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        let kas = Double(sompi) / 100_000_000
+        return (kas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(0...2))
+        )
     }
 
     private func formatPlainKas(_ sompi: UInt64) -> String {
