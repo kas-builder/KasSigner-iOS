@@ -43,6 +43,7 @@ struct SendDestinationView: View {
     @State private var showingChangeAddressPicker = false
     @State private var showingCancelConfirmation = false
     @State private var livePlanTask: Task<Void, Never>?
+    @State private var livePlanRevision = UUID()
     @State private var isResolvingLivePlan = false
     @State private var livePlanError: String?
     @State private var decoyFreshnessWarning: String?
@@ -374,29 +375,24 @@ struct SendDestinationView: View {
             livePlanTask?.cancel()
         }
         .onChange(of: selectedFee) { _, _ in
-            resolvedChangeFeeSompi = nil
-            updateSendMaxAmount()
             persistSendSession()
             scheduleLivePlanResolution()
+            updateSendMaxAmount()
         }
         .onChange(of: customFeeText) { _, _ in
-            resolvedChangeFeeSompi = nil
-            updateSendMaxAmount()
             persistSendSession()
             scheduleLivePlanResolution()
+            updateSendMaxAmount()
         }
         .onChange(of: destinationAddress) { _, _ in
-            resolvedChangeFeeSompi = nil
             persistSendSession()
             scheduleLivePlanResolution()
         }
         .onChange(of: amountText) { _, _ in
-            resolvedChangeFeeSompi = nil
             persistSendSession()
             scheduleLivePlanResolution()
         }
         .onChange(of: sendMax) { _, enabled in
-            resolvedChangeFeeSompi = nil
             persistSendSession()
             if enabled {
                 amountText = ""
@@ -405,9 +401,9 @@ struct SendDestinationView: View {
                     await refreshFeeEstimateForSendMax()
                 }
             }
+            scheduleLivePlanResolution()
         }
         .onChange(of: changeOutputs) { _, _ in
-            resolvedChangeFeeSompi = nil
             persistSendSession()
             scheduleLivePlanResolution()
         }
@@ -419,9 +415,8 @@ struct SendDestinationView: View {
             scheduleLivePlanResolution()
         }
         .onChange(of: syncService.feeEstimate) { _, _ in
-            resolvedChangeFeeSompi = nil
-            updateSendMaxAmount()
             scheduleLivePlanResolution()
+            updateSendMaxAmount()
         }
     }
 
@@ -597,26 +592,30 @@ struct SendDestinationView: View {
     }
 
     private func scheduleLivePlanResolution(immediately: Bool = false) {
-        guard requiresLiveChangePlan else { return }
         livePlanTask?.cancel()
+        livePlanRevision = UUID()
+        resolvedChangeFeeSompi = nil
+        isResolvingLivePlan = false
         livePlanError = nil
-        guard destinationLooksValid,
+        guard requiresLiveChangePlan,
+              destinationLooksValid,
               enteredAmountSompi != nil,
               provisionalFeeSompi != nil
         else { return }
 
+        let revision = livePlanRevision
         livePlanTask = Task { @MainActor in
             if !immediately {
                 try? await Task.sleep(for: .milliseconds(300))
             }
-            guard !Task.isCancelled else { return }
-            await resolveLivePlan()
+            guard !Task.isCancelled, revision == livePlanRevision else { return }
+            await resolveLivePlan(revision: revision)
         }
     }
 
     @MainActor
-    private func resolveLivePlan() async {
-        guard !isResolvingLivePlan,
+    private func resolveLivePlan(revision: UUID) async {
+        guard revision == livePlanRevision,
               let selectedTotalSompi,
               let recipientTotal = totalRecipientSompi,
               let feeSompi = provisionalFeeSompi
@@ -628,7 +627,11 @@ struct SendDestinationView: View {
         }
 
         isResolvingLivePlan = true
-        defer { isResolvingLivePlan = false }
+        defer {
+            if revision == livePlanRevision {
+                isResolvingLivePlan = false
+            }
+        }
         do {
             var outputs = changeOutputs
             if transactionType != .decoy,
@@ -640,9 +643,11 @@ struct SendDestinationView: View {
                 )
             }
             let resolved = try await resolveChangePlan(outputs)
+            guard !Task.isCancelled, revision == livePlanRevision else { return }
             resolvedChangeFeeSompi = resolved.plan.feeSompi
             livePlanError = nil
         } catch {
+            guard !Task.isCancelled, revision == livePlanRevision else { return }
             resolvedChangeFeeSompi = nil
             livePlanError = error.localizedDescription
         }
