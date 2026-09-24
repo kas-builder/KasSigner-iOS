@@ -4,6 +4,16 @@ import WebKit
 import CryptoKit
 import Combine
 
+private extension SendTransactionType {
+    var shortTitle: String {
+        switch self {
+        case .standard: "Standard"
+        case .privacyFocused: "Privacy"
+        case .decoy: "Decoy"
+        }
+    }
+}
+
 struct SendDestinationView: View {
     @Environment(\.dismiss) private var dismiss
     let profile: WalletProfile
@@ -232,14 +242,6 @@ struct SendDestinationView: View {
                 || usesManualChangeAllocation)
     }
 
-    private var transactionTypeSubtitle: String {
-        switch transactionType {
-        case .standard: "Standard"
-        case .privacyFocused: "Privacy"
-        case .decoy: "Decoy"
-        }
-    }
-
     private var canContinue: Bool {
         let normalizedAddresses = ([destinationAddress] + additionalRecipients.map(\.address))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
@@ -333,7 +335,7 @@ struct SendDestinationView: View {
                     Text("Destination & Amount")
                         .font(.headline)
 
-                    Text(transactionTypeSubtitle)
+                    Text(transactionType.shortTitle)
                         .font(.caption)
                         .fontWeight(.regular)
                         .foregroundStyle(.secondary)
@@ -3103,7 +3105,9 @@ private struct ChangeAddressPickerView: View {
             .navigationDestination(isPresented: $showingAllocation) {
                 if let preparedPrivacyPlan {
                     ChangeAllocationView(
+                        transactionType: transactionType,
                         availableChangeSompi: preparedPrivacyPlan.availableChangeSompi,
+                        initialFeeSompi: preparedPrivacyPlan.feeSompi,
                         outputs: $draftOutputs,
                         resolvePlan: resolvePlan
                     ) { resolvedOutputs, plan in
@@ -3240,6 +3244,7 @@ private struct ChangeAddressPickerView: View {
 }
 
 private struct ChangeAllocationView: View {
+    let transactionType: SendTransactionType
     @Binding var outputs: [PlannedChangeOutput]
     let resolvePlan: ([PlannedChangeOutput]) async throws -> (
         outputs: [PlannedChangeOutput],
@@ -3257,7 +3262,9 @@ private struct ChangeAllocationView: View {
     private let minimumOutputSompi: UInt64 = 66_900
 
     init(
+        transactionType: SendTransactionType,
         availableChangeSompi: UInt64,
+        initialFeeSompi: UInt64,
         outputs: Binding<[PlannedChangeOutput]>,
         resolvePlan: @escaping ([PlannedChangeOutput]) async throws -> (
             outputs: [PlannedChangeOutput],
@@ -3265,7 +3272,9 @@ private struct ChangeAllocationView: View {
         ),
         complete: @escaping ([PlannedChangeOutput], ChangeFeePlan) -> Void
     ) {
+        self.transactionType = transactionType
         _availableChangeSompi = State(initialValue: availableChangeSompi)
+        _resolvedFeeSompi = State(initialValue: initialFeeSompi)
         _outputs = outputs
         self.resolvePlan = resolvePlan
         self.complete = complete
@@ -3285,19 +3294,35 @@ private struct ChangeAllocationView: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                 }
-            }
-
-            Section {
-                valueRow("Available", value: formatKas(availableChangeSompi))
-                if let resolvedFeeSompi {
-                    valueRow("Fee", value: formatKas(resolvedFeeSompi))
+                VStack(spacing: 0) {
+                    valueRow("Available", value: formatKas(availableChangeSompi))
+                    summaryDivider
+                    valueRow("Fee", value: resolvedFeeSompi.map(formatKas) ?? "—")
+                    summaryDivider
+                    valueRow("Allocated", value: allocatedSompi.map(formatKas) ?? "Invalid")
+                    summaryDivider
+                    valueRow(
+                        "Remaining",
+                        value: remainingText,
+                        valueColor: isValidAllocation ? .secondary : .red
+                    )
                 }
-                valueRow("Allocated", value: allocatedSompi.map(formatKas) ?? "Invalid")
-                valueRow(
-                    "Remaining",
-                    value: remainingText,
-                    valueColor: isValidAllocation ? .secondary : .red
-                )
+                .padding(.horizontal, 14)
+                .background {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color(.secondarySystemGroupedBackground))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color.white.opacity(0.025))
+                        }
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.primary.opacity(0.045), lineWidth: 1)
+                }
+                .listRowInsets(EdgeInsets(top: 16, leading: 0, bottom: 5, trailing: 0))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
 
             Section {
@@ -3309,9 +3334,20 @@ private struct ChangeAllocationView: View {
                     .disabled(isResolvingFee)
             }
         }
-        .navigationTitle("Allocation")
+        .navigationTitle("Change Allocation")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text("Change Allocation")
+                        .font(.headline)
+
+                    Text(transactionType.shortTitle)
+                        .font(.caption)
+                        .fontWeight(.regular)
+                        .foregroundStyle(.secondary)
+                }
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button("Done") {
                     Task { await finish() }
@@ -3392,11 +3428,18 @@ private struct ChangeAllocationView: View {
     ) -> some View {
         HStack {
             Text(title)
+                .foregroundStyle(.secondary)
             Spacer()
             Text(value)
                 .font(.body.monospacedDigit())
                 .foregroundStyle(valueColor)
         }
+        .padding(.vertical, 12)
+    }
+
+    private var summaryDivider: some View {
+        Divider()
+            .overlay(Color.primary.opacity(0.04))
     }
 
     private var allocatedSompi: UInt64? {
@@ -3439,6 +3482,7 @@ private struct ChangeAllocationView: View {
                       outputs.indices.contains(index) else { return }
                 amountTexts[index] = text
                 outputs[index].amountSompi = parseAmount(text) ?? 0
+                resolvedFeeSompi = nil
             }
         )
     }
