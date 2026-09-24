@@ -14,7 +14,7 @@ final class CopyFeedbackCenter: ObservableObject {
         }
 
         dismissalTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(6))
+            try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }
             withAnimation(.snappy) {
                 self.message = nil
