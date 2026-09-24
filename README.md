@@ -6,7 +6,7 @@ KasSigner-iOS is a native, watch-only Kaspa wallet and portfolio app for iPhone.
 
 Private keys, seed phrases, and signing passphrases are never requested or stored by the iOS app.
 
-**Current version:** 4.2 (build 21)
+**Current version:** 4.3 (build 22)
 
 ## Beta status
 
@@ -39,6 +39,9 @@ The hardware signer is the final review authority. Confirm transaction details o
 - Track sent, received, internal-transfer, pending, and confirmed transactions
 - Display confirmation progress using accepting-block blue scores
 - Inspect and label transactions and UTXOs
+- Show each UTXO's estimated USD value alongside its KAS amount
+- Optionally show a Currency Converter card on the Wallet tab; it is hidden by default and can be enabled under **Settings → Currency**
+- Show a brief loading transition when switching accounts
 
 ## Receive and address management
 
@@ -56,12 +59,18 @@ The hardware signer is the final review authority. Confirm transaction details o
 - Select individual UTXOs or all available inputs, with an eight-input workflow limit
 - Label UTXOs for coin-control workflows
 - Construct exact-amount or send-max transactions
+- Choose a transaction type before entering send details:
+  - **Standard:** up to four destinations and up to one change output
+  - **Privacy:** up to four destinations and two to four change outputs, with manual allocation or an automatic balanced split
+  - **Decoy:** one destination and exactly four change outputs, including one change output matching the destination amount
+- Add multiple destinations in Standard or Privacy sends; each destination and amount appears in review
 - Choose low, normal, priority, or custom fees
 - Automatically focus the numeric custom-fee field
-- Choose automatic or manual change handling, with up to four change outputs
-- Select derived change addresses, including previously used ones, through Change #512
-- Review separate destination and change address cards, including each output amount, before signing
-- Review destination, amount, fee, inputs, and change before signing
+- Select change addresses, including previously used addresses, with a freshness warning and an option to choose another or continue
+- Allocate multiple change outputs manually or use the automatic balanced split
+- Randomize output order for Privacy and Decoy transactions
+- Review each destination and change address with its amount and estimated USD value, formatted to two decimal places, before signing
+- Review destination amounts, fee, total change, and the number of change addresses before signing
 - Cancel and discard an in-memory transaction session
 - Display animated signing QR frames with play/pause control and a five-second interval
 - Scan signed frames in any order and show real collection progress
@@ -105,6 +114,8 @@ The Portfolio tab is separate from hardware-wallet signing and supports:
 - Manual transaction creation, inspection, editing, and deletion
 - CSV import with validation, duplicate detection, and a review summary
 - Newest-first portfolio CSV export
+- Open the Currency Converter from the Wallet tab as well as Portfolio
+- Add a transaction directly from the Transactions heading
 
 ## Security and privacy controls
 
