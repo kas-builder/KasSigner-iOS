@@ -3280,30 +3280,10 @@ private struct ChangeAllocationView: View {
         List {
             Section {
                 ForEach(outputs.indices, id: \.self) { index in
-                    VStack(alignment: .leading, spacing: 8) {
-                        outputTitle(outputs[index])
-                        HStack(alignment: .firstTextBaseline, spacing: 5) {
-                            TextField("0", text: amountBinding(at: index))
-                                .keyboardType(.decimalPad)
-                                .font(.body.monospacedDigit())
-                                .frame(
-                                    width: amountFieldWidth(at: index),
-                                    alignment: .leading
-                                )
-
-                            Text("KAS")
-                                .font(.body)
-
-                            Spacer(minLength: 0)
-                        }
-
-                        if let usdValue = formatUSD(outputs[index].amountSompi) {
-                            Text(usdValue)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.vertical, 3)
+                    allocationOutputCard(outputs[index], index: index)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 0, bottom: 5, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                 }
             }
 
@@ -3349,17 +3329,60 @@ private struct ChangeAllocationView: View {
         }
     }
 
-    private func outputTitle(_ output: PlannedChangeOutput) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Change Address #\(output.addressIndex + 1)")
-                .foregroundStyle(.primary)
+    private func allocationOutputCard(
+        _ output: PlannedChangeOutput,
+        index: Int
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                Text(outputs.count == 1 ? "Change" : "Change \(index + 1)")
+                    .font(.title3.weight(.semibold))
+
+                Spacer(minLength: 12)
+
+                VStack(alignment: .trailing, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        TextField("0", text: amountBinding(at: index))
+                            .keyboardType(.decimalPad)
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .multilineTextAlignment(.trailing)
+                            .frame(
+                                width: amountFieldWidth(at: index),
+                                alignment: .trailing
+                            )
+
+                        Text("KAS")
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                    }
+
+                    if let usdValue = formatUSD(output.amountSompi) {
+                        Text(usdValue)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Text(output.address)
-                .font(.caption.monospaced())
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .font(.body.monospaced())
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(
+                    Color(.tertiarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(.secondarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+        )
     }
 
     private func valueRow(
