@@ -3173,9 +3173,9 @@ private func changeAddressFreshnessWarning(
     }
     guard !messages.isEmpty else { return nil }
     if usedIndices.count + uncheckedIndices.count == 1 {
-        messages.append("Using this address may weaken this decoy transaction. You can choose a different address or continue anyway.")
+        messages.append("Using this address may reduce transaction privacy. You can choose a different address or continue anyway.")
     } else {
-        messages.append("Using these addresses may weaken this decoy transaction. You can choose different addresses or continue anyway.")
+        messages.append("Using these addresses may reduce transaction privacy. You can choose different addresses or continue anyway.")
     }
     return messages.joined(separator: " ")
 }
@@ -3288,15 +3288,7 @@ private struct ChangeAddressPickerView: View {
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") {
-                            if transactionType == .standard {
-                                selectedOutputs = draftOutputs
-                                completeStandardSelection(draftOutputs)
-                                dismiss()
-                            } else if transactionType == .decoy {
-                                Task { await completeDecoySelection() }
-                            } else {
-                                Task { await completePrivacySelection() }
-                            }
+                            Task { await completeSelection() }
                         }
                         .disabled(!selectionCountIsValid || isResolvingSelection)
                     }
@@ -3340,11 +3332,13 @@ private struct ChangeAddressPickerView: View {
                 )
             ) {
                 Button("Continue Anyway", role: .destructive) {
-                    freshnessWarning = nil
-                    if warnedOutputIDs == draftOutputs.map(\.id) {
-                        Task { await prepareDecoySelection() }
-                    } else {
-                        Task { await completeDecoySelection() }
+                    Task {
+                        freshnessWarning = nil
+                        if warnedOutputIDs == draftOutputs.map(\.id) {
+                            await continueWithSelectedAddresses()
+                        } else {
+                            await completeSelection()
+                        }
                     }
                 }
                 Button("Choose Different Addresses", role: .cancel) {}
@@ -3363,7 +3357,7 @@ private struct ChangeAddressPickerView: View {
                 address: address,
                 isSelected: draftOutputs.contains { $0.addressIndex == index },
                 isLocallyUsed: walletStore.isChangeAddressLocallyUsed(address, profileID: profileID),
-                allowsUnverifiedSelection: transactionType == .decoy
+                allowsUnverifiedSelection: true
             ) {
                 toggle(index: index, address: address)
             }
@@ -3426,7 +3420,7 @@ private struct ChangeAddressPickerView: View {
     }
 
     @MainActor
-    private func completeDecoySelection() async {
+    private func completeSelection() async {
         guard !isResolvingSelection else { return }
         isResolvingSelection = true
         let checkedOutputs = draftOutputs
@@ -3442,7 +3436,21 @@ private struct ChangeAddressPickerView: View {
             freshnessWarning = warning
             return
         }
-        await prepareDecoySelection()
+        await continueWithSelectedAddresses()
+    }
+
+    @MainActor
+    private func continueWithSelectedAddresses() async {
+        switch transactionType {
+        case .standard:
+            selectedOutputs = draftOutputs
+            completeStandardSelection(draftOutputs)
+            dismiss()
+        case .privacyFocused:
+            await completePrivacySelection()
+        case .decoy:
+            await prepareDecoySelection()
+        }
     }
 
     @MainActor
