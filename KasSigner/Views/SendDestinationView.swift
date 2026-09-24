@@ -1882,14 +1882,6 @@ private struct VerifiedTransactionSummaryCards: View {
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @EnvironmentObject private var priceService: PriceService
 
-    private var accentColor: Color {
-        Color(
-            red: 0.20,
-            green: 0.62,
-            blue: 0.57
-        )
-    }
-
     var body: some View {
         VStack(spacing: 16) {
             transactionCard
@@ -1913,7 +1905,6 @@ private struct VerifiedTransactionSummaryCards: View {
                     accessibilityLabel: "Copy change address"
                 )
             }
-            inputsCard
         }
     }
 
@@ -1982,29 +1973,6 @@ private struct VerifiedTransactionSummaryCards: View {
             }
             .buttonStyle(SubtlePressButtonStyle())
             .accessibilityLabel(accessibilityLabel)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
-        )
-    }
-
-    private var inputsCard: some View {
-        HStack {
-            Text("Selected Inputs")
-                .font(.title3.weight(.semibold))
-
-            Spacer()
-
-            Text(
-                review.selectedInputCount == 1
-                    ? "1 selected UTXO"
-                    : "\(review.selectedInputCount) selected UTXOs"
-            )
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(accentColor)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
