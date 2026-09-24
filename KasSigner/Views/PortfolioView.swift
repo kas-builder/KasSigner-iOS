@@ -805,7 +805,9 @@ struct PortfolioView: View {
                     Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
-                    Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(.currency(code: "USD")))
+                    Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(
+                        .currency(code: "USD").precision(.fractionLength(2))
+                    ))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

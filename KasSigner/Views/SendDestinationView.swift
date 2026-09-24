@@ -2184,7 +2184,7 @@ private struct VerifiedTransactionSummaryCards: View {
         let kas = Double(sompi) / 100_000_000
         return (kas * price).formatted(
             .currency(code: "USD")
-                .precision(.fractionLength(0...2))
+                .precision(.fractionLength(2))
         )
     }
 }
@@ -3881,7 +3881,7 @@ private struct ChangeAllocationView: View {
         let kas = Double(sompi) / 100_000_000
         return (kas * price).formatted(
             .currency(code: "USD")
-                .precision(.fractionLength(0...2))
+                .precision(.fractionLength(2))
         )
     }
 

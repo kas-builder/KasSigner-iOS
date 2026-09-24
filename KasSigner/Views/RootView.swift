@@ -1236,7 +1236,7 @@ struct UTXOsView: View {
 
         return (utxo.amountKas * price).formatted(
             .currency(code: "USD")
-                .precision(.fractionLength(0...2))
+                .precision(.fractionLength(2))
         )
     }
 
