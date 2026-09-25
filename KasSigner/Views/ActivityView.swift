@@ -507,36 +507,7 @@ struct ActivityView: View {
                 .accessibilityHint("Opens this transaction in the selected block explorer")
             }
 
-            VStack(spacing: 4) {
-                Divider()
-
-                NavigationLink {
-                    graphDestination(for: transaction)
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "point.3.connected.trianglepath.dotted")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .frame(width: 22)
-
-                        Text("View transaction graph")
-                            .font(.body.weight(.regular))
-                            .foregroundStyle(.secondary)
-
-                        Spacer(minLength: 8)
-
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(SubtlePressButtonStyle())
-                .accessibilityHint("Opens a visual map of transaction inputs and outputs")
-
-                Divider()
-            }
+            Divider()
 
             HStack(alignment: .center, spacing: 8) {
                 Text("Label")
@@ -567,6 +538,37 @@ struct ActivityView: View {
                 }
                 .buttonStyle(SubtlePressButtonStyle())
                 .accessibilityLabel(label.isEmpty ? "Add label" : "Edit label")
+            }
+
+            VStack(spacing: 0) {
+                Divider()
+                    .opacity(0.45)
+
+                NavigationLink {
+                    graphDestination(for: transaction)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
+
+                        Text("View transaction graph")
+                            .font(.body.weight(.regular))
+                            .foregroundStyle(.secondary)
+
+                        Spacer(minLength: 8)
+
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                    .padding(.top, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SubtlePressButtonStyle())
+                .accessibilityHint("Opens a visual map of transaction inputs and outputs")
             }
         }
         .padding(16)
