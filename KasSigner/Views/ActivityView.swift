@@ -507,34 +507,36 @@ struct ActivityView: View {
                 .accessibilityHint("Opens this transaction in the selected block explorer")
             }
 
-            Divider()
+            VStack(spacing: 4) {
+                Divider()
 
-            NavigationLink {
-                graphDestination(for: transaction)
-            } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "arrow.up.right")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
-                        .frame(width: 22)
+                NavigationLink {
+                    graphDestination(for: transaction)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 22)
 
-                    Text("Show Transaction Graph")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.primary)
+                        Text("View transaction graph")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.primary)
 
-                    Spacer()
+                        Spacer(minLength: 8)
 
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .frame(minHeight: 32)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(SubtlePressButtonStyle())
-            .accessibilityHint("Opens a visual map of transaction inputs and outputs")
+                .buttonStyle(SubtlePressButtonStyle())
+                .accessibilityHint("Opens a visual map of transaction inputs and outputs")
 
-            Divider()
+                Divider()
+            }
 
             HStack(alignment: .center, spacing: 8) {
                 Text("Label")
