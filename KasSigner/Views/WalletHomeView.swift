@@ -703,13 +703,19 @@ struct SendUTXOSelectionView: View {
 
                     Spacer()
 
-                    Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(
-                            utxo.blockDAAScore > 0
-                                ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                                : Color.orange
-                        )
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(
+                                utxo.blockDAAScore > 0
+                                    ? Color(red: 0.18, green: 0.68, blue: 0.62)
+                                    : Color.orange
+                            )
+
+                        Text(utxoTypeLabel(for: utxo))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Divider()
@@ -778,6 +784,14 @@ struct SendUTXOSelectionView: View {
             )
 
         return "\(whole).\(fractionalText) KAS"
+    }
+
+    private func utxoTypeLabel(for utxo: WalletUTXO) -> String {
+        switch utxo.derivationChain?.lowercased() {
+        case "receive": "Receive"
+        case "change": "Change"
+        default: "Unknown"
+        }
     }
 
     private func usdValueText(for utxo: WalletUTXO) -> String? {

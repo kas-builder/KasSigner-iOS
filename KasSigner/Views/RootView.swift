@@ -1039,6 +1039,9 @@ struct UTXOsView: View {
                             statusRow(for: utxo)
                                 .font(.body.weight(.semibold))
 
+                            Text(utxoTypeLabel(for: utxo))
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
                         }
                     }
 
@@ -1137,6 +1140,14 @@ struct UTXOsView: View {
                 Text("Not confirmed")
                     .foregroundStyle(.orange)
             }
+        }
+    }
+
+    private func utxoTypeLabel(for utxo: WalletUTXO) -> String {
+        switch utxo.derivationChain?.lowercased() {
+        case "receive": "Receive"
+        case "change": "Change"
+        default: "Unknown"
         }
     }
 
