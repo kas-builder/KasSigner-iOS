@@ -940,9 +940,9 @@ private struct TransactionFlowGraphView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
-                Text("Inputs")
+                Text("Inputs · \(graph.inputs.count)")
                 Spacer()
-                Text("Outputs")
+                Text("Outputs · \(graph.outputs.count)")
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(.secondary)
