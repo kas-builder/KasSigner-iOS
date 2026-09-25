@@ -932,7 +932,8 @@ private struct TransactionGraphDetailView: View {
             TransactionFlowGraphView(
                 graph: graph,
                 isExpanded: $isGraphExpanded,
-                walletAddresses: walletAddresses
+                walletAddresses: walletAddresses,
+                showsGraphColors: preferences.showsGraphColors
             )
                 .onGeometryChange(for: CGFloat.self) { proxy in
                     proxy.size.width
@@ -986,7 +987,8 @@ private struct TransactionGraphDetailView: View {
             isExpanded: .constant(isGraphExpanded),
             squareCorners: true,
             showsTransactionID: false,
-            walletAddresses: walletAddresses
+            walletAddresses: walletAddresses,
+            showsGraphColors: preferences.showsGraphColors
         )
         .environmentObject(preferences)
         .environment(\.colorScheme, colorScheme)
@@ -1053,19 +1055,22 @@ private struct TransactionFlowGraphView: View {
     let squareCorners: Bool
     let showsTransactionID: Bool
     let walletAddresses: Set<String>
+    let showsGraphColors: Bool
 
     init(
         graph: TransactionGraphDetails,
         isExpanded: Binding<Bool>,
         squareCorners: Bool = false,
         showsTransactionID: Bool = true,
-        walletAddresses: Set<String> = []
+        walletAddresses: Set<String> = [],
+        showsGraphColors: Bool = true
     ) {
         self.graph = graph
         self._isExpanded = isExpanded
         self.squareCorners = squareCorners
         self.showsTransactionID = showsTransactionID
         self.walletAddresses = Set(walletAddresses.map { $0.lowercased() })
+        self.showsGraphColors = showsGraphColors
     }
 
     @EnvironmentObject private var preferences: AppPreferences
@@ -1141,7 +1146,9 @@ private struct TransactionFlowGraphView: View {
             }
             .frame(height: graphHeight)
 
-            graphLegend
+            if showsGraphColors {
+                graphLegend
+            }
 
             if hasExpandableRows {
                 Button {
@@ -1238,7 +1245,7 @@ private struct TransactionFlowGraphView: View {
                     amount: fee,
                     icon: "dollarsign.circle",
                     alignment: .leading,
-                    semanticColor: feeColor
+                    semanticColor: showsGraphColors ? feeColor : nil
                 )
             }
         }
@@ -1364,6 +1371,7 @@ private struct TransactionFlowGraphView: View {
     }
 
     private func graphColor(for address: String?) -> Color? {
+        guard showsGraphColors else { return nil }
         guard let address, isExplorerAddress(address) else {
             return unavailableAddressColor
         }
@@ -1434,7 +1442,8 @@ private struct TransactionFlowGraphView: View {
                     control1: CGPoint(x: centerRightX + curveRunway * 0.72, y: centerY),
                     control2: CGPoint(x: outputEndpointX - curveRunway * 0.72, y: y)
                 )
-                context.stroke(path, with: .color(feeColor.opacity(0.82)), lineWidth: lineWidth)
+                let color = showsGraphColors ? feeColor : lineColor
+                context.stroke(path, with: .color(color.opacity(0.82)), lineWidth: lineWidth)
             }
 
             var centerLine = Path()

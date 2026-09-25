@@ -155,6 +155,7 @@ final class AppPreferences: ObservableObject {
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
     @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
+    @Published var showsGraphColors: Bool { didSet { save() } }
     @Published var addressStatusDisplayMode: AddressStatusDisplayMode { didSet { save() } }
     @Published var nodeMode: NodeConnectionMode { didSet { save() } }
     @Published var customNodeURL: String { didSet { save() } }
@@ -166,6 +167,7 @@ final class AppPreferences: ObservableObject {
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
         static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
+        static let showsGraphColors = "kassigner.showsGraphColors.v1"
         static let addressStatusEnabled = "kassigner.addressStatusEnabled.v1"
         static let addressStatusDisplayMode = "kassigner.addressStatusDisplayMode.v2"
         static let nodeMode = "kassigner.nodeMode.v1"
@@ -184,6 +186,7 @@ final class AppPreferences: ObservableObject {
             rawValue: defaults.object(forKey: Key.kasBalanceDecimalPlaces) as? Int ?? 4
         ) ?? .four
         explorer = ExplorerChoice(rawValue: defaults.string(forKey: Key.explorer) ?? "") ?? .kaspaStream
+        showsGraphColors = defaults.object(forKey: Key.showsGraphColors) as? Bool ?? true
         if let storedMode = defaults.string(forKey: Key.addressStatusDisplayMode),
            let displayMode = AddressStatusDisplayMode(rawValue: storedMode) {
             addressStatusDisplayMode = displayMode
@@ -216,6 +219,7 @@ final class AppPreferences: ObservableObject {
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
         defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)
+        defaults.set(showsGraphColors, forKey: Key.showsGraphColors)
         defaults.set(addressStatusDisplayMode.rawValue, forKey: Key.addressStatusDisplayMode)
         defaults.set(nodeMode.rawValue, forKey: Key.nodeMode)
         defaults.set(customNodeURL, forKey: Key.customNode)

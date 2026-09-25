@@ -121,6 +121,8 @@ struct SettingsView: View {
                         }
                     }
 
+                    Toggle("Graph Colors", isOn: $preferences.showsGraphColors)
+
                     Picker("Address Status", selection: $preferences.addressStatusDisplayMode) {
                         ForEach(AddressStatusDisplayMode.allCases) { mode in
                             Text(mode.title).tag(mode)
