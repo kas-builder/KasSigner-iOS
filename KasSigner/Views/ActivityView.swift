@@ -1076,6 +1076,7 @@ private struct TransactionFlowGraphView: View {
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
     private let externalRecipientColor = Color.blue
     private let feeColor = Color.yellow
+    private let unavailableAddressColor = Color.secondary
     private let maximumVisibleNodes = 6
 
     private var visibleInputs: [TransactionGraphInput] {
@@ -1088,6 +1089,11 @@ private struct TransactionFlowGraphView: View {
 
     private var rightRowCount: Int {
         visibleOutputs.count + (graph.feeSompi == nil ? 0 : 1)
+    }
+
+    private var hasUnavailableAddresses: Bool {
+        visibleInputs.contains { !hasUsableAddress($0.address) }
+            || visibleOutputs.contains { !hasUsableAddress($0.address) }
     }
 
     private var graphHeight: CGFloat {
@@ -1319,6 +1325,9 @@ private struct TransactionFlowGraphView: View {
                 legendItem("Wallet Owned", color: accentColor)
                 legendItem("External Address", color: externalRecipientColor)
                 legendItem("Transaction Fee", color: feeColor)
+                if hasUnavailableAddresses {
+                    legendItem("Address Unavailable", color: unavailableAddressColor)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .center)
 
@@ -1327,7 +1336,12 @@ private struct TransactionFlowGraphView: View {
                     legendItem("Wallet Owned", color: accentColor)
                     legendItem("External Address", color: externalRecipientColor)
                 }
-                legendItem("Transaction Fee", color: feeColor)
+                HStack(spacing: 14) {
+                    legendItem("Transaction Fee", color: feeColor)
+                    if hasUnavailableAddresses {
+                        legendItem("Address Unavailable", color: unavailableAddressColor)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .center)
@@ -1350,11 +1364,18 @@ private struct TransactionFlowGraphView: View {
     }
 
     private func graphColor(for address: String?) -> Color? {
-        guard let address, isExplorerAddress(address) else { return nil }
+        guard let address, isExplorerAddress(address) else {
+            return unavailableAddressColor
+        }
         if walletAddresses.contains(address.lowercased()) {
             return accentColor
         }
         return externalRecipientColor
+    }
+
+    private func hasUsableAddress(_ address: String?) -> Bool {
+        guard let address else { return false }
+        return isExplorerAddress(address)
     }
 
     private func graphLines(size: CGSize) -> some View {
