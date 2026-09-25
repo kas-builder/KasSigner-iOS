@@ -913,6 +913,7 @@ private struct TransactionFlowGraphView: View {
 
     @State private var selectedRow: GraphRow?
     @State private var pressedRow: GraphRow?
+    @State private var isExpanded = false
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
     private let maximumVisibleNodes = 6
@@ -922,11 +923,11 @@ private struct TransactionFlowGraphView: View {
     }
 
     private var visibleInputs: [TransactionGraphInput] {
-        Array(graph.inputs.prefix(maximumVisibleNodes))
+        isExpanded ? graph.inputs : Array(graph.inputs.prefix(maximumVisibleNodes))
     }
 
     private var visibleOutputs: [TransactionGraphOutput] {
-        Array(graph.outputs.prefix(maximumVisibleNodes))
+        isExpanded ? graph.outputs : Array(graph.outputs.prefix(maximumVisibleNodes))
     }
 
     private var rightRowCount: Int {
@@ -978,11 +979,24 @@ private struct TransactionFlowGraphView: View {
             }
             .frame(height: graphHeight)
 
-            if graph.inputs.count > maximumVisibleNodes || graph.outputs.count > maximumVisibleNodes {
-                Text(overflowSummary)
-                    .font(.caption)
+            if hasExpandableRows {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(expandControlTitle)
+                            .font(.caption.weight(.medium))
+
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                    }
                     .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SubtlePressButtonStyle())
             }
         }
         .padding(16)
@@ -1224,13 +1238,21 @@ private struct TransactionFlowGraphView: View {
         return "\(whole).\(fractionalText) KAS"
     }
 
-    private var overflowSummary: String {
-        let hiddenInputs = max(0, graph.inputs.count - maximumVisibleNodes)
-        let hiddenOutputs = max(0, graph.outputs.count - maximumVisibleNodes)
-        if hiddenInputs > 0 && hiddenOutputs > 0 {
-            return "+\(hiddenInputs) inputs and +\(hiddenOutputs) outputs not shown"
+    private var hasExpandableRows: Bool {
+        graph.inputs.count > maximumVisibleNodes || graph.outputs.count > maximumVisibleNodes
+    }
+
+    private var expandControlTitle: String {
+        guard isExpanded else {
+            let hiddenInputs = graph.inputs.count - visibleInputs.count
+            let hiddenOutputs = graph.outputs.count - visibleOutputs.count
+            if hiddenInputs > 0 && hiddenOutputs > 0 {
+                return "Show \(hiddenInputs) more inputs and \(hiddenOutputs) more outputs"
+            }
+            if hiddenInputs > 0 { return "Show \(hiddenInputs) more inputs" }
+            return "Show \(hiddenOutputs) more outputs"
         }
-        if hiddenInputs > 0 { return "+\(hiddenInputs) inputs not shown" }
-        return "+\(hiddenOutputs) outputs not shown"
+
+        return "Show fewer"
     }
 }
