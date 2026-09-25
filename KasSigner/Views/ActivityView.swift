@@ -1509,10 +1509,18 @@ private struct TransactionFlowGraphView: View {
     private func formatKas(_ sompi: UInt64) -> String {
         let whole = sompi / 100_000_000
         let fractional = sompi % 100_000_000
-        guard fractional != 0 else { return "\(whole) KAS" }
+        let wholeDigits = String(whole)
+        var groupedWhole = ""
+        for (index, digit) in wholeDigits.enumerated() {
+            if index > 0 && (wholeDigits.count - index) % 3 == 0 {
+                groupedWhole.append(",")
+            }
+            groupedWhole.append(digit)
+        }
+        guard fractional != 0 else { return "\(groupedWhole) KAS" }
         let fractionalText = String(format: "%08llu", fractional)
             .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
-        return "\(whole).\(fractionalText) KAS"
+        return "\(groupedWhole).\(fractionalText) KAS"
     }
 
     private var hasExpandableRows: Bool {
