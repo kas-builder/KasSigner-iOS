@@ -850,6 +850,10 @@ private struct TransactionGraphDetailView: View {
     @State private var showingPDFExportError = false
     @State private var pdfExportErrorMessage = "The graph could not be made into a PDF."
 
+    private var walletAddresses: Set<String> {
+        Set((profile.receiveAddresses + profile.changeAddresses).map { $0.lowercased() })
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -925,7 +929,11 @@ private struct TransactionGraphDetailView: View {
                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
             )
         } else if let graph {
-            TransactionFlowGraphView(graph: graph, isExpanded: $isGraphExpanded)
+            TransactionFlowGraphView(
+                graph: graph,
+                isExpanded: $isGraphExpanded,
+                walletAddresses: walletAddresses
+            )
                 .onGeometryChange(for: CGFloat.self) { proxy in
                     proxy.size.width
                 } action: { width in
@@ -977,7 +985,8 @@ private struct TransactionGraphDetailView: View {
             graph: graph,
             isExpanded: .constant(isGraphExpanded),
             squareCorners: true,
-            showsTransactionID: false
+            showsTransactionID: false,
+            walletAddresses: walletAddresses
         )
         .environmentObject(preferences)
         .environment(\.colorScheme, colorScheme)
@@ -1043,53 +1052,31 @@ private struct TransactionFlowGraphView: View {
     let graph: TransactionGraphDetails
     let squareCorners: Bool
     let showsTransactionID: Bool
+    let walletAddresses: Set<String>
 
     init(
         graph: TransactionGraphDetails,
         isExpanded: Binding<Bool>,
         squareCorners: Bool = false,
-        showsTransactionID: Bool = true
+        showsTransactionID: Bool = true,
+        walletAddresses: Set<String> = []
     ) {
         self.graph = graph
         self._isExpanded = isExpanded
         self.squareCorners = squareCorners
         self.showsTransactionID = showsTransactionID
-    }
-
-    private enum GraphRow: Hashable {
-        case input(String)
-        case output(Int)
-    }
-
-    private struct GraphAddressButtonStyle: ButtonStyle {
-        let row: GraphRow
-        @Binding var pressedRow: GraphRow?
-
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .onChange(of: configuration.isPressed) { _, isPressed in
-                    if isPressed {
-                        pressedRow = row
-                    } else if pressedRow == row {
-                        pressedRow = nil
-                    }
-                }
-        }
+        self.walletAddresses = Set(walletAddresses.map { $0.lowercased() })
     }
 
     @EnvironmentObject private var preferences: AppPreferences
     @Environment(\.openURL) private var openURL
 
-    @State private var selectedRow: GraphRow?
-    @State private var pressedRow: GraphRow?
     @Binding var isExpanded: Bool
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+    private let externalRecipientColor = Color.blue
+    private let feeColor = Color.yellow
     private let maximumVisibleNodes = 6
-
-    private func isHighlighted(_ row: GraphRow) -> Bool {
-        (pressedRow ?? selectedRow) == row
-    }
 
     private var visibleInputs: [TransactionGraphInput] {
         isExpanded ? graph.inputs : Array(graph.inputs.prefix(maximumVisibleNodes))
@@ -1147,6 +1134,8 @@ private struct TransactionFlowGraphView: View {
                 }
             }
             .frame(height: graphHeight)
+
+            graphLegend
 
             if hasExpandableRows {
                 Button {
@@ -1219,8 +1208,7 @@ private struct TransactionFlowGraphView: View {
                     address: input.address,
                     fallback: compactOutpoint(input.outpoint),
                     amount: input.amountSompi,
-                    alignment: .trailing,
-                    row: .input(input.id)
+                    alignment: .trailing
                 )
             }
         }
@@ -1234,8 +1222,7 @@ private struct TransactionFlowGraphView: View {
                     address: output.address,
                     fallback: "Output \(output.index)",
                     amount: output.amountSompi,
-                    alignment: .leading,
-                    row: .output(output.id)
+                    alignment: .leading
                 )
             }
 
@@ -1245,7 +1232,7 @@ private struct TransactionFlowGraphView: View {
                     amount: fee,
                     icon: "dollarsign.circle",
                     alignment: .leading,
-                    highlighted: false
+                    semanticColor: feeColor
                 )
             }
         }
@@ -1257,13 +1244,12 @@ private struct TransactionFlowGraphView: View {
         address: String?,
         fallback: String,
         amount: UInt64?,
-        alignment: HorizontalAlignment,
-        row: GraphRow
+        alignment: HorizontalAlignment
     ) -> some View {
         let title = compactAddress(address, fallback: fallback)
+        let color = graphColor(for: address)
         if let address, isExplorerAddress(address) {
             Button {
-                selectedRow = row
                 openURL(preferences.explorer.addressURL(address))
             } label: {
                 graphLabel(
@@ -1271,10 +1257,10 @@ private struct TransactionFlowGraphView: View {
                     amount: amount,
                     icon: nil,
                     alignment: alignment,
-                    highlighted: isHighlighted(row)
+                    semanticColor: color
                 )
             }
-            .buttonStyle(GraphAddressButtonStyle(row: row, pressedRow: $pressedRow))
+            .buttonStyle(SubtlePressButtonStyle())
             .accessibilityLabel("Address \(address), \(amount.map(formatKas) ?? "amount unavailable")")
             .accessibilityHint("Opens this address in the selected block explorer")
         } else {
@@ -1283,7 +1269,7 @@ private struct TransactionFlowGraphView: View {
                 amount: amount,
                 icon: nil,
                 alignment: alignment,
-                highlighted: false
+                semanticColor: color
             )
         }
     }
@@ -1293,26 +1279,26 @@ private struct TransactionFlowGraphView: View {
         amount: UInt64?,
         icon: String?,
         alignment: HorizontalAlignment,
-        highlighted: Bool
+        semanticColor: Color?
     ) -> some View {
         HStack(spacing: 5) {
             if alignment == .leading, let icon {
                 Image(systemName: icon)
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(title == "Fee" ? .secondary : accentColor)
+                    .foregroundStyle(semanticColor ?? .secondary)
                     .frame(width: 14)
             }
 
             VStack(alignment: alignment, spacing: 2) {
                 Text(title)
                     .font(.subheadline.monospaced())
-                    .foregroundStyle(highlighted ? accentColor : Color.primary)
+                    .foregroundStyle(semanticColor ?? Color.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.86)
                 if let amount {
                     Text(formatKas(amount))
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(highlighted ? accentColor.opacity(0.82) : Color.secondary)
+                        .foregroundStyle(semanticColor?.opacity(0.82) ?? Color.secondary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
                 }
@@ -1325,6 +1311,50 @@ private struct TransactionFlowGraphView: View {
         .frame(maxHeight: .infinity)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
+    }
+
+    private var graphLegend: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                legendItem("Wallet Owned", color: accentColor)
+                legendItem("External Address", color: externalRecipientColor)
+                legendItem("Transaction Fee", color: feeColor)
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            VStack(alignment: .center, spacing: 6) {
+                HStack(spacing: 14) {
+                    legendItem("Wallet Owned", color: accentColor)
+                    legendItem("External Address", color: externalRecipientColor)
+                }
+                legendItem("Transaction Fee", color: feeColor)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+        .padding(.top, 2)
+    }
+
+    private func legendItem(_ title: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Capsule()
+                .fill(color)
+                .frame(width: 18, height: 2)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func graphColor(for address: String?) -> Color? {
+        guard let address, isExplorerAddress(address) else { return nil }
+        if walletAddresses.contains(address.lowercased()) {
+            return accentColor
+        }
+        return externalRecipientColor
     }
 
     private func graphLines(size: CGSize) -> some View {
@@ -1342,7 +1372,6 @@ private struct TransactionFlowGraphView: View {
             let lineWidth: CGFloat = 1.25
             let inputCenters = rowCenters(count: visibleInputs.count, height: size.height)
             for (index, input) in visibleInputs.enumerated() {
-                let highlighted = isHighlighted(.input(input.id))
                 let y = inputCenters[index]
                 var path = Path()
                 path.move(to: CGPoint(x: inputEndpointX, y: y))
@@ -1353,14 +1382,13 @@ private struct TransactionFlowGraphView: View {
                 )
                 context.stroke(
                     path,
-                    with: .color(highlighted ? accentColor.opacity(0.88) : lineColor),
-                    lineWidth: highlighted ? 2 : lineWidth
+                    with: .color(graphColor(for: input.address)?.opacity(0.78) ?? lineColor),
+                    lineWidth: lineWidth
                 )
             }
 
             let outputCenters = rowCenters(count: rightRowCount, height: size.height)
             for (index, output) in visibleOutputs.enumerated() {
-                let highlighted = isHighlighted(.output(output.id))
                 let y = outputCenters[index]
                 var path = Path()
                 path.move(to: CGPoint(x: centerRightX, y: centerY))
@@ -1371,8 +1399,8 @@ private struct TransactionFlowGraphView: View {
                 )
                 context.stroke(
                     path,
-                    with: .color(highlighted ? accentColor.opacity(0.88) : lineColor),
-                    lineWidth: highlighted ? 2 : lineWidth
+                    with: .color(graphColor(for: output.address)?.opacity(0.78) ?? lineColor),
+                    lineWidth: lineWidth
                 )
             }
 
@@ -1385,7 +1413,7 @@ private struct TransactionFlowGraphView: View {
                     control1: CGPoint(x: centerRightX + curveRunway * 0.72, y: centerY),
                     control2: CGPoint(x: outputEndpointX - curveRunway * 0.72, y: y)
                 )
-                context.stroke(path, with: .color(lineColor), lineWidth: lineWidth)
+                context.stroke(path, with: .color(feeColor.opacity(0.82)), lineWidth: lineWidth)
             }
 
             var centerLine = Path()
