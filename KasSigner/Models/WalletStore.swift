@@ -1004,6 +1004,7 @@ final class WalletStore: ObservableObject {
             persistentState.usedChangeAddresses.removeValue(forKey: key)
             persistentState.usedReceiveAddresses.removeValue(forKey: key)
             transactionCache.remove(profileID: profileID)
+            TransactionGraphCache.shared.remove(profileID: profileID)
         }
 
         sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
@@ -1060,6 +1061,7 @@ final class WalletStore: ObservableObject {
 
         for incompleteProfile in incompleteProfiles {
             transactionCache.remove(profileID: incompleteProfile.id)
+            TransactionGraphCache.shared.remove(profileID: incompleteProfile.id)
         }
 
         let legacyTransactions: [WalletTransaction]

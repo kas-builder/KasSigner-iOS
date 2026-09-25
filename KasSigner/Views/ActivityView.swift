@@ -805,16 +805,48 @@ struct ActivityView: View {
     }
 }
 
+private struct TransactionGraphPDFDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.pdf] }
+
+    let data: Data
+
+    init(data: Data) {
+        self.data = data
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
 private struct TransactionGraphDetailView: View {
     let transaction: WalletTransaction
     let profile: WalletProfile
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var graph: TransactionGraphDetails?
     @State private var loadError: String?
     @State private var isLoading = true
+    @State private var isGraphExpanded = false
+    @State private var graphCardWidth: CGFloat = 0
+    @State private var pdfExportDocument: TransactionGraphPDFDocument?
+    @State private var pdfExportFileName = "KasSigner-Transaction-Graph"
+    @State private var showingPDFFileExporter = false
+    @State private var showingPDFExportSuccess = false
+    @State private var pdfExportSuccessMessage = ""
+    @State private var showingPDFExportError = false
+    @State private var pdfExportErrorMessage = "The graph could not be made into a PDF."
 
     var body: some View {
         ScrollView {
@@ -827,8 +859,52 @@ private struct TransactionGraphDetailView: View {
         .background(Color(.systemGroupedBackground))
         .navigationTitle("Transaction Graph")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        beginPDFExport()
+                    } label: {
+                        Label("Save Graph as PDF", systemImage: "square.and.arrow.down")
+                    }
+                    .disabled(isLoading || graph == nil)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                .accessibilityLabel("Transaction Graph Actions")
+            }
+        }
         .task(id: transaction.transactionID) {
             await loadGraph()
+        }
+        .fileExporter(
+            isPresented: $showingPDFFileExporter,
+            document: pdfExportDocument,
+            contentType: .pdf,
+            defaultFilename: pdfExportFileName
+        ) { result in
+            pdfExportDocument = nil
+            switch result {
+            case .success(let url):
+                pdfExportSuccessMessage = "Saved \(url.lastPathComponent) to Files."
+                showingPDFExportSuccess = true
+            case .failure(let error):
+                if (error as NSError).code != NSUserCancelledError {
+                    pdfExportErrorMessage = error.localizedDescription
+                    showingPDFExportError = true
+                }
+            }
+        }
+        .alert("Export Complete", isPresented: $showingPDFExportSuccess) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(pdfExportSuccessMessage)
+        }
+        .alert("Unable to Save PDF", isPresented: $showingPDFExportError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(pdfExportErrorMessage)
         }
     }
 
@@ -847,7 +923,12 @@ private struct TransactionGraphDetailView: View {
                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
             )
         } else if let graph {
-            TransactionFlowGraphView(graph: graph)
+            TransactionFlowGraphView(graph: graph, isExpanded: $isGraphExpanded)
+                .onGeometryChange(for: CGFloat.self) { proxy in
+                    proxy.size.width
+                } action: { width in
+                    graphCardWidth = width
+                }
         } else {
             ContentUnavailableView {
                 Label("Graph Unavailable", systemImage: "exclamationmark.triangle")
@@ -882,10 +963,79 @@ private struct TransactionGraphDetailView: View {
         }
         isLoading = false
     }
+
+    @MainActor
+    private func beginPDFExport() {
+        guard let graph else { return }
+        let exportWidth = graphCardWidth > 0
+            ? graphCardWidth
+            : max(280, UIScreen.main.bounds.width - 28)
+
+        let card = TransactionFlowGraphView(
+            graph: graph,
+            isExpanded: .constant(isGraphExpanded),
+            squareCorners: true
+        )
+        .environmentObject(preferences)
+        .environment(\.colorScheme, colorScheme)
+        .environment(\.dynamicTypeSize, dynamicTypeSize)
+        .frame(width: exportWidth)
+
+        let imageRenderer = ImageRenderer(content: card)
+        imageRenderer.proposedSize = ProposedViewSize(width: exportWidth, height: nil)
+
+        var pdfData: Data?
+        imageRenderer.render { size, draw in
+            guard size.width > 0, size.height > 0 else { return }
+            let contentPageHeight = min(size.height, 12_000)
+            let pageBounds = CGRect(x: 0, y: 0, width: size.width, height: contentPageHeight)
+            let pdfRenderer = UIGraphicsPDFRenderer(bounds: pageBounds)
+            pdfData = pdfRenderer.pdfData { context in
+                var offset: CGFloat = 0
+                while offset < size.height {
+                    let pageHeight = min(contentPageHeight, size.height - offset)
+                    let pageRect = CGRect(x: 0, y: 0, width: size.width, height: pageHeight)
+                    context.beginPage(withBounds: pageRect, pageInfo: [:])
+                    context.cgContext.setFillColor(
+                        (colorScheme == .dark ? UIColor.black : UIColor.systemGroupedBackground).cgColor
+                    )
+                    context.cgContext.fill(pageRect)
+                    context.cgContext.saveGState()
+                    context.cgContext.clip(to: pageRect)
+                    context.cgContext.translateBy(x: 0, y: pageHeight + offset)
+                    context.cgContext.scaleBy(x: 1, y: -1)
+                    draw(context.cgContext)
+                    context.cgContext.restoreGState()
+                    offset += contentPageHeight
+                }
+            }
+        }
+
+        guard let pdfData, !pdfData.isEmpty else {
+            pdfExportErrorMessage = "The graph could not be rendered. Please try again."
+            showingPDFExportError = true
+            return
+        }
+
+        pdfExportDocument = TransactionGraphPDFDocument(data: pdfData)
+        pdfExportFileName = "KasSigner-Transaction-Graph-\(transaction.transactionID.prefix(12))"
+        showingPDFFileExporter = true
+    }
 }
 
 private struct TransactionFlowGraphView: View {
     let graph: TransactionGraphDetails
+    let squareCorners: Bool
+
+    init(
+        graph: TransactionGraphDetails,
+        isExpanded: Binding<Bool>,
+        squareCorners: Bool = false
+    ) {
+        self.graph = graph
+        self._isExpanded = isExpanded
+        self.squareCorners = squareCorners
+    }
 
     private enum GraphRow: Hashable {
         case input(String)
@@ -913,7 +1063,7 @@ private struct TransactionFlowGraphView: View {
 
     @State private var selectedRow: GraphRow?
     @State private var pressedRow: GraphRow?
-    @State private var isExpanded = false
+    @Binding var isExpanded: Bool
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
     private let maximumVisibleNodes = 6
@@ -1000,10 +1150,14 @@ private struct TransactionFlowGraphView: View {
             }
         }
         .padding(16)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
+        .background {
+            if squareCorners {
+                Color(.secondarySystemGroupedBackground)
+            } else {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            }
+        }
         .accessibilityElement(children: .contain)
     }
 
