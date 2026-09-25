@@ -974,15 +974,29 @@ private struct TransactionGraphDetailView: View {
         let card = TransactionFlowGraphView(
             graph: graph,
             isExpanded: .constant(isGraphExpanded),
-            squareCorners: true
+            squareCorners: true,
+            showsTransactionID: false
         )
         .environmentObject(preferences)
         .environment(\.colorScheme, colorScheme)
         .environment(\.dynamicTypeSize, dynamicTypeSize)
         .frame(width: exportWidth)
 
+        let sizingController = UIHostingController(rootView: card)
+        let measuredHeight = ceil(sizingController.sizeThatFits(
+            in: CGSize(width: exportWidth, height: 100_000)
+        ).height)
+        guard measuredHeight.isFinite, measuredHeight > 0 else {
+            pdfExportErrorMessage = "The graph could not be sized for a PDF. Please try again."
+            showingPDFExportError = true
+            return
+        }
+
         let imageRenderer = ImageRenderer(content: card)
-        imageRenderer.proposedSize = ProposedViewSize(width: exportWidth, height: nil)
+        imageRenderer.proposedSize = ProposedViewSize(
+            width: exportWidth,
+            height: measuredHeight
+        )
 
         var pdfData: Data?
         imageRenderer.render { size, draw in
@@ -1026,15 +1040,18 @@ private struct TransactionGraphDetailView: View {
 private struct TransactionFlowGraphView: View {
     let graph: TransactionGraphDetails
     let squareCorners: Bool
+    let showsTransactionID: Bool
 
     init(
         graph: TransactionGraphDetails,
         isExpanded: Binding<Bool>,
-        squareCorners: Bool = false
+        squareCorners: Bool = false,
+        showsTransactionID: Bool = true
     ) {
         self.graph = graph
         self._isExpanded = isExpanded
         self.squareCorners = squareCorners
+        self.showsTransactionID = showsTransactionID
     }
 
     private enum GraphRow: Hashable {
@@ -1147,6 +1164,38 @@ private struct TransactionFlowGraphView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(SubtlePressButtonStyle())
+            }
+
+            if showsTransactionID {
+                VStack(spacing: 16) {
+                    Divider()
+
+                    Button {
+                        openURL(preferences.explorer.transactionURL(graph.transactionID))
+                    } label: {
+                        HStack(alignment: .center, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Transaction ID")
+                                    .font(.caption.weight(.semibold))
+
+                                Text(graph.transactionID)
+                                    .font(.caption.monospaced())
+                                    .lineLimit(2)
+                                    .truncationMode(.middle)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                            Image(systemName: "arrow.up.right")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .accessibilityHint("Opens this transaction in the selected block explorer")
+                }
             }
         }
         .padding(16)
