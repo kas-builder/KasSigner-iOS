@@ -111,6 +111,33 @@ struct TransactionGraphDetails: Codable, Equatable, Sendable {
     let inputs: [TransactionGraphInput]
     let outputs: [TransactionGraphOutput]
     let feeSompi: UInt64?
+
+    var hasUnresolvedDetails: Bool {
+        inputs.contains {
+            !($0.address.map(TransactionGraphAddress.hasPlausibleFormat) ?? false)
+                || $0.amountSompi == nil
+        } || outputs.contains {
+            !($0.address.map(TransactionGraphAddress.hasPlausibleFormat) ?? false)
+        }
+    }
+}
+
+enum TransactionGraphAddress {
+    private static let alphabet = Set("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+
+    static func hasPlausibleFormat(_ address: String) -> Bool {
+        let normalized = address.lowercased()
+        let prefix: String
+        if normalized.hasPrefix("kaspa:") {
+            prefix = "kaspa:"
+        } else if normalized.hasPrefix("kaspatest:") {
+            prefix = "kaspatest:"
+        } else {
+            return false
+        }
+        let payload = normalized.dropFirst(prefix.count)
+        return payload.count > 8 && payload.allSatisfy { alphabet.contains($0) }
+    }
 }
 
 struct TransactionHistorySyncResult {
@@ -256,7 +283,7 @@ struct TransactionHistoryClient: Sendable {
             guard indexed.inputs != nil,
                   indexed.outputs != nil,
                   let transactionID = indexed.transactionID else { return nil }
-            return makeTransactionGraph(indexed, fallbackID: transactionID)
+            return try? makeTransactionGraph(indexed, fallbackID: transactionID)
         }
         let uniqueGraphs = Dictionary(
             graphs.map { ($0.transactionID, $0) },
@@ -328,14 +355,22 @@ struct TransactionHistoryClient: Sendable {
         request.timeoutInterval = 15
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
-        return makeTransactionGraph(indexed, fallbackID: normalizedID)
+        if let responseID = indexed.transactionID,
+           responseID.lowercased() != normalizedID {
+            throw TransactionHistoryError.invalidResponse
+        }
+        return try makeTransactionGraph(indexed, fallbackID: normalizedID)
     }
 
-    private func makeTransactionGraph(
+    func makeTransactionGraph(
         _ indexed: IndexedTransaction,
         fallbackID: String
-    ) -> TransactionGraphDetails {
-        let inputs = (indexed.inputs ?? []).enumerated().map { offset, input in
+    ) throws -> TransactionGraphDetails {
+        guard let indexedInputs = indexed.inputs,
+              let indexedOutputs = indexed.outputs else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        let inputs = indexedInputs.enumerated().map { offset, input in
             let hash = input.previousOutpointHash?.lowercased()
             let outpoint: String
             if let hash, let index = input.previousOutpointIndex {
@@ -349,7 +384,7 @@ struct TransactionHistoryClient: Sendable {
                 amountSompi: input.previousOutpointAmount
             )
         }
-        let outputs = (indexed.outputs ?? []).enumerated().map { index, output in
+        let outputs = indexedOutputs.enumerated().map { index, output in
             TransactionGraphOutput(
                 index: index,
                 address: output.scriptPublicKeyAddress,
@@ -739,59 +774,156 @@ final class WalletSnapshotCache {
 
 @MainActor
 final class TransactionGraphCache {
-    private struct DiskCache: Codable {
+    private struct DiskCache: Codable, Sendable {
         let schemaVersion: Int
         let graphs: [String: TransactionGraphDetails]
+        let lastRefreshedAt: [String: Date]?
     }
 
     static let shared = TransactionGraphCache()
 
     private let storage: ProtectedWalletStorage
+    private let persistenceQueue = DispatchQueue(
+        label: "org.kassigner.transactionGraphCache.persistence",
+        qos: .utility
+    )
     private var loadedProfiles = Set<UUID>()
+    private var loadingProfiles: [UUID: Task<DiskCache?, Never>] = [:]
+    private var profileGenerations: [UUID: UInt64] = [:]
     private var graphsByProfile: [UUID: [String: TransactionGraphDetails]] = [:]
+    private var refreshDatesByProfile: [UUID: [String: Date]] = [:]
+    private var dirtyProfiles = Set<UUID>()
+    private var persistenceVersions: [UUID: UInt64] = [:]
 
     init(storage: ProtectedWalletStorage = .shared) {
         self.storage = storage
     }
 
-    func graph(profileID: UUID, transactionID: String) -> TransactionGraphDetails? {
-        loadIfNeeded(profileID: profileID)
+    func graph(profileID: UUID, transactionID: String) async -> TransactionGraphDetails? {
+        await loadIfNeeded(profileID: profileID)
         return graphsByProfile[profileID]?[normalizedID(transactionID)]
     }
 
-    func save(_ graphs: [TransactionGraphDetails], profileID: UUID) {
-        guard !graphs.isEmpty else { return }
-        loadIfNeeded(profileID: profileID)
-
-        var cachedGraphs = graphsByProfile[profileID, default: [:]]
-        for graph in graphs {
-            cachedGraphs[normalizedID(graph.transactionID)] = graph
+    func shouldRefresh(_ graph: TransactionGraphDetails, profileID: UUID) -> Bool {
+        guard graph.hasUnresolvedDetails else { return false }
+        guard let lastRefresh = refreshDatesByProfile[profileID]?[normalizedID(graph.transactionID)] else {
+            return true
         }
-        graphsByProfile[profileID] = cachedGraphs
-        persist(cachedGraphs, profileID: profileID)
+        let elapsed = Date().timeIntervalSince(lastRefresh)
+        return elapsed < 0 || elapsed >= 15 * 60
+    }
+
+    func save(
+        _ graphs: [TransactionGraphDetails],
+        profileID: UUID,
+        markRefreshed: Bool = false
+    ) async {
+        guard !graphs.isEmpty else { return }
+        let generation = profileGenerations[profileID, default: 0]
+        await loadIfNeeded(profileID: profileID)
+        guard profileGenerations[profileID, default: 0] == generation else { return }
+
+        var refreshDates = refreshDatesByProfile[profileID, default: [:]]
+        var changed = false
+        for graph in graphs {
+            let id = normalizedID(graph.transactionID)
+            if let existing = graphsByProfile[profileID]?[id],
+               !existing.hasUnresolvedDetails,
+               graph.hasUnresolvedDetails {
+                continue
+            }
+            if graphsByProfile[profileID]?[id] != graph {
+                graphsByProfile[profileID, default: [:]][id] = graph
+                refreshDates.removeValue(forKey: id)
+                changed = true
+            }
+            if graph.hasUnresolvedDetails, markRefreshed {
+                refreshDates[id] = Date()
+                changed = true
+            } else if !graph.hasUnresolvedDetails,
+                      refreshDates.removeValue(forKey: id) != nil {
+                changed = true
+            }
+        }
+        guard changed || dirtyProfiles.contains(profileID) else { return }
+        refreshDatesByProfile[profileID] = refreshDates
+        dirtyProfiles.insert(profileID)
+        persistenceVersions[profileID, default: 0] &+= 1
+        let version = persistenceVersions[profileID, default: 0]
+        let saved = await persist(
+            graphsByProfile[profileID, default: [:]],
+            refreshDates: refreshDates,
+            profileID: profileID
+        )
+        if saved,
+           profileGenerations[profileID, default: 0] == generation,
+           persistenceVersions[profileID] == version {
+            dirtyProfiles.remove(profileID)
+        }
     }
 
     func remove(profileID: UUID) {
+        profileGenerations[profileID, default: 0] &+= 1
         loadedProfiles.remove(profileID)
+        loadingProfiles.removeValue(forKey: profileID)
         graphsByProfile.removeValue(forKey: profileID)
-        storage.remove(fileName: fileName(profileID: profileID))
+        refreshDatesByProfile.removeValue(forKey: profileID)
+        dirtyProfiles.remove(profileID)
+        persistenceVersions.removeValue(forKey: profileID)
+        let name = fileName(profileID: profileID)
+        let directoryURL = storage.directoryURL
+        persistenceQueue.sync {
+            ProtectedWalletStorage(directoryURL: directoryURL).remove(fileName: name)
+        }
     }
 
-    private func loadIfNeeded(profileID: UUID) {
-        guard loadedProfiles.insert(profileID).inserted else { return }
-        let cache = storage.load(DiskCache.self, fileName: fileName(profileID: profileID))
+    private func loadIfNeeded(profileID: UUID) async {
+        guard !loadedProfiles.contains(profileID) else { return }
+        let generation = profileGenerations[profileID, default: 0]
+        let task: Task<DiskCache?, Never>
+        if let existing = loadingProfiles[profileID] {
+            task = existing
+        } else {
+            let name = fileName(profileID: profileID)
+            let directoryURL = storage.directoryURL
+            let queue = persistenceQueue
+            task = Task {
+                await withCheckedContinuation { continuation in
+                    queue.async {
+                        let diskStorage = ProtectedWalletStorage(directoryURL: directoryURL)
+                        continuation.resume(returning: diskStorage.load(DiskCache.self, fileName: name))
+                    }
+                }
+            }
+            loadingProfiles[profileID] = task
+        }
+        let cache = await task.value
+        guard profileGenerations[profileID, default: 0] == generation,
+              loadedProfiles.insert(profileID).inserted else { return }
+        loadingProfiles.removeValue(forKey: profileID)
         guard cache?.schemaVersion == 1 else { return }
         graphsByProfile[profileID] = cache?.graphs ?? [:]
+        refreshDatesByProfile[profileID] = cache?.lastRefreshedAt ?? [:]
     }
 
     private func persist(
         _ graphs: [String: TransactionGraphDetails],
+        refreshDates: [String: Date],
         profileID: UUID
-    ) {
-        _ = storage.save(
-            DiskCache(schemaVersion: 1, graphs: graphs),
-            fileName: fileName(profileID: profileID)
+    ) async -> Bool {
+        let cache = DiskCache(
+            schemaVersion: 1,
+            graphs: graphs,
+            lastRefreshedAt: refreshDates
         )
+        let name = fileName(profileID: profileID)
+        let directoryURL = storage.directoryURL
+        return await withCheckedContinuation { continuation in
+            persistenceQueue.async {
+                let diskStorage = ProtectedWalletStorage(directoryURL: directoryURL)
+                continuation.resume(returning: diskStorage.save(cache, fileName: name))
+            }
+        }
     }
 
     private func normalizedID(_ transactionID: String) -> String {
@@ -954,23 +1086,35 @@ final class WalletSyncService: ObservableObject {
         transactionID: String,
         profile: WalletProfile
     ) async throws -> TransactionGraphDetails {
-        if let cachedGraph = TransactionGraphCache.shared.graph(
+        let cachedGraph = await TransactionGraphCache.shared.graph(
             profileID: profile.id,
             transactionID: transactionID
-        ) {
+        )
+        if let cachedGraph,
+           !TransactionGraphCache.shared.shouldRefresh(cachedGraph, profileID: profile.id) {
             return cachedGraph
         }
         guard isNetworkAvailable else {
+            if let cachedGraph { return cachedGraph }
             throw URLError(.notConnectedToInternet)
         }
-        guard let graph = try await transactionHistoryClient.transactionGraph(
-            id: transactionID,
-            for: profile
-        ) else {
-            throw TransactionHistoryError.invalidResponse
+        do {
+            guard let graph = try await transactionHistoryClient.transactionGraph(
+                id: transactionID,
+                for: profile
+            ) else {
+                throw TransactionHistoryError.invalidResponse
+            }
+            await TransactionGraphCache.shared.save(
+                [graph],
+                profileID: profile.id,
+                markRefreshed: true
+            )
+            return graph
+        } catch {
+            if let cachedGraph { return cachedGraph }
+            throw error
         }
-        TransactionGraphCache.shared.save([graph], profileID: profile.id)
-        return graph
     }
 
     init() {
@@ -1222,7 +1366,9 @@ final class WalletSyncService: ObservableObject {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             walletStore.mergeSyncedTransactions(history.transactions, profileID: profile.id)
-            TransactionGraphCache.shared.save(history.graphs, profileID: profile.id)
+            await TransactionGraphCache.shared.save(history.graphs, profileID: profile.id)
+            guard activeProfileID == profile.id,
+                  activeProfileGeneration == profileGeneration else { return }
             transactionHistoryUpdatedAt = Date()
             committedCompleteHistory = true
         } catch {

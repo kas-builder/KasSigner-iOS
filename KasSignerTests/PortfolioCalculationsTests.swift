@@ -3,6 +3,126 @@ import XCTest
 @testable import KasSigner
 
 final class PortfolioCalculationsTests: XCTestCase {
+    func testTransactionGraphRejectsMissingInputOrOutputLists() {
+        let client = TransactionHistoryClient()
+        let input = IndexedTransactionInput(
+            previousOutpointAddress: "kaspa:qqqqqqqqq",
+            previousOutpointAmount: 200
+        )
+        let output = IndexedTransactionOutput(
+            amount: 190,
+            scriptPublicKeyAddress: "kaspa:qqqqqqqqq"
+        )
+
+        func indexed(
+            inputs: [IndexedTransactionInput]?,
+            outputs: [IndexedTransactionOutput]?
+        ) -> IndexedTransaction {
+            IndexedTransaction(
+                transactionID: "abc",
+                blockTime: nil,
+                isAccepted: nil,
+                acceptingBlockTime: nil,
+                acceptingBlockBlueScore: nil,
+                inputs: inputs,
+                outputs: outputs
+            )
+        }
+
+        XCTAssertThrowsError(
+            try client.makeTransactionGraph(indexed(inputs: nil, outputs: [output]), fallbackID: "abc")
+        )
+        XCTAssertThrowsError(
+            try client.makeTransactionGraph(indexed(inputs: [input], outputs: nil), fallbackID: "abc")
+        )
+        let graph = try? client.makeTransactionGraph(
+            indexed(inputs: [input], outputs: [output]),
+            fallbackID: "abc"
+        )
+        XCTAssertEqual(graph?.feeSompi, 10)
+    }
+
+    func testGraphAddressFormatRejectsIncompleteAddresses() {
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqq"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqqb"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("https://example.com"))
+        XCTAssertTrue(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqqq"))
+    }
+
+    @MainActor
+    func testPartialGraphCacheRefreshesAndPersistsCompleteGraph() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graph-cache-test-\(UUID().uuidString)")
+        let storage = ProtectedWalletStorage(directoryURL: directory)
+        let cache = TransactionGraphCache(storage: storage)
+        let profileID = UUID()
+        let partial = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [TransactionGraphInput(outpoint: "prior:0", address: nil, amountSompi: nil)],
+            outputs: [TransactionGraphOutput(index: 0, address: "kaspa:qqqqqqqqq", amountSompi: 190)],
+            feeSompi: nil
+        )
+
+        await cache.save([partial], profileID: profileID)
+        XCTAssertTrue(cache.shouldRefresh(partial, profileID: profileID))
+        await cache.save([partial], profileID: profileID, markRefreshed: true)
+        XCTAssertFalse(cache.shouldRefresh(partial, profileID: profileID))
+
+        let complete = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [TransactionGraphInput(
+                outpoint: "prior:0",
+                address: "kaspa:qqqqqqqqq",
+                amountSompi: 200
+            )],
+            outputs: partial.outputs,
+            feeSompi: 10
+        )
+        await cache.save([complete], profileID: profileID)
+        XCTAssertFalse(cache.shouldRefresh(complete, profileID: profileID))
+        await cache.save([partial], profileID: profileID)
+        let reloadedGraph = await TransactionGraphCache(storage: storage).graph(
+            profileID: profileID,
+            transactionID: "ABC"
+        )
+        XCTAssertEqual(reloadedGraph, complete)
+    }
+
+    @MainActor
+    func testGraphCacheReadsEarlierDiskFormat() async {
+        struct EarlierDiskCache: Encodable {
+            let schemaVersion: Int
+            let graphs: [String: TransactionGraphDetails]
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graph-cache-legacy-test-\(UUID().uuidString)")
+        let storage = ProtectedWalletStorage(directoryURL: directory)
+        let profileID = UUID()
+        let graph = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [],
+            outputs: [TransactionGraphOutput(
+                index: 0,
+                address: "kaspa:qqqqqqqqq",
+                amountSompi: 100
+            )],
+            feeSompi: nil
+        )
+        let name = "transaction-graphs-\(profileID.uuidString.lowercased()).json"
+        XCTAssertTrue(storage.save(
+            EarlierDiskCache(schemaVersion: 1, graphs: ["abc": graph]),
+            fileName: name
+        ))
+
+        let loaded = await TransactionGraphCache(storage: storage).graph(
+            profileID: profileID,
+            transactionID: "abc"
+        )
+        XCTAssertEqual(loaded, graph)
+    }
+
     @MainActor
     func testCopyToastShowsFirstAndLastSixCharacters() {
         let feedback = CopyFeedbackCenter()

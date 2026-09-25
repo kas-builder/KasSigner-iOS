@@ -1075,6 +1075,9 @@ private struct TransactionFlowGraphView: View {
 
     @EnvironmentObject private var preferences: AppPreferences
     @Environment(\.openURL) private var openURL
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .subheadline) private var graphRowHeight: CGFloat = 52
+    @ScaledMetric(relativeTo: .subheadline) private var graphHeightPadding: CGFloat = 44
 
     @Binding var isExpanded: Bool
 
@@ -1102,7 +1105,8 @@ private struct TransactionFlowGraphView: View {
     }
 
     private var graphHeight: CGFloat {
-        CGFloat(max(3, visibleInputs.count, rightRowCount)) * 52 + 44
+        CGFloat(max(3, visibleInputs.count, rightRowCount)) * graphRowHeight
+            + graphHeightPadding
     }
 
     var body: some View {
@@ -1259,9 +1263,10 @@ private struct TransactionFlowGraphView: View {
         amount: UInt64?,
         alignment: HorizontalAlignment
     ) -> some View {
-        let title = compactAddress(address, fallback: fallback)
+        let title = address.flatMap { TransactionGraphAddress.hasPlausibleFormat($0) ? $0 : nil }
+            .map { compactAddress($0, fallback: fallback) } ?? fallback
         let color = graphColor(for: address)
-        if let address, isExplorerAddress(address) {
+        if let address, TransactionGraphAddress.hasPlausibleFormat(address) {
             Button {
                 openURL(preferences.explorer.addressURL(address))
             } label: {
@@ -1312,7 +1317,7 @@ private struct TransactionFlowGraphView: View {
                     Text(formatKas(amount))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(semanticColor?.opacity(0.82) ?? Color.secondary)
-                        .lineLimit(1)
+                        .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                         .minimumScaleFactor(0.75)
                 }
             }
@@ -1327,31 +1332,45 @@ private struct TransactionFlowGraphView: View {
     }
 
     private var graphLegend: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 10) {
-                legendItem("Wallet Owned", color: accentColor)
-                legendItem("External Address", color: externalRecipientColor)
-                legendItem("Transaction Fee", color: feeColor)
-                if hasUnavailableAddresses {
-                    legendItem("Address Unavailable", color: unavailableAddressColor)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
-
-            VStack(alignment: .center, spacing: 6) {
-                HStack(spacing: 14) {
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 8) {
                     legendItem("Wallet Owned", color: accentColor)
                     legendItem("External Address", color: externalRecipientColor)
-                }
-                HStack(spacing: 14) {
                     legendItem("Transaction Fee", color: feeColor)
                     if hasUnavailableAddresses {
                         legendItem("Address Unavailable", color: unavailableAddressColor)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) {
+                        legendItem("Wallet Owned", color: accentColor)
+                        legendItem("External Address", color: externalRecipientColor)
+                        legendItem("Transaction Fee", color: feeColor)
+                        if hasUnavailableAddresses {
+                            legendItem("Address Unavailable", color: unavailableAddressColor)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                    VStack(alignment: .center, spacing: 6) {
+                        HStack(spacing: 14) {
+                            legendItem("Wallet Owned", color: accentColor)
+                            legendItem("External Address", color: externalRecipientColor)
+                        }
+                        HStack(spacing: 14) {
+                            legendItem("Transaction Fee", color: feeColor)
+                            if hasUnavailableAddresses {
+                                legendItem("Address Unavailable", color: unavailableAddressColor)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
         .padding(.top, 2)
     }
 
@@ -1372,7 +1391,7 @@ private struct TransactionFlowGraphView: View {
 
     private func graphColor(for address: String?) -> Color? {
         guard showsGraphColors else { return nil }
-        guard let address, isExplorerAddress(address) else {
+        guard let address, TransactionGraphAddress.hasPlausibleFormat(address) else {
             return unavailableAddressColor
         }
         if walletAddresses.contains(address.lowercased()) {
@@ -1383,7 +1402,7 @@ private struct TransactionFlowGraphView: View {
 
     private func hasUsableAddress(_ address: String?) -> Bool {
         guard let address else { return false }
-        return isExplorerAddress(address)
+        return TransactionGraphAddress.hasPlausibleFormat(address)
     }
 
     private func graphLines(size: CGSize) -> some View {
@@ -1473,16 +1492,11 @@ private struct TransactionFlowGraphView: View {
         let displayAddress = address.lowercased().hasPrefix("kaspa:")
             ? String(address.dropFirst("kaspa:".count))
             : address
-        guard displayAddress.count > 12 else { return displayAddress }
-        return String(displayAddress.prefix(6))
+        let visibleCharacters = dynamicTypeSize.isAccessibilitySize ? 4 : 6
+        guard displayAddress.count > visibleCharacters * 2 else { return displayAddress }
+        return String(displayAddress.prefix(visibleCharacters))
             + "..."
-            + String(displayAddress.suffix(6))
-    }
-
-    private func isExplorerAddress(_ address: String) -> Bool {
-        let normalized = address.lowercased()
-        return (normalized.hasPrefix("kaspa:") || normalized.hasPrefix("kaspatest:"))
-            && !address.contains(where: \.isWhitespace)
+            + String(displayAddress.suffix(visibleCharacters))
     }
 
     private func compactOutpoint(_ outpoint: String) -> String {
