@@ -520,8 +520,8 @@ struct ActivityView: View {
                             .frame(width: 22)
 
                         Text("View transaction graph")
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.primary)
+                            .font(.body.weight(.regular))
+                            .foregroundStyle(.secondary)
 
                         Spacer(minLength: 8)
 
