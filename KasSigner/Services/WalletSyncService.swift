@@ -937,6 +937,11 @@ final class TransactionGraphCache {
 
 @MainActor
 final class WalletSyncService: ObservableObject {
+    enum AddressDiscoveryPolicy {
+        case lightweight
+        case comprehensive
+    }
+
     struct DiscoveryPlan: Equatable {
         let receiveCount: Int
         let changeCount: Int
@@ -1141,7 +1146,9 @@ final class WalletSyncService: ObservableObject {
         force: Bool = true,
         minimumInterval: TimeInterval = 9,
         includeTransactionHistory: Bool = true,
-        keepTransactionProgressThroughReconciliation: Bool = false
+        keepTransactionProgressThroughReconciliation: Bool = false,
+        addressDiscoveryPolicy: AddressDiscoveryPolicy = .lightweight,
+        onWalletReady: (() -> Void)? = nil
     ) async {
         guard isNetworkAvailable else {
             state = .failed("No internet connection.")
@@ -1181,16 +1188,31 @@ final class WalletSyncService: ObservableObject {
                 $0.profile.id == profile.id ? $0 : nil
             }
 
-            if beganWithInitialDiscovery,
+            let shouldRunComprehensiveDiscovery = beganWithInitialDiscovery
+                || addressDiscoveryPolicy == .comprehensive
+
+            if shouldRunComprehensiveDiscovery,
                preferences.nodeMode == .automatic,
                resumableCheckpoint == nil {
-                profileToSync = try await discoverImportedWallet(
-                    profile: profileToSync,
-                    engine: engine
-                )
+                do {
+                    profileToSync = try await discoverWalletHistory(
+                        profile: profileToSync,
+                        engine: engine
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch where !beganWithInitialDiscovery {
+                    discoveryNotice = "Complete historical address discovery could not be refreshed. KasSigner kept the account's previously discovered addresses and synchronized current UTXOs instead."
+                    initialDiscoveryProgress = DiscoveryProgress(
+                        title: "Synchronizing wallet",
+                        detail: "Loading current UTXOs from the selected Kaspa node…",
+                        fraction: 0.68
+                    )
+                    initialDiscoveryStage = "Synchronizing UTXOs"
+                }
                 guard activeProfileID == profile.id,
                       activeProfileGeneration == profileGeneration else { return }
-            } else if beganWithInitialDiscovery {
+            } else if shouldRunComprehensiveDiscovery && beganWithInitialDiscovery {
                 discoveryNotice = "Historical address discovery was skipped because Custom Node mode does not contact public indexers. Current UTXOs were still synchronized from your selected node."
                 initialDiscoveryProgress = DiscoveryProgress(
                     title: "Synchronizing wallet",
@@ -1263,6 +1285,7 @@ final class WalletSyncService: ObservableObject {
             initialDiscoveryProgress = nil
             initialDiscoveryError = nil
             initialDiscoveryCheckpoint = nil
+            onWalletReady?()
 
             do {
                 feeEstimate = try await engine.getFeeEstimate(
@@ -1590,16 +1613,18 @@ final class WalletSyncService: ObservableObject {
         "outgoing-reconciliation-\(profileID.uuidString.lowercased()).json"
     }
 
-    private func discoverImportedWallet(
+    private func discoverWalletHistory(
         profile: WalletProfile,
         engine: KasSignerEngine
     ) async throws -> WalletProfile {
         let maximumAddressesPerChain = 512
-        let trailingGap = 20
+        let trailingGap = 50
 
         initialDiscoveryError = nil
         discoveryNotice = nil
-        initialDiscoveryCheckpoint = nil
+        if profile.requiresInitialDiscovery {
+            initialDiscoveryCheckpoint = nil
+        }
         initialDiscoveryStage = "Deriving wallet addresses"
         initialDiscoveryProgress = DiscoveryProgress(
             title: "Discovering wallet",
@@ -1659,7 +1684,7 @@ final class WalletSyncService: ObservableObject {
         }
 
         if plan.reachedSafetyLimit {
-            discoveryNotice = "Wallet activity reaches the 512-address discovery limit. The discovered range is usable, but a deeper scan is recommended."
+            discoveryNotice = "This account has reached the supported 512-address discovery range. Existing discovered addresses remain usable, but KasSigner cannot safely prepare a full 50-address buffer beyond this point."
         }
 
         initialDiscoveryProgress = DiscoveryProgress(
@@ -1677,7 +1702,7 @@ final class WalletSyncService: ObservableObject {
         activeAddresses: Set<String>,
         currentNextReceiveIndex: Int,
         currentNextChangeIndex: Int,
-        trailingGap: Int = 20,
+        trailingGap: Int = 50,
         maximumAddressesPerChain: Int = 512
     ) -> DiscoveryPlan {
         let normalizedActive = Set(activeAddresses.map { $0.lowercased() })
@@ -1686,10 +1711,18 @@ final class WalletSyncService: ObservableObject {
                 normalizedActive.contains(addresses[$0].lowercased())
             }
         }
-        func retainedCount(highestIndex: Int?, available: Int) -> Int {
-            min(
+        func retainedCount(
+            highestIndex: Int?,
+            currentNextIndex: Int,
+            available: Int
+        ) -> Int {
+            let discoveryFrontier = max(
+                currentNextIndex,
+                (highestIndex ?? -1) + 1
+            )
+            return min(
                 min(maximumAddressesPerChain, available),
-                max(min(20, available), (highestIndex ?? -1) + 1 + trailingGap)
+                max(min(trailingGap, available), discoveryFrontier + trailingGap)
             )
         }
 
@@ -1699,10 +1732,12 @@ final class WalletSyncService: ObservableObject {
         return DiscoveryPlan(
             receiveCount: retainedCount(
                 highestIndex: highestReceive,
+                currentNextIndex: currentNextReceiveIndex,
                 available: receiveAddresses.count
             ),
             changeCount: retainedCount(
                 highestIndex: highestChange,
+                currentNextIndex: currentNextChangeIndex,
                 available: changeAddresses.count
             ),
             nextReceiveIndex: max(
@@ -1713,8 +1748,14 @@ final class WalletSyncService: ObservableObject {
                 currentNextChangeIndex,
                 (highestChange ?? -1) + 1
             ),
-            reachedSafetyLimit: (highestReceive ?? -1) >= warningBoundary
-                || (highestChange ?? -1) >= warningBoundary
+            reachedSafetyLimit: max(
+                currentNextReceiveIndex,
+                (highestReceive ?? -1) + 1
+            ) >= warningBoundary
+                || max(
+                    currentNextChangeIndex,
+                    (highestChange ?? -1) + 1
+                ) >= warningBoundary
         )
     }
 
@@ -1724,8 +1765,7 @@ final class WalletSyncService: ObservableObject {
         engine: KasSignerEngine,
         preferences: AppPreferences
     ) async throws -> (WalletSyncPayload, WalletProfile) {
-        let gapLimit = 8
-        let derivationBatch = 8
+        let freshAddressBuffer = 50
         let maximumAddressesPerChain = 512
         var current = profile
 
@@ -1750,49 +1790,24 @@ final class WalletSyncService: ObservableObject {
                 )
             }
 
-            let receiveBoundary = max(
-                0,
-                current.receiveAddresses.count - gapLimit
+            let targetReceiveCount = min(
+                maximumAddressesPerChain,
+                current.nextReceiveIndex + freshAddressBuffer
             )
-            let changeBoundary = max(
-                0,
-                current.changeAddresses.count - gapLimit
+            let targetChangeCount = min(
+                maximumAddressesPerChain,
+                current.nextChangeIndex + freshAddressBuffer
             )
-            let receiveNeedsExtension =
-                current.receiveAddresses.count < maximumAddressesPerChain
-                && (
-                    current.nextReceiveIndex >= receiveBoundary
-                    || result.balance.fundedReceiveIndices.contains {
-                        $0 >= receiveBoundary
-                    }
-                )
-            let changeNeedsExtension =
-                current.changeAddresses.count < maximumAddressesPerChain
-                && (
-                    current.nextChangeIndex >= changeBoundary
-                    || result.balance.fundedChangeIndices.contains {
-                        $0 >= changeBoundary
-                    }
-                )
+            let receiveCount = max(
+                0,
+                targetReceiveCount - current.receiveAddresses.count
+            )
+            let changeCount = max(
+                0,
+                targetChangeCount - current.changeAddresses.count
+            )
 
-            if !receiveNeedsExtension && !changeNeedsExtension {
-                return (result, current)
-            }
-
-            let receiveCount = receiveNeedsExtension
-                ? min(
-                    derivationBatch,
-                    maximumAddressesPerChain - current.receiveAddresses.count
-                )
-                : 0
-            let changeCount = changeNeedsExtension
-                ? min(
-                    derivationBatch,
-                    maximumAddressesPerChain - current.changeAddresses.count
-                )
-                : 0
-
-            guard receiveCount > 0 || changeCount > 0 else {
+            if receiveCount == 0 && changeCount == 0 {
                 return (result, current)
             }
 

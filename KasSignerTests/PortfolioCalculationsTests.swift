@@ -1287,7 +1287,7 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 
-    func testDiscoveryRetainsTwentyAddressesAfterHighestHistoricalUse() {
+    func testDiscoveryRetainsFiftyAddressesAfterHighestHistoricalUse() {
         let receive = (0..<512).map { "kaspa:receive-\($0)" }
         let change = (0..<512).map { "kaspa:change-\($0)" }
         let plan = WalletSyncService.discoveryPlan(
@@ -1298,8 +1298,8 @@ final class PortfolioCalculationsTests: XCTestCase {
             currentNextChangeIndex: 0
         )
 
-        XCTAssertEqual(plan.receiveCount, 86)
-        XCTAssertEqual(plan.changeCount, 52)
+        XCTAssertEqual(plan.receiveCount, 116)
+        XCTAssertEqual(plan.changeCount, 82)
         XCTAssertEqual(plan.nextReceiveIndex, 66)
         XCTAssertEqual(plan.nextChangeIndex, 32)
         XCTAssertFalse(plan.reachedSafetyLimit)
@@ -1315,8 +1315,44 @@ final class PortfolioCalculationsTests: XCTestCase {
             currentNextChangeIndex: 0
         )
 
-        XCTAssertEqual(plan.receiveCount, 128)
+        XCTAssertEqual(plan.receiveCount, 158)
         XCTAssertEqual(plan.nextReceiveIndex, 108)
+    }
+
+    func testDiscoveryRetainsFiftyFreshAddressesForUnusedWallet() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 50)
+        XCTAssertEqual(plan.changeCount, 50)
+        XCTAssertEqual(plan.nextReceiveIndex, 0)
+        XCTAssertEqual(plan.nextChangeIndex, 0)
+        XCTAssertFalse(plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryPreservesLocalFrontierAndFiftyAddressBuffer() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[4], change[2]],
+            currentNextReceiveIndex: 80,
+            currentNextChangeIndex: 40
+        )
+
+        XCTAssertEqual(plan.receiveCount, 130)
+        XCTAssertEqual(plan.changeCount, 90)
+        XCTAssertEqual(plan.nextReceiveIndex, 80)
+        XCTAssertEqual(plan.nextChangeIndex, 40)
+        XCTAssertFalse(plan.reachedSafetyLimit)
     }
 
     func testDiscoveryPreservesReservedIndicesAndReportsSafetyLimit() {

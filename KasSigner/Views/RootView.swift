@@ -85,30 +85,65 @@ struct AccountDiscoveryLoadingView: View {
 final class AccountSwitchPresentationModel: ObservableObject {
     @Published private(set) var isVisible = false
     @Published private(set) var progress = 0.0
+    @Published private(set) var detail = "Preparing address discovery…"
 
-    private var task: Task<Void, Never>?
+    private var startedAt: Date?
+    private var workCompleted = false
+    private var presentationTask: Task<Void, Never>?
 
     func start() {
-        task?.cancel()
+        presentationTask?.cancel()
         isVisible = true
         progress = 0
+        detail = "Preparing address discovery…"
+        startedAt = Date()
+        workCompleted = false
 
-        task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            withAnimation(.linear(duration: 3)) {
-                self.progress = 1
+        presentationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled,
+                  let self,
+                  let startedAt = self.startedAt {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                self.progress = min(0.9, (elapsed / 3) * 0.9)
+
+                if self.workCompleted, elapsed >= 3 {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        self.progress = 1
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled else { return }
+                    self.finish()
+                    return
+                }
+
+                try? await Task.sleep(for: .milliseconds(50))
             }
-            try? await Task.sleep(for: .seconds(3))
-            guard !Task.isCancelled else { return }
-            self.isVisible = false
-            self.progress = 0
-            self.task = nil
         }
+    }
+
+    func update(_ discoveryProgress: WalletSyncService.DiscoveryProgress) {
+        guard isVisible else { return }
+        detail = discoveryProgress.detail
+    }
+
+    func complete() {
+        guard isVisible else { return }
+        detail = "Account ready"
+        workCompleted = true
+    }
+
+    private func finish() {
+        isVisible = false
+        progress = 1
+        startedAt = nil
+        workCompleted = false
+        presentationTask = nil
     }
 }
 
 struct AccountSwitchLoadingView: View {
     let progress: Double
+    let detail: String
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -125,14 +160,14 @@ struct AccountSwitchLoadingView: View {
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(.white)
 
-                Text("Loading UTXOs…")
+                Text(detail)
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.68))
             }
             .padding(28)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Switching account. Loading UTXOs.")
+        .accessibilityLabel("Switching account. \(detail)")
     }
 }
 
@@ -351,7 +386,8 @@ struct RootView: View {
         .overlay {
             if accountSwitchPresentation.isVisible {
                 AccountSwitchLoadingView(
-                    progress: accountSwitchPresentation.progress
+                    progress: accountSwitchPresentation.progress,
+                    detail: accountSwitchPresentation.detail
                 )
                 .transition(.opacity)
                 .zIndex(10)
@@ -371,7 +407,11 @@ struct RootView: View {
         }
         .onChange(of: syncService.initialDiscoveryProgress) { _, progress in
             guard let progress else { return }
-            discoveryPresentation.updateDetail(progress.detail)
+            if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
+                discoveryPresentation.updateDetail(progress.detail)
+            } else {
+                accountSwitchPresentation.update(progress)
+            }
         }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
@@ -410,7 +450,8 @@ struct RootView: View {
                     walletStore: walletStore,
                     engine: engine,
                     preferences: preferences,
-                    force: true
+                    force: true,
+                    addressDiscoveryPolicy: .comprehensive
                 )
             }
         }
@@ -476,7 +517,8 @@ struct RootView: View {
                 walletStore: walletStore,
                 engine: engine,
                 preferences: preferences,
-                force: true
+                force: true,
+                addressDiscoveryPolicy: .comprehensive
             )
         }
     }
@@ -536,8 +578,16 @@ struct RootView: View {
             force: false,
             minimumInterval: 9,
             includeTransactionHistory: shouldAutomaticallyRefreshHistory,
-            keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync
+            keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync,
+            addressDiscoveryPolicy: .comprehensive,
+            onWalletReady: {
+                guard walletStore.selectedProfileID == profile.id else { return }
+                accountSwitchPresentation.complete()
+            }
         )
+        if walletStore.selectedProfileID == profile.id {
+            accountSwitchPresentation.complete()
+        }
 
         if shouldAutomaticallyRefreshHistory,
            syncService.transactionHistoryUpdatedAt != historyUpdatedAtBeforeRefresh {
