@@ -661,6 +661,11 @@ final class WalletStore: ObservableObject {
         save()
     }
 
+    func moveProfiles(from source: IndexSet, to destination: Int) {
+        profiles.move(fromOffsets: source, toOffset: destination)
+        save()
+    }
+
     @discardableResult
     func beginSendSession(
         profileID: UUID,

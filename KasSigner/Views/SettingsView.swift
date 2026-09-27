@@ -85,6 +85,7 @@ struct SettingsView: View {
                                 }
                             }
                         }
+                        .onMove(perform: walletStore.moveProfiles)
                     }
                 }
 
@@ -253,6 +254,11 @@ struct SettingsView: View {
                 Text("Enter a new name for this watch-only account.")
             }
             .navigationTitle("Settings")
+            .toolbar {
+                if walletStore.profiles.count > 1 {
+                    EditButton()
+                }
+            }
             .confirmationDialog(
                 "Delete Account?",
                 isPresented: deleteConfirmationIsPresented,
