@@ -123,6 +123,12 @@ struct SettingsView: View {
 
                     Toggle("Graph Colors", isOn: $preferences.showsGraphColors)
 
+                    Picker("UTXO Card Default", selection: $preferences.utxoCardDefault) {
+                        ForEach(UTXOCardDefault.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+
                     Picker("Address Status", selection: $preferences.addressStatusDisplayMode) {
                         ForEach(AddressStatusDisplayMode.allCases) { mode in
                             Text(mode.title).tag(mode)

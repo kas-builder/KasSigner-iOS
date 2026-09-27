@@ -1014,6 +1014,7 @@ struct UTXOsView: View {
             .onAppear {
                 coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
                 knownUTXOIDs = Set(utxos.map(\.id))
+                applyDefaultKYCStatuses()
             }
             .onChange(of: utxos.map(\.id)) { _, ids in
                 let current = Set(ids)
@@ -1023,10 +1024,31 @@ struct UTXOsView: View {
                 }
 
                 knownUTXOIDs = current
+                applyDefaultKYCStatuses()
+            }
+            .onChange(of: syncService.snapshot?.syncedAt) { _, _ in
+                applyDefaultKYCStatuses()
+            }
+            .onChange(of: preferences.utxoCardDefault) { _, _ in
+                applyDefaultKYCStatuses()
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
                 coinControlStore.activate(profileID: newValue)
+                applyDefaultKYCStatuses()
+            }
+            .alert(
+                "UTXO badge storage",
+                isPresented: Binding(
+                    get: { coinControlStore.persistenceAlert != nil },
+                    set: { if !$0 { coinControlStore.persistenceAlert = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) {
+                    coinControlStore.persistenceAlert = nil
+                }
+            } message: {
+                Text(coinControlStore.persistenceAlert ?? "")
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -1037,6 +1059,16 @@ struct UTXOsView: View {
             }
         }
     }
+
+    private func applyDefaultKYCStatuses() {
+        guard walletStore.selectedProfile != nil,
+              syncService.snapshot != nil else { return }
+        coinControlStore.applyDefaultKYCStatus(
+            to: utxos,
+            defaultStatus: preferences.utxoCardDefault.badgeStatus
+        )
+    }
+
     private func refreshUTXOs() async {
         guard let profile = walletStore.selectedProfile else { return }
         await syncService.refresh(

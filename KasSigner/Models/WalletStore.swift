@@ -30,6 +30,15 @@ final class ProtectedWalletStorage {
         return try? JSONDecoder().decode(type, from: data)
     }
 
+    func loadIfPresent<Value: Decodable>(
+        _ type: Value.Type,
+        fileName: String
+    ) throws -> Value? {
+        let url = fileURL(fileName)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: url))
+    }
+
     @discardableResult
     func save<Value: Encodable>(
         _ value: Value,

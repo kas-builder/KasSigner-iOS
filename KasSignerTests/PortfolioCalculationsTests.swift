@@ -2,6 +2,71 @@ import CryptoKit
 import XCTest
 @testable import KasSigner
 
+@MainActor
+final class UTXOBadgePersistenceTests: XCTestCase {
+    private func utxo(_ id: String) -> WalletUTXO {
+        WalletUTXO(
+            txID: id, index: 0, amount: 100_000_000,
+            scriptPublicKey: [], blockDAAScore: 1, covenantID: nil
+        )
+    }
+
+    func testManualBadgeSurvivesReloadAndDefaultDoesNotReplaceIt() {
+        let storage = ProtectedWalletStorage(directoryURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-\(UUID().uuidString)"))
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let profileID = UUID()
+        let output = utxo("existing")
+        let first = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        first.activate(profileID: profileID)
+        first.applyDefaultKYCStatus(to: [output], defaultStatus: .kyc)
+        first.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(first.persistenceAlert)
+
+        let reloaded = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        reloaded.activate(profileID: profileID)
+        reloaded.applyDefaultKYCStatus(to: [output, utxo("new")], defaultStatus: .kyc)
+        XCTAssertEqual(reloaded.kycStatus(for: output), .nonKYC)
+        XCTAssertEqual(reloaded.kycStatus(for: utxo("new")), .kyc)
+    }
+
+    func testFailedBadgeSaveLeavesPreviousValueAndShowsError() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-blocked-\(UUID().uuidString)")
+        try Data().write(to: parent)
+        let storage = ProtectedWalletStorage(directoryURL: parent)
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let store = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        let output = utxo("manual")
+        store.activate(profileID: UUID())
+        store.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(store.kycStatus(for: output))
+        XCTAssertNotNil(store.persistenceAlert)
+    }
+
+    func testUnreadableSavedBadgesBlockChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-corrupt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let profileID = UUID()
+        try Data("invalid".utf8).write(to: directory.appendingPathComponent(
+            "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
+        ))
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let store = UTXOCoinControlStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: directory), defaults: defaults
+        )
+        let output = utxo("manual")
+        store.activate(profileID: profileID)
+        store.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(store.kycStatus(for: output))
+        XCTAssertNotNil(store.persistenceAlert)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(
+            "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
+        )), Data("invalid".utf8))
+    }
+}
+
 final class PortfolioCalculationsTests: XCTestCase {
     func testTransactionGraphRejectsMissingInputOrOutputLists() {
         let client = TransactionHistoryClient()

@@ -115,13 +115,18 @@ final class UTXOCoinControlStore: ObservableObject {
     @Published private(set) var selectedOutpoints: Set<String> = []
     @Published private(set) var labels: [String: String] = [:]
     @Published private(set) var kycStatuses: [String: UTXOKYCStatus] = [:]
+    @Published var persistenceAlert: String?
 
     private let selectedPrefix = "kassigner.utxoSelection.v1."
     private let labelsPrefix = "kassigner.utxoLabels.v1."
     private let kycStatusesPrefix = "kassigner.utxoKYCStatuses.v1."
+    private let knownUTXOsPrefix = "kassigner.knownUTXOs.v1."
     private let protectedStorage: ProtectedWalletStorage
     private let defaults: UserDefaults
     private var activeProfileID: UUID?
+    private var knownUTXOIDs: Set<String> = []
+    private var hasKnownUTXOBaseline = false
+    private var badgeStorageAvailable = true
 
     init(
         protectedStorage: ProtectedWalletStorage = .shared,
@@ -184,12 +189,64 @@ final class UTXOCoinControlStore: ObservableObject {
     }
 
     func setKYCStatus(_ status: UTXOKYCStatus?, for utxo: WalletUTXO) {
-        if let status {
-            kycStatuses[utxo.id] = status
-        } else {
-            kycStatuses.removeValue(forKey: utxo.id)
+        guard badgeStorageAvailable, let profileID = activeProfileID else {
+            persistenceAlert = "UTXO badges could not be loaded. Your change was not saved. Try reopening the wallet after checking device storage."
+            return
         }
-        saveKYCStatuses()
+        var updated = kycStatuses
+        if let status {
+            updated[utxo.id] = status
+        } else {
+            updated.removeValue(forKey: utxo.id)
+        }
+        guard protectedStorage.save(updated, fileName: kycStatusesFileName(profileID: profileID)) else {
+            persistenceAlert = "Your UTXO badge change could not be saved. The previous badge is still in place. Check device storage and try again."
+            return
+        }
+        kycStatuses = updated
+    }
+
+    func applyDefaultKYCStatus(
+        to utxos: [WalletUTXO],
+        defaultStatus: UTXOKYCStatus?
+    ) {
+        guard badgeStorageAvailable, let profileID = activeProfileID else { return }
+        let currentIDs = Set(utxos.map(\.id))
+
+        guard hasKnownUTXOBaseline else {
+            guard protectedStorage.save(currentIDs, fileName: knownUTXOsFileName(profileID: profileID)) else {
+                persistenceAlert = "UTXO badge defaults could not be saved. No existing UTXOs were changed. Check device storage and try again."
+                return
+            }
+            knownUTXOIDs = currentIDs
+            hasKnownUTXOBaseline = true
+            return
+        }
+
+        let newIDs = currentIDs.subtracting(knownUTXOIDs)
+        guard !newIDs.isEmpty else { return }
+        var updated = kycStatuses
+        if let defaultStatus {
+            for utxo in utxos where newIDs.contains(utxo.id) {
+                if updated[utxo.id] == nil {
+                    updated[utxo.id] = defaultStatus
+                }
+            }
+            if updated != kycStatuses {
+                guard protectedStorage.save(updated, fileName: kycStatusesFileName(profileID: profileID)) else {
+                    persistenceAlert = "New UTXO badge defaults could not be saved. Check device storage and try again."
+                    return
+                }
+                kycStatuses = updated
+            }
+        }
+
+        let updatedKnownIDs = knownUTXOIDs.union(newIDs)
+        guard protectedStorage.save(updatedKnownIDs, fileName: knownUTXOsFileName(profileID: profileID)) else {
+            persistenceAlert = "The record of seen UTXOs could not be saved. Badge defaults may need to be checked after reopening the app."
+            return
+        }
+        knownUTXOIDs = updatedKnownIDs
     }
 
     func label(forTransactionID transactionID: String) -> String {
@@ -215,14 +272,19 @@ final class UTXOCoinControlStore: ObservableObject {
         defaults.removeObject(forKey: selectedPrefix + profileID.uuidString)
         defaults.removeObject(forKey: labelsPrefix + profileID.uuidString)
         defaults.removeObject(forKey: kycStatusesPrefix + profileID.uuidString)
+        defaults.removeObject(forKey: knownUTXOsPrefix + profileID.uuidString)
         protectedStorage.remove(fileName: labelsFileName(profileID: profileID))
         protectedStorage.remove(fileName: kycStatusesFileName(profileID: profileID))
+        protectedStorage.remove(fileName: knownUTXOsFileName(profileID: profileID))
 
         if activeProfileID == profileID {
             activeProfileID = nil
             selectedOutpoints = []
             labels = [:]
             kycStatuses = [:]
+            knownUTXOIDs = []
+            hasKnownUTXOBaseline = false
+            badgeStorageAvailable = true
         }
     }
 
@@ -231,8 +293,14 @@ final class UTXOCoinControlStore: ObservableObject {
             selectedOutpoints = []
             labels = [:]
             kycStatuses = [:]
+            knownUTXOIDs = []
+            hasKnownUTXOBaseline = false
+            badgeStorageAvailable = true
             return
         }
+
+        badgeStorageAvailable = true
+        persistenceAlert = nil
 
         let labelsKey = labelsPrefix + profileID.uuidString
 
@@ -262,25 +330,67 @@ final class UTXOCoinControlStore: ObservableObject {
         }
 
         let kycStatusesKey = kycStatusesPrefix + profileID.uuidString
-        if let protectedStatuses = protectedStorage.load(
-            [String: UTXOKYCStatus].self,
-            fileName: kycStatusesFileName(profileID: profileID)
-        ) {
-            kycStatuses = protectedStatuses
-        } else if let data = defaults.data(forKey: kycStatusesKey),
-                  let decoded = try? JSONDecoder().decode(
-                      [String: UTXOKYCStatus].self,
-                      from: data
-                  ) {
-            kycStatuses = decoded
-            if protectedStorage.save(
-                decoded,
+        do {
+            if let protectedStatuses = try protectedStorage.loadIfPresent(
+                [String: UTXOKYCStatus].self,
                 fileName: kycStatusesFileName(profileID: profileID)
             ) {
-                defaults.removeObject(forKey: kycStatusesKey)
+                kycStatuses = protectedStatuses
+            } else if let data = defaults.data(forKey: kycStatusesKey) {
+                let decoded = try JSONDecoder().decode(
+                    [String: UTXOKYCStatus].self,
+                    from: data
+                )
+                kycStatuses = decoded
+                if protectedStorage.save(
+                    decoded,
+                    fileName: kycStatusesFileName(profileID: profileID)
+                ) {
+                    defaults.removeObject(forKey: kycStatusesKey)
+                } else {
+                    badgeStorageAvailable = false
+                    persistenceAlert = "Saved UTXO badges could not be moved into protected storage. Badge changes are disabled until storage is available."
+                }
+            } else {
+                kycStatuses = [:]
             }
-        } else {
+        } catch {
             kycStatuses = [:]
+            badgeStorageAvailable = false
+            persistenceAlert = "Saved UTXO badges could not be read. Badge changes are disabled so the saved data is not overwritten. Check device storage and reopen the wallet."
+        }
+
+        do {
+            if let savedKnownUTXOs = try protectedStorage.loadIfPresent(
+                Set<String>.self,
+                fileName: knownUTXOsFileName(profileID: profileID)
+            ) {
+                knownUTXOIDs = savedKnownUTXOs
+                hasKnownUTXOBaseline = true
+            } else if let data = defaults.data(
+                forKey: knownUTXOsPrefix + profileID.uuidString
+            ) {
+                let decoded = try JSONDecoder().decode(Set<String>.self, from: data)
+                knownUTXOIDs = decoded
+                hasKnownUTXOBaseline = true
+                if protectedStorage.save(
+                    decoded,
+                    fileName: knownUTXOsFileName(profileID: profileID)
+                ) {
+                    defaults.removeObject(forKey: knownUTXOsPrefix + profileID.uuidString)
+                } else {
+                    badgeStorageAvailable = false
+                    persistenceAlert = "Saved UTXO history could not be moved into protected storage. Badge defaults are disabled until storage is available."
+                }
+            } else {
+                knownUTXOIDs = []
+                hasKnownUTXOBaseline = false
+            }
+        } catch {
+            knownUTXOIDs = []
+            hasKnownUTXOBaseline = false
+            badgeStorageAvailable = false
+            persistenceAlert = "The saved UTXO history could not be read. Badge defaults are disabled to protect existing choices. Check device storage and reopen the wallet."
         }
     }
 
@@ -292,20 +402,16 @@ final class UTXOCoinControlStore: ObservableObject {
         )
     }
 
-    private func saveKYCStatuses() {
-        guard let profileID = activeProfileID else { return }
-        _ = protectedStorage.save(
-            kycStatuses,
-            fileName: kycStatusesFileName(profileID: profileID)
-        )
-    }
-
     private func labelsFileName(profileID: UUID) -> String {
         "utxo-labels-\(profileID.uuidString.lowercased()).json"
     }
 
     private func kycStatusesFileName(profileID: UUID) -> String {
         "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
+    }
+
+    private func knownUTXOsFileName(profileID: UUID) -> String {
+        "utxo-known-ids-\(profileID.uuidString.lowercased()).json"
     }
 
     private func transactionLabelKey(_ transactionID: String) -> String {
