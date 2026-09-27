@@ -132,6 +132,12 @@ final class AccountSwitchPresentationModel: ObservableObject {
         workCompleted = true
     }
 
+    func fail(_ message: String) {
+        guard isVisible else { return }
+        detail = message
+        workCompleted = true
+    }
+
     private func finish() {
         isVisible = false
         progress = 1
@@ -272,6 +278,7 @@ struct RootView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @Environment(\.scenePhase) private var scenePhase
@@ -287,7 +294,7 @@ struct RootView: View {
     @State private var confirmationResolutionTask: Task<Void, Never>?
     @State private var automaticallyRefreshedHistoryProfileID: UUID?
 
-    var body: some View {
+    private var tabs: some View {
         TabView(selection: $selectedTab) {
             WalletHomeView()
                 .tag(Tab.wallet)
@@ -311,6 +318,10 @@ struct RootView: View {
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
+    }
+
+    private var presentedTabs: some View {
+        tabs
         .disabled(
             isInitialDiscoveryBlocking
                 || discoveryPresentation.isVisible
@@ -353,6 +364,19 @@ struct RootView: View {
         } message: {
             Text(syncService.discoveryNotice ?? "")
         }
+        .alert(
+            "UTXO badge storage",
+            isPresented: Binding(
+                get: { coinControlStore.persistenceAlert != nil },
+                set: { if !$0 { coinControlStore.persistenceAlert = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                coinControlStore.persistenceAlert = nil
+            }
+        } message: {
+            Text(coinControlStore.persistenceAlert ?? "")
+        }
         .overlay {
             GeometryReader { proxy in
                 if let message = copyFeedbackCenter.message {
@@ -393,9 +417,33 @@ struct RootView: View {
                 .zIndex(10)
             }
         }
+    }
+
+    var body: some View {
+        presentedTabs
         .onAppear {
+            coinControlStore.activate(profileID: walletStore.selectedProfileID)
+            applyDefaultKYCStatuses()
             if isInitialDiscoveryBlocking {
                 discoveryPresentation.start()
+            }
+        }
+        .onChange(of: walletStore.selectedProfileID) { _, profileID in
+            coinControlStore.activate(profileID: profileID)
+            applyDefaultKYCStatuses()
+        }
+        .onChange(of: preferences.utxoCardDefault) { _, _ in
+            applyDefaultKYCStatuses()
+        }
+        .onChange(of: syncService.state) { _, state in
+            guard accountSwitchPresentation.isVisible else { return }
+            switch state {
+            case .connected:
+                accountSwitchPresentation.complete()
+            case .failed(let message):
+                accountSwitchPresentation.fail(message)
+            case .idle, .syncing:
+                break
             }
         }
         .onChange(of: isInitialDiscoveryBlocking) { wasBlocking, isBlocking in
@@ -426,6 +474,7 @@ struct RootView: View {
             guard let snapshot,
                   let profile = walletStore.selectedProfile,
                   !profile.requiresInitialDiscovery else { return }
+            applyDefaultKYCStatuses()
             Task {
                 await liveRPCService.configure(
                     profile: profile,
@@ -465,6 +514,16 @@ struct RootView: View {
 
     private var isInitialDiscoveryBlocking: Bool {
         walletStore.selectedProfile?.requiresInitialDiscovery == true
+    }
+
+    private func applyDefaultKYCStatuses() {
+        guard walletStore.selectedProfileID != nil,
+              let snapshot = syncService.snapshot else { return }
+        coinControlStore.activate(profileID: walletStore.selectedProfileID)
+        coinControlStore.applyDefaultKYCStatus(
+            to: snapshot.utxos,
+            defaultStatus: preferences.utxoCardDefault.badgeStatus
+        )
     }
 
     @ViewBuilder
@@ -586,7 +645,14 @@ struct RootView: View {
             }
         )
         if walletStore.selectedProfileID == profile.id {
-            accountSwitchPresentation.complete()
+            switch syncService.state {
+            case .connected:
+                accountSwitchPresentation.complete()
+            case .failed(let message):
+                accountSwitchPresentation.fail(message)
+            case .idle, .syncing:
+                break
+            }
         }
 
         if shouldAutomaticallyRefreshHistory,
@@ -1014,7 +1080,6 @@ struct UTXOsView: View {
             .onAppear {
                 coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
                 knownUTXOIDs = Set(utxos.map(\.id))
-                applyDefaultKYCStatuses()
             }
             .onChange(of: utxos.map(\.id)) { _, ids in
                 let current = Set(ids)
@@ -1024,31 +1089,10 @@ struct UTXOsView: View {
                 }
 
                 knownUTXOIDs = current
-                applyDefaultKYCStatuses()
-            }
-            .onChange(of: syncService.snapshot?.syncedAt) { _, _ in
-                applyDefaultKYCStatuses()
-            }
-            .onChange(of: preferences.utxoCardDefault) { _, _ in
-                applyDefaultKYCStatuses()
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
                 coinControlStore.activate(profileID: newValue)
-                applyDefaultKYCStatuses()
-            }
-            .alert(
-                "UTXO badge storage",
-                isPresented: Binding(
-                    get: { coinControlStore.persistenceAlert != nil },
-                    set: { if !$0 { coinControlStore.persistenceAlert = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) {
-                    coinControlStore.persistenceAlert = nil
-                }
-            } message: {
-                Text(coinControlStore.persistenceAlert ?? "")
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -1058,15 +1102,6 @@ struct UTXOsView: View {
                 }
             }
         }
-    }
-
-    private func applyDefaultKYCStatuses() {
-        guard walletStore.selectedProfile != nil,
-              syncService.snapshot != nil else { return }
-        coinControlStore.applyDefaultKYCStatus(
-            to: utxos,
-            defaultStatus: preferences.utxoCardDefault.badgeStatus
-        )
     }
 
     private func refreshUTXOs() async {
