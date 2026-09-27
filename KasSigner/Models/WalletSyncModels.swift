@@ -94,15 +94,31 @@ struct WalletSyncPayload: Codable, Equatable {
 }
 
 
+enum UTXOKYCStatus: String, Codable, CaseIterable, Identifiable {
+    case kyc
+    case nonKYC
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .kyc: "KYC"
+        case .nonKYC: "Non-KYC"
+        }
+    }
+}
+
 @MainActor
 final class UTXOCoinControlStore: ObservableObject {
     nonisolated static let maximumSelectedUTXOs = 8
 
     @Published private(set) var selectedOutpoints: Set<String> = []
     @Published private(set) var labels: [String: String] = [:]
+    @Published private(set) var kycStatuses: [String: UTXOKYCStatus] = [:]
 
     private let selectedPrefix = "kassigner.utxoSelection.v1."
     private let labelsPrefix = "kassigner.utxoLabels.v1."
+    private let kycStatusesPrefix = "kassigner.utxoKYCStatuses.v1."
     private let protectedStorage: ProtectedWalletStorage
     private let defaults: UserDefaults
     private var activeProfileID: UUID?
@@ -163,6 +179,19 @@ final class UTXOCoinControlStore: ObservableObject {
         saveLabels()
     }
 
+    func kycStatus(for utxo: WalletUTXO) -> UTXOKYCStatus? {
+        kycStatuses[utxo.id]
+    }
+
+    func setKYCStatus(_ status: UTXOKYCStatus?, for utxo: WalletUTXO) {
+        if let status {
+            kycStatuses[utxo.id] = status
+        } else {
+            kycStatuses.removeValue(forKey: utxo.id)
+        }
+        saveKYCStatuses()
+    }
+
     func label(forTransactionID transactionID: String) -> String {
         labels[transactionLabelKey(transactionID)] ?? ""
     }
@@ -185,12 +214,15 @@ final class UTXOCoinControlStore: ObservableObject {
     func removeData(profileID: UUID) {
         defaults.removeObject(forKey: selectedPrefix + profileID.uuidString)
         defaults.removeObject(forKey: labelsPrefix + profileID.uuidString)
+        defaults.removeObject(forKey: kycStatusesPrefix + profileID.uuidString)
         protectedStorage.remove(fileName: labelsFileName(profileID: profileID))
+        protectedStorage.remove(fileName: kycStatusesFileName(profileID: profileID))
 
         if activeProfileID == profileID {
             activeProfileID = nil
             selectedOutpoints = []
             labels = [:]
+            kycStatuses = [:]
         }
     }
 
@@ -198,6 +230,7 @@ final class UTXOCoinControlStore: ObservableObject {
         guard let profileID = activeProfileID else {
             selectedOutpoints = []
             labels = [:]
+            kycStatuses = [:]
             return
         }
 
@@ -227,6 +260,28 @@ final class UTXOCoinControlStore: ObservableObject {
         } else {
             labels = [:]
         }
+
+        let kycStatusesKey = kycStatusesPrefix + profileID.uuidString
+        if let protectedStatuses = protectedStorage.load(
+            [String: UTXOKYCStatus].self,
+            fileName: kycStatusesFileName(profileID: profileID)
+        ) {
+            kycStatuses = protectedStatuses
+        } else if let data = defaults.data(forKey: kycStatusesKey),
+                  let decoded = try? JSONDecoder().decode(
+                      [String: UTXOKYCStatus].self,
+                      from: data
+                  ) {
+            kycStatuses = decoded
+            if protectedStorage.save(
+                decoded,
+                fileName: kycStatusesFileName(profileID: profileID)
+            ) {
+                defaults.removeObject(forKey: kycStatusesKey)
+            }
+        } else {
+            kycStatuses = [:]
+        }
     }
 
     private func saveLabels() {
@@ -237,8 +292,20 @@ final class UTXOCoinControlStore: ObservableObject {
         )
     }
 
+    private func saveKYCStatuses() {
+        guard let profileID = activeProfileID else { return }
+        _ = protectedStorage.save(
+            kycStatuses,
+            fileName: kycStatusesFileName(profileID: profileID)
+        )
+    }
+
     private func labelsFileName(profileID: UUID) -> String {
         "utxo-labels-\(profileID.uuidString.lowercased()).json"
+    }
+
+    private func kycStatusesFileName(profileID: UUID) -> String {
+        "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
     }
 
     private func transactionLabelKey(_ transactionID: String) -> String {

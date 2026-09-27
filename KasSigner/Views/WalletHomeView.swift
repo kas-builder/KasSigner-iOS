@@ -550,7 +550,7 @@ struct SendUTXOSelectionView: View {
                         activeSessionID = session.id
                         showingDestination = true
                     } label: {
-                        Text(selectedUTXOs.count == 1 ? "Send UTXO" : "Send UTXOs")
+                        Text(selectedUTXOs.count == 1 ? "Spend UTXO" : "Spend UTXOs")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)

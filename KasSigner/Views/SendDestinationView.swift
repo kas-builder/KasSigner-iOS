@@ -14,6 +14,11 @@ private extension SendTransactionType {
     }
 }
 
+private struct SendAddressScanRequest: Identifiable {
+    let id = UUID()
+    let recipientID: UUID?
+}
+
 struct SendDestinationView: View {
     @Environment(\.dismiss) private var dismiss
     let profile: WalletProfile
@@ -31,7 +36,7 @@ struct SendDestinationView: View {
     @State private var sendMax = false
     @State private var selectedFee: SendFeeChoice = .normal
     @State private var customFeeText = ""
-    @State private var showingScanner = false
+    @State private var addressScanRequest: SendAddressScanRequest?
     @State private var unsignedPSKB: String?
     @State private var showingBuildError = false
     @State private var buildErrorMessage = ""
@@ -87,6 +92,47 @@ struct SendDestinationView: View {
             let addition = current.addingReportingOverflow(recipient.amountSompi)
             total = addition.overflow ? nil : addition.partialValue
         }
+    }
+
+    private func availableBalanceText(excludingRecipientID: UUID?) -> String {
+        guard let selectedTotalSompi else {
+            return "Available balance: Unavailable"
+        }
+
+        var otherAmountTexts: [String] = []
+        if excludingRecipientID != nil {
+            otherAmountTexts.append(amountText)
+        }
+        otherAmountTexts.append(contentsOf: additionalRecipients
+            .filter { $0.id != excludingRecipientID }
+            .map(\.amountText))
+
+        var otherAmounts: [UInt64] = []
+        for text in otherAmountTexts {
+            let normalizedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalizedText.isEmpty {
+                otherAmounts.append(0)
+            } else if let amount = parseKasTextToSompi(normalizedText) {
+                otherAmounts.append(amount)
+            } else {
+                return "Available balance: — KAS"
+            }
+        }
+
+        var allocatedSompi: UInt64 = 0
+        for amount in otherAmounts {
+            let sum = allocatedSompi.addingReportingOverflow(amount)
+            guard !sum.overflow else {
+                return "Available balance: — KAS"
+            }
+            allocatedSompi = sum.partialValue
+        }
+
+        let remaining = selectedTotalSompi.subtractingReportingOverflow(allocatedSompi)
+        guard !remaining.overflow else {
+            return "Available balance: 0 KAS"
+        }
+        return "Available balance: \(formatKas(sompi: remaining.partialValue))"
     }
 
     private var destinationLooksValid: Bool {
@@ -292,7 +338,9 @@ struct SendDestinationView: View {
                             decoyFundingCard
                         }
                         destinationCards
-                        amountCard
+                        if additionalRecipients.isEmpty {
+                            amountCard
+                        }
                         changeAddressCard
                         feeCard
                     }
@@ -410,6 +458,7 @@ struct SendDestinationView: View {
         .onChange(of: additionalRecipients) { _, _ in
             if additionalRecipients.isEmpty == false {
                 sendMax = false
+                amountEntryUsesUSD = false
             }
             persistSendSession()
             scheduleLivePlanResolution()
@@ -422,12 +471,18 @@ struct SendDestinationView: View {
 
     private var presentationContent: some View {
         stateContent
-        .sheet(isPresented: $showingScanner) {
-            QRScannerView { scannedValue in
+        .sheet(item: $addressScanRequest) { scanRequest in
+            QRScannerView { [scanRequest] scannedValue in
+                guard addressScanRequest?.id == scanRequest.id else { return }
                 let scanned = normalizedAddress(from: scannedValue)
-                destinationAddress = scanned
-                validateDestinationAddress(scanned)
-                showingScanner = false
+                if let recipientID = scanRequest.recipientID,
+                   let index = additionalRecipients.firstIndex(where: { $0.id == recipientID }) {
+                    additionalRecipients[index].address = scanned
+                } else if scanRequest.recipientID == nil {
+                    destinationAddress = scanned
+                    validateDestinationAddress(scanned)
+                }
+                addressScanRequest = nil
             }
         }
         .sheet(isPresented: $showingChangeAddressPicker) {
@@ -525,6 +580,21 @@ struct SendDestinationView: View {
             AdditionalRecipientCard(
                 recipient: $recipient,
                 onRemove: { removeAdditionalRecipient(id: recipient.id) },
+                onScan: {
+                    addressScanRequest = SendAddressScanRequest(
+                        recipientID: recipient.id
+                    )
+                },
+                availableBalanceText: availableBalanceText(
+                    excludingRecipientID: recipient.id
+                ),
+                amountWarning: recipient.id == additionalRecipients.last?.id
+                    && totalRecipientSompi != nil && !amountLooksValid
+                    ? "Amount plus fee must fit within the selected input total." : nil,
+                isResolvingLivePlan: recipient.id == additionalRecipients.last?.id
+                    && isResolvingLivePlan,
+                livePlanError: recipient.id == additionalRecipients.last?.id
+                    ? livePlanError : nil,
                 onValidationChange: { isValid in
                     additionalRecipientValidity[recipient.id] = isValid
                 }
@@ -1175,6 +1245,7 @@ struct SendDestinationView: View {
                 if transactionType != .decoy,
                    additionalRecipients.count < 3 {
                     Button {
+                        amountEntryUsesUSD = false
                         additionalRecipients.append(SendRecipientDraft())
                     } label: {
                         Image(systemName: "plus")
@@ -1256,7 +1327,9 @@ struct SendDestinationView: View {
                 .buttonStyle(.bordered)
 
                 Button {
-                    showingScanner = true
+                    addressScanRequest = SendAddressScanRequest(
+                        recipientID: nil
+                    )
                 } label: {
                     Label("Scan QR", systemImage: "qrcode.viewfinder")
                         .frame(maxWidth: .infinity)
@@ -1276,6 +1349,19 @@ struct SendDestinationView: View {
                                 : .red
                     )
             }
+
+            if !additionalRecipients.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Amount")
+                        .font(.headline)
+                    Text(availableBalanceText(excludingRecipientID: nil))
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                destinationAmountField(text: $amountText)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(14)
@@ -1285,6 +1371,22 @@ struct SendDestinationView: View {
                 cornerRadius: 15,
                 style: .continuous
             )
+        )
+    }
+
+    private func destinationAmountField(text: Binding<String>) -> some View {
+        HStack(spacing: 10) {
+            TextField("0", text: text)
+                .keyboardType(.decimalPad)
+                .font(.title3.weight(.semibold).monospacedDigit())
+            Text("KAS")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(
+            Color(.tertiarySystemGroupedBackground),
+            in: RoundedRectangle(cornerRadius: 12)
         )
     }
 
@@ -1716,6 +1818,11 @@ struct SendDestinationView: View {
 private struct AdditionalRecipientCard: View {
     @Binding var recipient: SendRecipientDraft
     let onRemove: () -> Void
+    let onScan: () -> Void
+    let availableBalanceText: String?
+    let amountWarning: String?
+    let isResolvingLivePlan: Bool
+    let livePlanError: String?
     let onValidationChange: (Bool) -> Void
 
     @EnvironmentObject private var engine: KasSignerEngine
@@ -1750,6 +1857,49 @@ private struct AdditionalRecipientCard: View {
                 .lineLimit(2...4)
                 .padding(12)
                 .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(
+                            recipient.address.isEmpty
+                                ? Color.primary.opacity(0.06)
+                                : validation?.valid == true
+                                    ? accentColor.opacity(0.75)
+                                    : Color.red.opacity(0.65),
+                            lineWidth: 1
+                        )
+                }
+
+            HStack(spacing: 10) {
+                Button {
+                    recipient.address = normalizedAddress(
+                        from: UIPasteboard.general.string ?? ""
+                    )
+                } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 22)
+                }
+                .buttonStyle(.bordered)
+
+                Button(action: onScan) {
+                    Label("Scan QR", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 22)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Amount")
+                    .font(.headline)
+                if let availableBalanceText {
+                    Text(availableBalanceText)
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+            }
 
             HStack(spacing: 10) {
                 TextField("0", text: $recipient.amountText)
@@ -1762,6 +1912,24 @@ private struct AdditionalRecipientCard: View {
             .padding(12)
             .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
 
+            if let amountWarning {
+                Text(amountWarning)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            if isResolvingLivePlan {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Calculating exact transaction fee…")
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            } else if let livePlanError {
+                Text(livePlanError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
             if let validation, !recipient.address.isEmpty {
                 Text(validation.valid ? "Valid Kaspa address." : (validation.reason ?? "Invalid Kaspa address."))
                     .font(.caption)
@@ -1770,7 +1938,14 @@ private struct AdditionalRecipientCard: View {
         }
         .padding(14)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 15))
-        .onChange(of: recipient.address) { _, address in validate(address) }
+        .onChange(of: recipient.address) { _, address in
+            let normalized = normalizedAddress(from: address)
+            if normalized != address {
+                recipient.address = normalized
+                return
+            }
+            validate(normalized)
+        }
         .task { validate(recipient.address) }
         .onDisappear { validationTask?.cancel() }
     }
@@ -1790,7 +1965,9 @@ private struct AdditionalRecipientCard: View {
             guard !Task.isCancelled else { return }
             do {
                 let result = try await engine.validateAddress(trimmed)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled,
+                      trimmed == recipient.address.trimmingCharacters(in: .whitespacesAndNewlines)
+                else { return }
                 await MainActor.run {
                     validation = result
                     isValidating = false
@@ -1800,6 +1977,9 @@ private struct AdditionalRecipientCard: View {
                     }
                 }
             } catch {
+                guard !Task.isCancelled,
+                      trimmed == recipient.address.trimmingCharacters(in: .whitespacesAndNewlines)
+                else { return }
                 await MainActor.run {
                     validation = AddressValidationResult(valid: false, network: nil, normalized: nil, reason: error.localizedDescription)
                     isValidating = false
@@ -1807,6 +1987,16 @@ private struct AdditionalRecipientCard: View {
                 }
             }
         }
+    }
+
+    private func normalizedAddress(from rawValue: String) -> String {
+        rawValue
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(
+                of: "kaspa://",
+                with: "kaspa:",
+                options: [.caseInsensitive]
+            )
     }
 }
 

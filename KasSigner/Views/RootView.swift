@@ -1064,6 +1064,7 @@ struct UTXOsView: View {
 
     private func utxoCard(_ utxo: WalletUTXO, isNew: Bool) -> some View {
         let label = coinControlStore.label(for: utxo)
+        let kycStatus = coinControlStore.kycStatus(for: utxo)
 
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 9) {
@@ -1086,12 +1087,13 @@ struct UTXOsView: View {
                         Spacer()
 
                         VStack(alignment: .trailing, spacing: 3) {
-                            statusRow(for: utxo)
-                                .font(.body.weight(.semibold))
+                            kycStatusMenu(for: utxo, status: kycStatus)
 
                             Text(utxoTypeLabel(for: utxo))
                                 .font(.subheadline.monospacedDigit())
                                 .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .padding(.top, 3)
                         }
                     }
 
@@ -1176,21 +1178,64 @@ struct UTXOsView: View {
         }
     }
 
-    @ViewBuilder
-    private func statusRow(for utxo: WalletUTXO) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Spacer(minLength: 14)
-
-            if utxo.blockDAAScore > 0 {
-                Text("Confirmed")
-                    .foregroundStyle(
-                        Color(red: 0.18, green: 0.68, blue: 0.62)
-                    )
-            } else {
-                Text("Not confirmed")
-                    .foregroundStyle(.orange)
+    private func kycStatusMenu(
+        for utxo: WalletUTXO,
+        status: UTXOKYCStatus?
+    ) -> some View {
+        Menu {
+            Button {
+                coinControlStore.setKYCStatus(.kyc, for: utxo)
+            } label: {
+                Label("KYC", systemImage: "exclamationmark.shield")
             }
+
+            Button {
+                coinControlStore.setKYCStatus(.nonKYC, for: utxo)
+            } label: {
+                Label("Non-KYC", systemImage: "checkmark.shield")
+            }
+
+            if status != nil {
+                Divider()
+                Button(role: .destructive) {
+                    coinControlStore.setKYCStatus(nil, for: utxo)
+                } label: {
+                    Label("Clear Status", systemImage: "xmark.circle")
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: status == .kyc
+                    ? "exclamationmark.shield.fill"
+                    : status == .nonKYC
+                        ? "checkmark.shield.fill"
+                        : "shield.lefthalf.filled")
+                Text(status?.title ?? "Set status")
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                (status == .kyc
+                    ? Color.red
+                    : status == .nonKYC ? Color.green : Color.secondary)
+                    .opacity(0.14),
+                in: Capsule()
+            )
+            .foregroundStyle(
+                status == .kyc
+                    ? Color.red
+                    : status == .nonKYC ? Color.green : Color.secondary
+            )
         }
+        .fixedSize()
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            status.map { "KYC status: \($0.title)" } ?? "Set KYC status"
+        )
+        .accessibilityHint("Choose whether this UTXO is KYC or Non-KYC.")
     }
 
     private func utxoTypeLabel(for utxo: WalletUTXO) -> String {
