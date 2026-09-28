@@ -52,9 +52,7 @@ struct AccountDiscoveryLoadingView: View {
 
     var body: some View {
         ZStack {
-            Color(.systemBackground)
-                .opacity(0.96)
-                .ignoresSafeArea()
+            Color.black.ignoresSafeArea()
 
             VStack(spacing: 18) {
                 Image(systemName: "wallet.pass.fill")
@@ -63,6 +61,7 @@ struct AccountDiscoveryLoadingView: View {
 
                 Text("Running address discovery…")
                     .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
 
                 ProgressView(value: progress)
                     .tint(teal)
@@ -71,7 +70,7 @@ struct AccountDiscoveryLoadingView: View {
 
                 Text(detail)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white.opacity(0.68))
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 340)
             }
@@ -530,9 +529,7 @@ struct RootView: View {
     private var initialDiscoveryOverlay: some View {
         if let error = syncService.initialDiscoveryError {
             ZStack {
-                Color(.systemBackground)
-                    .opacity(0.96)
-                    .ignoresSafeArea()
+                Color.black.ignoresSafeArea()
 
                 VStack(spacing: 18) {
                     Image(systemName: "wallet.pass.fill")
@@ -540,9 +537,10 @@ struct RootView: View {
                         .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
                     Text("Wallet discovery paused")
                         .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
                     Text(error)
                         .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.white.opacity(0.68))
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 340)
                     Button("Retry Discovery") {
@@ -612,12 +610,18 @@ struct RootView: View {
         guard isActive,
               let profile = walletStore.selectedProfile else { return }
         let isInitialImportedWalletSync = profile.requiresInitialDiscovery
+            || profile.requiresInitialHistorySync
         let shouldAutomaticallyRefreshHistory =
             automaticallyRefreshedHistoryProfileID != profile.id
         let historyUpdatedAtBeforeRefresh = syncService.transactionHistoryUpdatedAt
+        var completedReconciliation = false
 
         defer {
-            syncService.completeTransactionHistoryReconciliation(profileID: profile.id)
+            syncService.completeTransactionHistoryReconciliation(
+                profileID: profile.id,
+                walletStore: walletStore,
+                allowInitialReveal: completedReconciliation
+            )
         }
 
         engine.startIfNeeded()
@@ -719,6 +723,8 @@ struct RootView: View {
             )
             scheduleConfirmationResolution(profileID: currentProfile.id)
         }
+        completedReconciliation = !Task.isCancelled
+            && walletStore.selectedProfileID == profile.id
     }
 
     private func refreshConfirmationScoreIfNeeded(

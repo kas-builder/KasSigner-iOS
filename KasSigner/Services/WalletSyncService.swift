@@ -994,7 +994,6 @@ final class WalletSyncService: ObservableObject {
 
     private struct InitialDiscoveryCheckpoint {
         let profile: WalletProfile
-        let snapshot: WalletSyncPayload
     }
 
     enum State: Equatable {
@@ -1033,6 +1032,7 @@ final class WalletSyncService: ObservableObject {
     private var lastRefreshAttempt: Date?
     private var lastTransactionHistoryAttempt: [UUID: Date] = [:]
     private var transactionHistoryProfilesInFlight: [UUID: UInt64] = [:]
+    private var initialHistoryReadyToRevealProfileID: UUID?
     private var virtualBlueScoreRefreshInFlight = false
     private var lastVirtualBlueScoreAttempt: Date?
     private let transactionHistoryClient = TransactionHistoryClient()
@@ -1055,6 +1055,7 @@ final class WalletSyncService: ObservableObject {
         initialDiscoveryProgress = nil
         initialDiscoveryError = nil
         discoveryNotice = nil
+        initialHistoryReadyToRevealProfileID = nil
         virtualBlueScore = nil
         lastVirtualBlueScoreAttempt = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
@@ -1152,6 +1153,12 @@ final class WalletSyncService: ObservableObject {
     ) async {
         guard isNetworkAvailable else {
             state = .failed("No internet connection.")
+            if profile.requiresInitialDiscovery {
+                initialDiscoveryProgress = nil
+                initialDiscoveryError = "Connect to the internet and retry discovery. The wallet has not been opened."
+            } else if profile.requiresInitialHistorySync {
+                transactionHistoryError = "Connect to the internet, then retry the initial transaction sync."
+            }
             return
         }
 
@@ -1191,6 +1198,13 @@ final class WalletSyncService: ObservableObject {
             let shouldRunComprehensiveDiscovery = beganWithInitialDiscovery
                 || addressDiscoveryPolicy == .comprehensive
 
+            if beganWithInitialDiscovery && preferences.nodeMode == .custom {
+                state = .failed("Complete discovery requires Automatic Nodes.")
+                initialDiscoveryProgress = nil
+                initialDiscoveryError = "Complete historical discovery needs the public address indexer. Cancel this import, select Automatic Nodes in Settings, then import again."
+                return
+            }
+
             if shouldRunComprehensiveDiscovery,
                preferences.nodeMode == .automatic,
                resumableCheckpoint == nil {
@@ -1212,35 +1226,28 @@ final class WalletSyncService: ObservableObject {
                 }
                 guard activeProfileID == profile.id,
                       activeProfileGeneration == profileGeneration else { return }
-            } else if shouldRunComprehensiveDiscovery && beganWithInitialDiscovery {
-                discoveryNotice = "Historical address discovery was skipped because Custom Node mode does not contact public indexers. Current UTXOs were still synchronized from your selected node."
-                initialDiscoveryProgress = DiscoveryProgress(
-                    title: "Synchronizing wallet",
-                    detail: "Loading current UTXOs from your custom Kaspa node…",
-                    fraction: 0.42
-                )
             }
 
-            let result: WalletSyncPayload
-            let discoveredProfile: WalletProfile
             if let resumableCheckpoint {
-                result = resumableCheckpoint.snapshot
-                discoveredProfile = resumableCheckpoint.profile
-            } else {
-                let syncResult = try await syncWithAddressDiscovery(
-                    profile: profileToSync,
-                    walletStore: walletStore,
-                    engine: engine,
-                    preferences: preferences
+                profileToSync = resumableCheckpoint.profile
+                initialDiscoveryProgress = DiscoveryProgress(
+                    title: "Synchronizing wallet",
+                    detail: "Rechecking current UTXOs from the selected Kaspa node…",
+                    fraction: 0.68
                 )
-                result = syncResult.0
-                discoveredProfile = syncResult.1
-                if beganWithInitialDiscovery {
-                    initialDiscoveryCheckpoint = InitialDiscoveryCheckpoint(
-                        profile: discoveredProfile,
-                        snapshot: result
-                    )
-                }
+                initialDiscoveryStage = "Synchronizing UTXOs"
+            }
+
+            let (result, discoveredProfile) = try await syncWithAddressDiscovery(
+                profile: profileToSync,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences
+            )
+            if beganWithInitialDiscovery {
+                initialDiscoveryCheckpoint = InitialDiscoveryCheckpoint(
+                    profile: discoveredProfile
+                )
             }
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
@@ -1329,6 +1336,7 @@ final class WalletSyncService: ObservableObject {
     ) async {
         guard activeProfileID == profile.id else { return }
         let profileGeneration = activeProfileGeneration
+        let showProgress = keepProgressVisible || profile.requiresInitialHistorySync
         if transactionHistoryProfilesInFlight[profile.id] == profileGeneration { return }
         if !force,
            let lastAttempt = lastTransactionHistoryAttempt[profile.id],
@@ -1338,8 +1346,11 @@ final class WalletSyncService: ObservableObject {
 
         lastTransactionHistoryAttempt[profile.id] = Date()
         transactionHistoryProfilesInFlight[profile.id] = profileGeneration
+        if profile.requiresInitialHistorySync {
+            initialHistoryReadyToRevealProfileID = nil
+        }
         isRefreshingTransactionHistory = true
-        if keepProgressVisible {
+        if showProgress {
             transactionHistoryProgress = TransactionHistoryProgress(
                 profileID: profile.id,
                 completedAddresses: 0,
@@ -1354,7 +1365,7 @@ final class WalletSyncService: ObservableObject {
                 transactionHistoryProfilesInFlight.removeValue(forKey: profile.id)
             }
             isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
-            if keepProgressVisible,
+            if showProgress,
                committedCompleteHistory,
                activeProfileID == profile.id,
                activeProfileGeneration == profileGeneration {
@@ -1377,7 +1388,7 @@ final class WalletSyncService: ObservableObject {
                 guard let self,
                       self.activeProfileID == profile.id,
                       self.activeProfileGeneration == profileGeneration else { return }
-                if keepProgressVisible {
+                if showProgress {
                     self.transactionHistoryProgress = TransactionHistoryProgress(
                         profileID: profile.id,
                         completedAddresses: completed,
@@ -1393,6 +1404,9 @@ final class WalletSyncService: ObservableObject {
             guard activeProfileID == profile.id,
                   activeProfileGeneration == profileGeneration else { return }
             transactionHistoryUpdatedAt = Date()
+            if profile.requiresInitialHistorySync {
+                initialHistoryReadyToRevealProfileID = profile.id
+            }
             committedCompleteHistory = true
         } catch {
             guard activeProfileID == profile.id,
@@ -1415,9 +1429,23 @@ final class WalletSyncService: ObservableObject {
         isRefreshingTransactionHistory = true
     }
 
-    func completeTransactionHistoryReconciliation(profileID: UUID) {
-        guard transactionHistoryProgress?.profileID == profileID,
-              transactionHistoryProfilesInFlight[profileID] == nil else { return }
+    func completeTransactionHistoryReconciliation(
+        profileID: UUID,
+        walletStore: WalletStore,
+        allowInitialReveal: Bool = true
+    ) {
+        guard transactionHistoryProfilesInFlight[profileID] == nil else { return }
+        if allowInitialReveal,
+           initialHistoryReadyToRevealProfileID == profileID,
+           var profile = walletStore.profiles.first(where: { $0.id == profileID }),
+           profile.requiresInitialHistorySync {
+            profile.requiresInitialHistorySync = false
+            walletStore.update(profile)
+        }
+        if initialHistoryReadyToRevealProfileID == profileID {
+            initialHistoryReadyToRevealProfileID = nil
+        }
+        guard transactionHistoryProgress?.profileID == profileID else { return }
         transactionHistoryProgress = nil
         isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
     }
@@ -1847,6 +1875,7 @@ final class WalletSyncService: ObservableObject {
         initialDiscoveryError = nil
         discoveryNotice = nil
         transactionHistoryProfilesInFlight.removeAll()
+        initialHistoryReadyToRevealProfileID = nil
         isRefreshingTransactionHistory = false
         transactionHistoryProgress = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")

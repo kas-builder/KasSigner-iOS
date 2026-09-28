@@ -319,7 +319,8 @@ struct AddWalletView: View {
                         kpub: imported.kpub,
                         receiveAddresses: imported.receiveAddresses,
                         changeAddresses: imported.changeAddresses,
-                        requiresInitialDiscovery: true
+                        requiresInitialDiscovery: true,
+                        requiresInitialHistorySync: true
                     )
                 )
                 dismiss()

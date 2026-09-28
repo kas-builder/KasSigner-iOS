@@ -12,6 +12,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var nextChangeIndex: Int
     var earliestFreshReceiveIndex: Int?
     var requiresInitialDiscovery: Bool
+    var requiresInitialHistorySync: Bool
 
     init(
         id: UUID = UUID(),
@@ -24,7 +25,8 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         nextReceiveIndex: Int = 0,
         nextChangeIndex: Int = 0,
         earliestFreshReceiveIndex: Int? = nil,
-        requiresInitialDiscovery: Bool = false
+        requiresInitialDiscovery: Bool = false,
+        requiresInitialHistorySync: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -37,6 +39,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.nextChangeIndex = max(0, nextChangeIndex)
         self.earliestFreshReceiveIndex = earliestFreshReceiveIndex.map { max(0, $0) }
         self.requiresInitialDiscovery = requiresInitialDiscovery
+        self.requiresInitialHistorySync = requiresInitialHistorySync
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -51,6 +54,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case nextChangeIndex
         case earliestFreshReceiveIndex
         case requiresInitialDiscovery
+        case requiresInitialHistorySync
     }
 
     init(from decoder: Decoder) throws {
@@ -77,6 +81,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         requiresInitialDiscovery = try container.decodeIfPresent(
             Bool.self,
             forKey: .requiresInitialDiscovery
+        ) ?? false
+        requiresInitialHistorySync = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresInitialHistorySync
         ) ?? false
     }
 }

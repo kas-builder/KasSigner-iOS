@@ -43,14 +43,15 @@ struct ActivityView: View {
                     GeometryReader { proxy in
                         ScrollView {
                             VStack(spacing: 12) {
-                                if isSynchronizingCurrentWallet {
+                                if isShowingTransactionSync {
                                     transactionHistorySyncView
                                 } else if let error = syncService.transactionHistoryError {
                                     transactionHistoryErrorView(error)
                                 }
 
                                 if transactions.isEmpty,
-                                   !isSynchronizingCurrentWallet {
+                                   !isShowingTransactionSync,
+                                   !isInitialHistoryPending {
                                     ContentUnavailableView {
                                         Label("No Transactions", systemImage: "clock.arrow.circlepath")
                                     } description: {
@@ -144,7 +145,9 @@ struct ActivityView: View {
     }
 
     private var transactions: [WalletTransaction] {
-        guard let profileID = walletStore.selectedProfile?.id else { return [] }
+        guard let profile = walletStore.selectedProfile,
+              !profile.requiresInitialHistorySync else { return [] }
+        let profileID = profile.id
         let pending = walletStore.pendingTransactions.filter {
             $0.profileID == profileID
         }
@@ -170,6 +173,15 @@ struct ActivityView: View {
     private var isSynchronizingCurrentWallet: Bool {
         syncService.transactionHistoryProgress?.profileID
             == walletStore.selectedProfileID
+    }
+
+    private var isInitialHistoryPending: Bool {
+        walletStore.selectedProfile?.requiresInitialHistorySync == true
+    }
+
+    private var isShowingTransactionSync: Bool {
+        isSynchronizingCurrentWallet
+            || (isInitialHistoryPending && syncService.transactionHistoryError == nil)
     }
 
     private var transactionHistorySyncView: some View {
@@ -213,6 +225,12 @@ struct ActivityView: View {
                 Text(message)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
+                if isInitialHistoryPending {
+                    Button("Retry transaction sync") {
+                        Task { await refreshHistory(force: true) }
+                    }
+                    .buttonStyle(.bordered)
+                }
             }
         }
         .padding(16)
@@ -332,6 +350,10 @@ struct ActivityView: View {
               walletStore.selectedProfileID == profileID else { return }
         await syncService.refreshVirtualBlueScore(force: force)
         walletStore.reloadCachedTransactions(profileID: profileID)
+        syncService.completeTransactionHistoryReconciliation(
+            profileID: profileID,
+            walletStore: walletStore
+        )
     }
 
     private func beginCSVExport() async {

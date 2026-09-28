@@ -1449,10 +1449,12 @@ final class PortfolioCalculationsTests: XCTestCase {
                 as? [String: Any]
         )
         object.removeValue(forKey: "requiresInitialDiscovery")
+        object.removeValue(forKey: "requiresInitialHistorySync")
         let legacyData = try JSONSerialization.data(withJSONObject: object)
         let decoded = try JSONDecoder().decode(WalletProfile.self, from: legacyData)
 
         XCTAssertFalse(decoded.requiresInitialDiscovery)
+        XCTAssertFalse(decoded.requiresInitialHistorySync)
     }
 
     func testAcceptedHistoryWaitsForBlueScoreBeforeShowingConfirmed() {
@@ -1849,7 +1851,8 @@ final class PortfolioCalculationsTests: XCTestCase {
         let pending = WalletProfile(
             name: "Pending",
             kpub: "kpub-pending",
-            requiresInitialDiscovery: true
+            requiresInitialDiscovery: true,
+            requiresInitialHistorySync: true
         )
         let store = WalletStore(
             protectedStorage: storage,
@@ -1881,6 +1884,18 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
         XCTAssertEqual(relaunchedAfterCommit.profiles, [completed, discovered])
         XCTAssertEqual(relaunchedAfterCommit.selectedProfile, discovered)
+        XCTAssertTrue(relaunchedAfterCommit.selectedProfile?.requiresInitialHistorySync == true)
+
+        var historyComplete = discovered
+        historyComplete.requiresInitialHistorySync = false
+        store.update(historyComplete)
+
+        let relaunchedAfterHistory = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(relaunchedAfterHistory.selectedProfile?.requiresInitialHistorySync ?? true)
     }
 
     private var utcCalendar: Calendar {
