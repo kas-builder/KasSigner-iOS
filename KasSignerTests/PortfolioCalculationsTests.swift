@@ -1367,6 +1367,32 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveBlueScoreDoesNotPublishEveryNotificationAndFlushesOnBackground() throws {
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let service = WalletSyncService(defaults: defaults)
+        service.observeVirtualBlueScore(1_250)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+
+        service.observeVirtualBlueScore(1_251)
+        service.observeVirtualBlueScore(1_252)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1250"
+        )
+
+        service.persistObservedVirtualBlueScore()
+        XCTAssertEqual(service.virtualBlueScore, 1_252)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1252"
+        )
+    }
+
+    @MainActor
     func testSinkBlueScoreSubscriptionAndNotificationParsing() {
         let request = KaspaLiveRPCService.sinkBlueScoreSubscriptionRequest(
             requestID: 7

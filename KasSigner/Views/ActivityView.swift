@@ -30,6 +30,7 @@ struct ActivityView: View {
     @State private var isPreparingCSVExport = false
     @State private var pendingInternalTransferPresentations = Set<String>()
     @State private var liveSinkBlueScore: UInt64?
+    @State private var cachedTransactions: [WalletTransaction] = []
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -87,10 +88,18 @@ struct ActivityView: View {
             }
             .onAppear {
                 coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
+                refreshCachedTransactions()
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
                 coinControlStore.activate(profileID: newValue)
+                refreshCachedTransactions()
+            }
+            .onChange(of: walletStore.transactionRevision) { _, _ in
+                refreshCachedTransactions()
+            }
+            .onChange(of: walletStore.selectedProfile?.requiresInitialHistorySync) { _, _ in
+                refreshCachedTransactions()
             }
             .onReceive(liveRPCService.sinkBlueScorePublisher) { score in
                 updateLiveBlueScore(score)
@@ -120,8 +129,15 @@ struct ActivityView: View {
     }
 
     private var transactions: [WalletTransaction] {
+        cachedTransactions
+    }
+
+    private func refreshCachedTransactions() {
         guard let profile = walletStore.selectedProfile,
-              !profile.requiresInitialHistorySync else { return [] }
+              !profile.requiresInitialHistorySync else {
+            cachedTransactions = []
+            return
+        }
         let profileID = profile.id
         let pending = walletStore.pendingTransactions.filter {
             $0.profileID == profileID
@@ -131,7 +147,7 @@ struct ActivityView: View {
             $0.profileID == profileID
                 && !pendingIDs.contains($0.transactionID.lowercased())
         }
-        return (pending + history)
+        cachedTransactions = (pending + history)
             .sorted { $0.broadcastAt > $1.broadcastAt }
     }
 
@@ -170,7 +186,7 @@ struct ActivityView: View {
     private func updateLiveBlueScore(_ score: UInt64?) {
         liveSinkBlueScore = score
         if let score {
-            syncService.rememberVirtualBlueScore(score)
+            syncService.observeVirtualBlueScore(score)
         }
     }
 

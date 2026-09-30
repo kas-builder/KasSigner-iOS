@@ -1120,6 +1120,8 @@ final class WalletSyncService: ObservableObject {
     private var lastHistoricalDiscoveryAttempt: [UUID: Date] = [:]
     private var virtualBlueScoreRefreshInFlight = false
     private var lastVirtualBlueScoreAttempt: Date?
+    private var latestObservedVirtualBlueScore: UInt64?
+    private var lastVirtualBlueScorePersistenceAt: Date?
     private let transactionHistoryClient = TransactionHistoryClient()
     private let defaults: UserDefaults
     private let outgoingReconciliationKeyPrefix =
@@ -1322,6 +1324,21 @@ final class WalletSyncService: ObservableObject {
         guard score > (virtualBlueScore ?? 0) else { return }
         virtualBlueScore = score
         defaults.set(String(score), forKey: Self.cachedVirtualBlueScoreKey)
+    }
+
+    func observeVirtualBlueScore(_ score: UInt64) {
+        guard score > (latestObservedVirtualBlueScore ?? virtualBlueScore ?? 0) else { return }
+        latestObservedVirtualBlueScore = score
+        let now = Date()
+        if lastVirtualBlueScorePersistenceAt.map({ now.timeIntervalSince($0) >= 30 }) ?? true {
+            persistObservedVirtualBlueScore()
+        }
+    }
+
+    func persistObservedVirtualBlueScore() {
+        guard let score = latestObservedVirtualBlueScore else { return }
+        rememberVirtualBlueScore(score)
+        lastVirtualBlueScorePersistenceAt = Date()
     }
 
     func transactionGraph(

@@ -112,6 +112,7 @@ private struct HistoricalPricePreparationView: View {
 
 private struct AppSecurityContainer<Content: View>: View {
     @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var syncService: WalletSyncService
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
     private var decoyLaunchScreenEnabled = false
@@ -154,6 +155,7 @@ private struct AppSecurityContainer<Content: View>: View {
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
+                syncService.persistObservedVirtualBlueScore()
                 privacyCoverUnlocked = false
                 appLockService.sceneDidEnterBackground()
             case .active:
