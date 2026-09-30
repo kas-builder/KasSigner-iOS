@@ -120,6 +120,13 @@ enum WalletTransactionStatus: String, Codable, Equatable {
     case confirmed
 }
 
+enum WalletConfirmationPresentation: Equatable {
+    case pending
+    case checking
+    case count(UInt64)
+    case confirmed
+}
+
 struct WalletTransaction: Identifiable, Codable, Equatable {
     static let confirmationThreshold: UInt64 = 250
 
@@ -251,6 +258,17 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         }
         guard currentBlueScore >= acceptingBlockBlueScore else { return 0 }
         return currentBlueScore - acceptingBlockBlueScore
+    }
+
+    func confirmationPresentation(
+        currentBlueScore: UInt64?,
+        presentsPending: Bool = false
+    ) -> WalletConfirmationPresentation {
+        if presentsPending || status == .pending { return .pending }
+        guard let count = confirmationCount(currentBlueScore: currentBlueScore) else {
+            return .checking
+        }
+        return count >= Self.confirmationThreshold ? .confirmed : .count(count)
     }
 
     func needsConfirmationUpdates(currentBlueScore: UInt64?) -> Bool {
@@ -655,10 +673,11 @@ final class WalletStore: ObservableObject {
         save()
     }
 
-    func update(_ profile: WalletProfile) {
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+    @discardableResult
+    func update(_ profile: WalletProfile) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
         profiles[index] = profile
-        save()
+        return save()
     }
 
     func moveProfiles(from source: IndexSet, to destination: Int) {
@@ -932,10 +951,11 @@ final class WalletStore: ObservableObject {
         save()
     }
 
+    @discardableResult
     func mergeSyncedTransactions(
         _ syncedTransactions: [WalletTransaction],
         profileID: UUID
-    ) {
+    ) -> Bool {
         let existingForProfile = transactions.filter { $0.profileID == profileID }
         let existingByID = Dictionary(
             existingForProfile.map { ($0.transactionID.lowercased(), $0) },
@@ -967,7 +987,23 @@ final class WalletStore: ObservableObject {
                 !pending.contains { $0.transactionID.caseInsensitiveCompare(retained.transactionID) == .orderedSame }
             }
         transactionRevision &+= 1
-        save()
+        return transactionCache.save(
+            transactions.filter { $0.profileID == profileID },
+            profileID: profileID
+        )
+    }
+
+    @discardableResult
+    func completeInitialHistorySync(profileID: UUID) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else { return false }
+        guard profiles[index].requiresInitialHistorySync else { return true }
+        profiles[index].requiresInitialHistorySync = false
+        guard persistProtectedState() else {
+            profiles[index].requiresInitialHistorySync = true
+            persistentState.profiles = profiles
+            return false
+        }
+        return true
     }
 
     func mergeResolvedTransactions(
@@ -1114,11 +1150,13 @@ final class WalletStore: ObservableObject {
         }
     }
 
-    private func save() {
+    @discardableResult
+    private func save() -> Bool {
         persistentState.profiles = profiles
         persistentState.selectedProfileID = selectedProfileID
-        persistProtectedState()
-        persistTransactionCache()
+        let didSaveWalletState = persistProtectedState()
+        _ = persistTransactionCache()
+        return didSaveWalletState
     }
 
     private func replaceSendSession(_ session: SendSession) {
@@ -1163,10 +1201,11 @@ final class WalletStore: ObservableObject {
         }
     }
 
-    private func persistProtectedState() {
+    @discardableResult
+    private func persistProtectedState() -> Bool {
         persistentState.profiles = profiles
         persistentState.selectedProfileID = selectedProfileID
-        _ = protectedStorage.save(
+        return protectedStorage.save(
             persistentState,
             fileName: "wallet-state.json"
         )

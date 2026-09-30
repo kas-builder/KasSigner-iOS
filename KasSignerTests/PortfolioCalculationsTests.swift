@@ -1324,6 +1324,46 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_250), 250)
         XCTAssertTrue(transaction.needsConfirmationUpdates(currentBlueScore: 1_249))
         XCTAssertFalse(transaction.needsConfirmationUpdates(currentBlueScore: 1_250))
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: nil),
+            .checking
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: 1_249),
+            .count(249)
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: 1_250),
+            .confirmed
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(
+                currentBlueScore: 1_250,
+                presentsPending: true
+            ),
+            .pending
+        )
+    }
+
+    @MainActor
+    func testCachedVirtualBlueScoreIsAvailableBeforeNetworkRefresh() throws {
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let previousSession = WalletSyncService(defaults: defaults)
+        previousSession.rememberVirtualBlueScore(1_250)
+        previousSession.rememberVirtualBlueScore(1_249)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1250"
+        )
+
+        let service = WalletSyncService(defaults: defaults)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+
+        service.preload(profile: WalletProfile(name: "Cached", kpub: "kpub-test"))
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
     }
 
     @MainActor
@@ -1382,6 +1422,24 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(plan.receiveCount, 158)
         XCTAssertEqual(plan.nextReceiveIndex, 108)
+    }
+
+    func testDiscoveryExpandsPastSavedRangeForSpentOnlyActivity() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        // The wallet previously retained only indices 0–49. Historical
+        // activity at 70 must still advance coverage even with no UTXO there.
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[70]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.nextReceiveIndex, 71)
+        XCTAssertEqual(plan.receiveCount, 121)
+        XCTAssertEqual(plan.changeCount, 50)
     }
 
     func testDiscoveryRetainsFiftyFreshAddressesForUnusedWallet() {
@@ -1455,6 +1513,21 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertFalse(decoded.requiresInitialDiscovery)
         XCTAssertFalse(decoded.requiresInitialHistorySync)
+    }
+
+    func testHistoricalDiscoveryTimestampPersistsWithoutBreakingOlderProfiles() throws {
+        var profile = WalletProfile(name: "Coverage", kpub: "kpub-test")
+        let legacyData = try JSONEncoder().encode(profile)
+        let legacy = try JSONDecoder().decode(WalletProfile.self, from: legacyData)
+        XCTAssertNil(legacy.lastHistoricalDiscoveryAt)
+
+        let checkedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        profile.lastHistoricalDiscoveryAt = checkedAt
+        let restored = try JSONDecoder().decode(
+            WalletProfile.self,
+            from: JSONEncoder().encode(profile)
+        )
+        XCTAssertEqual(restored.lastHistoricalDiscoveryAt, checkedAt)
     }
 
     func testAcceptedHistoryWaitsForBlueScoreBeforeShowingConfirmed() {
@@ -1896,6 +1969,171 @@ final class PortfolioCalculationsTests: XCTestCase {
             transactionCacheDirectoryURL: cache
         )
         XCTAssertFalse(relaunchedAfterHistory.selectedProfile?.requiresInitialHistorySync ?? true)
+    }
+
+    @MainActor
+    func testInitialHistoryStaysHiddenUntilCacheSaveSucceedsAndRetrySurvivesRelaunch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("blocks-cache-directory".utf8).write(to: cache)
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "History Retry",
+            kpub: "kpub-history-retry",
+            requiresInitialHistorySync: true
+        )
+        store.add(profile)
+
+        let transaction = WalletTransaction(
+            profileID: profile.id,
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:receive",
+            amountSompi: 100_000_000,
+            feeSompi: 0,
+            broadcastAt: Date(),
+            direction: .received,
+            status: .confirmed
+        )
+        let history = TransactionHistorySyncResult(transactions: [transaction], graphs: [])
+        let service = WalletSyncService(defaults: defaults)
+        service.preload(profile: profile)
+
+        let didInitiallySave = await service.commitIndexedTransactionHistory(
+            history,
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertFalse(didInitiallySave)
+        service.completeTransactionHistoryReconciliation(
+            profileID: profile.id,
+            walletStore: store
+        )
+        XCTAssertTrue(store.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertNotNil(service.transactionHistoryError)
+
+        let beforeRetry = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertTrue(beforeRetry.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertTrue(beforeRetry.transactions.isEmpty)
+
+        try FileManager.default.removeItem(at: cache)
+        let didRetryLocally = await service.retryInitialHistoryPersistenceIfNeeded(
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didRetryLocally)
+        XCTAssertFalse(store.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertNil(service.transactionHistoryError)
+
+        let afterRetry = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(afterRetry.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertEqual(afterRetry.transactions.map(\.transactionID), [transaction.transactionID])
+    }
+
+    @MainActor
+    func testInitialHistoryStaysHiddenWhenCompletionStateCannotBeSaved() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "Completion Retry",
+            kpub: "kpub-completion-retry",
+            requiresInitialHistorySync: true
+        )
+        store.add(profile)
+        let service = WalletSyncService(defaults: defaults)
+        service.preload(profile: profile)
+        let didSaveHistory = await service.commitIndexedTransactionHistory(
+            TransactionHistorySyncResult(transactions: [], graphs: []),
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didSaveHistory)
+
+        let stateFile = root.appending(path: "wallet-state.json")
+        try FileManager.default.removeItem(at: stateFile)
+        try FileManager.default.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        service.completeTransactionHistoryReconciliation(
+            profileID: profile.id,
+            walletStore: store
+        )
+        XCTAssertTrue(store.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertNotNil(service.transactionHistoryError)
+
+        try FileManager.default.removeItem(at: stateFile)
+        let didRetryLocally = await service.retryInitialHistoryPersistenceIfNeeded(
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didRetryLocally)
+        XCTAssertFalse(store.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertNil(service.transactionHistoryError)
+
+        let relaunched = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(relaunched.selectedProfile?.requiresInitialHistorySync ?? true)
+    }
+
+    @MainActor
+    func testHistoricalCoverageAndFreshBufferSurviveWalletStoreRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        var profile = WalletProfile(name: "Coverage", kpub: "kpub-test")
+        store.add(profile)
+        profile.receiveAddresses = (0..<121).map { "kaspa:receive-\($0)" }
+        profile.changeAddresses = (0..<50).map { "kaspa:change-\($0)" }
+        profile.nextReceiveIndex = 71
+        profile.lastHistoricalDiscoveryAt = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(store.update(profile))
+
+        let relaunched = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunched.selectedProfile, profile)
+        XCTAssertEqual(relaunched.selectedProfile?.receiveAddresses.count, 121)
+        XCTAssertEqual(relaunched.selectedProfile?.nextReceiveIndex, 71)
     }
 
     private var utcCalendar: Calendar {

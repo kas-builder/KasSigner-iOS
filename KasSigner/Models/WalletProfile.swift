@@ -11,6 +11,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var nextReceiveIndex: Int
     var nextChangeIndex: Int
     var earliestFreshReceiveIndex: Int?
+    var lastHistoricalDiscoveryAt: Date?
     var requiresInitialDiscovery: Bool
     var requiresInitialHistorySync: Bool
 
@@ -25,6 +26,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         nextReceiveIndex: Int = 0,
         nextChangeIndex: Int = 0,
         earliestFreshReceiveIndex: Int? = nil,
+        lastHistoricalDiscoveryAt: Date? = nil,
         requiresInitialDiscovery: Bool = false,
         requiresInitialHistorySync: Bool = false
     ) {
@@ -38,6 +40,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.nextReceiveIndex = max(0, nextReceiveIndex)
         self.nextChangeIndex = max(0, nextChangeIndex)
         self.earliestFreshReceiveIndex = earliestFreshReceiveIndex.map { max(0, $0) }
+        self.lastHistoricalDiscoveryAt = lastHistoricalDiscoveryAt
         self.requiresInitialDiscovery = requiresInitialDiscovery
         self.requiresInitialHistorySync = requiresInitialHistorySync
     }
@@ -53,6 +56,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case nextReceiveIndex
         case nextChangeIndex
         case earliestFreshReceiveIndex
+        case lastHistoricalDiscoveryAt
         case requiresInitialDiscovery
         case requiresInitialHistorySync
     }
@@ -78,6 +82,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
             Int.self,
             forKey: .earliestFreshReceiveIndex
         ).map { max(0, $0) }
+        lastHistoricalDiscoveryAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .lastHistoricalDiscoveryAt
+        )
         requiresInitialDiscovery = try container.decodeIfPresent(
             Bool.self,
             forKey: .requiresInitialDiscovery

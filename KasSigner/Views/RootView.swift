@@ -299,7 +299,16 @@ struct RootView: View {
                 .tag(Tab.wallet)
                 .tabItem { Label("Wallet", systemImage: "wallet.pass") }
 
-            ActivityView()
+            ActivityView(onRetryInitialHistory: {
+                if let profile = walletStore.selectedProfile,
+                   await syncService.retryInitialHistoryPersistenceIfNeeded(
+                       profile: profile,
+                       walletStore: walletStore
+                   ) {
+                    return
+                }
+                await refreshAfterLaunchOrActivation()
+            })
                 .tag(Tab.activity)
                 .tabItem { Label("Transactions", systemImage: "clock.arrow.circlepath") }
 
@@ -463,6 +472,20 @@ struct RootView: View {
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
         }
+        .task(id: "coverage-\(launchRefreshTaskID)") {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5 * 60))
+                guard !Task.isCancelled else { return }
+                guard scenePhase == .active,
+                      let profile = walletStore.selectedProfile else { continue }
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
+                )
+            }
+        }
         .onChange(of: liveRPCService.notificationVersion) { _, _ in
             scheduleNotificationRefresh()
         }
@@ -482,6 +505,11 @@ struct RootView: View {
                 )
             }
         }
+        .onChange(of: syncService.transactionHistoryUpdatedAt) { _, updatedAt in
+            guard updatedAt != nil,
+                  let profileID = walletStore.selectedProfileID else { return }
+            automaticallyRefreshedHistoryProfileID = profileID
+        }
         .onChange(of: syncService.isNetworkAvailable) { wasAvailable, isAvailable in
             Task {
                 await liveRPCService.setNetworkAvailable(
@@ -493,13 +521,23 @@ struct RootView: View {
                       isAvailable,
                       scenePhase == .active,
                       let profile = walletStore.selectedProfile else { return }
+                // Initial import is owned by the launch/history coordinator.
+                // A connectivity bounce must not start a second discovery.
+                guard !profile.requiresInitialDiscovery,
+                      !profile.requiresInitialHistorySync else { return }
                 await syncService.refresh(
                     profile: profile,
                     walletStore: walletStore,
                     engine: engine,
                     preferences: preferences,
                     force: true,
-                    addressDiscoveryPolicy: .comprehensive
+                    addressDiscoveryPolicy: .lightweight
+                )
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
                 )
             }
         }
@@ -575,8 +613,13 @@ struct RootView: View {
                 engine: engine,
                 preferences: preferences,
                 force: true,
+                includeTransactionHistory: false,
                 addressDiscoveryPolicy: .comprehensive
             )
+            guard !Task.isCancelled,
+                  walletStore.selectedProfileID == profile.id,
+                  walletStore.selectedProfile?.requiresInitialDiscovery == false else { return }
+            await refreshAfterLaunchOrActivation()
         }
     }
 
@@ -612,7 +655,8 @@ struct RootView: View {
         let isInitialImportedWalletSync = profile.requiresInitialDiscovery
             || profile.requiresInitialHistorySync
         let shouldAutomaticallyRefreshHistory =
-            automaticallyRefreshedHistoryProfileID != profile.id
+            profile.requiresInitialHistorySync
+                || automaticallyRefreshedHistoryProfileID != profile.id
         let historyUpdatedAtBeforeRefresh = syncService.transactionHistoryUpdatedAt
         var completedReconciliation = false
 
@@ -642,7 +686,8 @@ struct RootView: View {
             minimumInterval: 9,
             includeTransactionHistory: shouldAutomaticallyRefreshHistory,
             keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync,
-            addressDiscoveryPolicy: .comprehensive,
+            addressDiscoveryPolicy: profile.requiresInitialDiscovery
+                ? .comprehensive : .lightweight,
             onWalletReady: {
                 guard walletStore.selectedProfileID == profile.id else { return }
                 accountSwitchPresentation.complete()
@@ -662,6 +707,18 @@ struct RootView: View {
         if shouldAutomaticallyRefreshHistory,
            syncService.transactionHistoryUpdatedAt != historyUpdatedAtBeforeRefresh {
             automaticallyRefreshedHistoryProfileID = profile.id
+        }
+
+        if !isInitialImportedWalletSync,
+           walletStore.selectedProfileID == profile.id {
+            Task { @MainActor in
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
+                )
+            }
         }
 
         guard !Task.isCancelled,
@@ -743,7 +800,8 @@ struct RootView: View {
 
     private func scheduleNotificationRefresh() {
         guard scenePhase == .active,
-              let profileID = walletStore.selectedProfileID
+              let profileID = walletStore.selectedProfileID,
+              walletStore.selectedProfile?.requiresInitialHistorySync != true
         else {
             return
         }
@@ -781,7 +839,8 @@ struct RootView: View {
 
         guard scenePhase == .active,
               walletStore.selectedProfileID == profileID,
-              let profile = walletStore.selectedProfile
+              let profile = walletStore.selectedProfile,
+              !profile.requiresInitialHistorySync
         else {
             return
         }
@@ -1117,7 +1176,8 @@ struct UTXOsView: View {
             walletStore: walletStore,
             engine: engine,
             preferences: preferences,
-            force: true
+            force: true,
+            includeTransactionHistory: !profile.requiresInitialHistorySync
         )
     }
 

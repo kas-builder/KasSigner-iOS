@@ -2,6 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ActivityView: View {
+    let onRetryInitialHistory: () async -> Void
+
     private struct ExportAlert: Identifiable {
         let id = UUID()
         let title: String
@@ -41,40 +43,13 @@ struct ActivityView: View {
                     )
                 } else {
                     GeometryReader { proxy in
-                        ScrollView {
-                            VStack(spacing: 12) {
-                                if isShowingTransactionSync {
-                                    transactionHistorySyncView
-                                } else if let error = syncService.transactionHistoryError {
-                                    transactionHistoryErrorView(error)
+                        if isInitialHistoryPending {
+                            transactionScrollView(height: proxy.size.height)
+                        } else {
+                            transactionScrollView(height: proxy.size.height)
+                                .refreshable {
+                                    await refreshHistory(force: true)
                                 }
-
-                                if transactions.isEmpty,
-                                   !isShowingTransactionSync,
-                                   !isInitialHistoryPending {
-                                    ContentUnavailableView {
-                                        Label("No Transactions", systemImage: "clock.arrow.circlepath")
-                                    } description: {
-                                        Text(emptyDescription)
-                                    }
-                                    .frame(
-                                        maxWidth: .infinity,
-                                        minHeight: proxy.size.height
-                                    )
-                                } else if !transactions.isEmpty {
-                                    LazyVStack(spacing: 12) {
-                                        ForEach(transactions) { transaction in
-                                            transactionCard(transaction)
-                                        }
-                                    }
-                                    .padding(.horizontal, 14)
-                                    .padding(.bottom, 24)
-                                }
-                            }
-                            .padding(.top, 8)
-                        }
-                        .refreshable {
-                            await refreshHistory(force: true)
                         }
                     }
                 }
@@ -118,7 +93,7 @@ struct ActivityView: View {
                 coinControlStore.activate(profileID: newValue)
             }
             .onReceive(liveRPCService.sinkBlueScorePublisher) { score in
-                liveSinkBlueScore = score
+                updateLiveBlueScore(score)
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -158,6 +133,45 @@ struct ActivityView: View {
         }
         return (pending + history)
             .sorted { $0.broadcastAt > $1.broadcastAt }
+    }
+
+    private func transactionScrollView(height: CGFloat) -> some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                if isShowingTransactionSync {
+                    transactionHistorySyncView
+                } else if let error = syncService.transactionHistoryError {
+                    transactionHistoryErrorView(error)
+                }
+
+                if transactions.isEmpty,
+                   !isShowingTransactionSync,
+                   !isInitialHistoryPending {
+                    ContentUnavailableView {
+                        Label("No Transactions", systemImage: "clock.arrow.circlepath")
+                    } description: {
+                        Text(emptyDescription)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: height)
+                } else if !transactions.isEmpty {
+                    LazyVStack(spacing: 12) {
+                        ForEach(transactions) { transaction in
+                            transactionCard(transaction)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 24)
+                }
+            }
+            .padding(.top, 8)
+        }
+    }
+
+    private func updateLiveBlueScore(_ score: UInt64?) {
+        liveSinkBlueScore = score
+        if let score {
+            syncService.rememberVirtualBlueScore(score)
+        }
     }
 
     private var emptyDescription: String {
@@ -268,6 +282,10 @@ struct ActivityView: View {
 
     private func refreshHistory(force: Bool) async {
         guard let profile = walletStore.selectedProfile else { return }
+        if profile.requiresInitialHistorySync {
+            await onRetryInitialHistory()
+            return
+        }
         let profileID = profile.id
 
         // Always display this wallet's durable cache immediately. The indexed
@@ -646,36 +664,34 @@ struct ActivityView: View {
         ]
             .compactMap { $0 }
             .max()
-        let resolvedCount = transaction.confirmationCount(
-            currentBlueScore: currentBlueScore
+        let presentation = transaction.confirmationPresentation(
+            currentBlueScore: currentBlueScore,
+            presentsPending: presentsPending
         )
-        let count = resolvedCount ?? 0
-        let isFullyConfirmed = count >= WalletTransaction.confirmationThreshold
-            && resolvedCount != nil
-        let isPending = presentsPending || resolvedCount == nil
 
         let text: String
-        if isPending {
-            text = "Pending"
-        } else if isFullyConfirmed {
-            text = "Confirmed"
-        } else {
-            text = "\(count) confirmations"
+        switch presentation {
+        case .pending: text = "Pending"
+        case .checking: text = "Checking confirmations…"
+        case .count(let count): text = "\(count) confirmations"
+        case .confirmed: text = "Confirmed"
         }
 
         return Text(text)
             .font(
-                isFullyConfirmed || isPending
+                presentation == .confirmed || presentation == .pending
                     ? .body.weight(.semibold)
                     : .subheadline.weight(.regular)
             )
             .monospacedDigit()
             .foregroundStyle(
-                isPending
+                presentation == .pending
                     ? Color.yellow
-                    : isFullyConfirmed
+                    : presentation == .confirmed
                         ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                        : Color.primary
+                        : presentation == .checking
+                            ? Color.secondary
+                            : Color.primary
             )
     }
 

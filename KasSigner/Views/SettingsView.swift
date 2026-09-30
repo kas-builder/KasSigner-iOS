@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var profileBeingRenamed: WalletProfile?
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
+    @State private var showingAccountReorder = false
 
     init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
@@ -85,7 +86,6 @@ struct SettingsView: View {
                                 }
                             }
                         }
-                        .onMove(perform: walletStore.moveProfiles)
                     }
                 }
 
@@ -256,8 +256,14 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .toolbar {
                 if walletStore.profiles.count > 1 {
-                    EditButton()
+                    Button("Edit") {
+                        showingAccountReorder = true
+                    }
                 }
+            }
+            .sheet(isPresented: $showingAccountReorder) {
+                AccountReorderView()
+                    .environmentObject(walletStore)
             }
             .confirmationDialog(
                 "Delete Account?",
@@ -414,6 +420,46 @@ struct SettingsView: View {
             await refreshSelectedAccount()
         } catch {
             derivationError = error.localizedDescription
+        }
+    }
+}
+
+private struct AccountReorderView: View {
+    @EnvironmentObject private var walletStore: WalletStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Accounts") {
+                    ForEach(walletStore.profiles) { profile in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(profile.name)
+                                Text("Watch-only account")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if profile.id == walletStore.selectedProfile?.id {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                    .onMove(perform: walletStore.moveProfiles)
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("Reorder Accounts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

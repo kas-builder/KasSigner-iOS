@@ -196,6 +196,39 @@ struct WalletHomeView: View {
                     .buttonStyle(.bordered)
                 }
 
+                if syncService.isCheckingHistoricalAddresses {
+                    Label("Checking historical address coverage…", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let coverageMessage = historicalCoverageMessage(for: profile) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Address coverage", systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline.weight(.semibold))
+                        Text(coverageMessage)
+                            .font(.footnote)
+                        if syncService.historicalDiscoveryError != nil {
+                            Button("Retry check") {
+                                Task {
+                                    await syncService.checkHistoricalAddressesIfNeeded(
+                                        profile: profile,
+                                        walletStore: walletStore,
+                                        engine: engine,
+                                        preferences: preferences,
+                                        force: true
+                                    )
+                                }
+                            }
+                            .font(.footnote.weight(.semibold))
+                        }
+                    }
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                }
+
                 if let snapshot = syncService.snapshot {
                     VStack(alignment: .leading, spacing: 12) {
                         LabeledContent("UTXOs", value: "\(snapshot.balance.utxoCount)")
@@ -345,6 +378,23 @@ struct WalletHomeView: View {
             preferences: preferences,
             force: true
         )
+        if force {
+            await syncService.checkHistoricalAddressesIfNeeded(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true
+            )
+        }
+    }
+
+    private func historicalCoverageMessage(for profile: WalletProfile) -> String? {
+        if let error = syncService.historicalDiscoveryError { return error }
+        if max(profile.nextReceiveIndex, profile.nextChangeIndex) >= 462 {
+            return "This account is near the supported 512-address limit. A full 50-address buffer may no longer be available."
+        }
+        return nil
     }
 
     private func compactActionLabel(_ title: String, systemImage: String) -> some View {
