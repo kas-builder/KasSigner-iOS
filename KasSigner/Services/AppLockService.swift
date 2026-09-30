@@ -76,7 +76,9 @@ final class AppLockService: ObservableObject {
     }
 
     func enableAppLock() async -> Bool {
-        let succeeded = await authenticate(reason: "Use Face ID to enable App Lock.")
+        let succeeded = await authenticate(
+            reason: "Use \(biometricName) to enable App Lock."
+        )
         if succeeded {
             isEnabled = true
             isLocked = false
@@ -162,7 +164,7 @@ final class AppLockService: ObservableObject {
             authenticationError = error?.localizedDescription ?? (
                 policy == .deviceOwnerAuthenticationWithBiometrics
                     ? "Face ID or Touch ID is not available."
-                    : "Face ID or a device passcode is not available."
+                    : "\(biometricName) or a device passcode is not available."
             )
             return false
         }

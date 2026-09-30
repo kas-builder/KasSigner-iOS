@@ -6,15 +6,50 @@ private enum WeatherCoverKey {
     static let latitude = "kassigner.weather.latitude"
     static let longitude = "kassigner.weather.longitude"
     static let temperatureUnit = "kassigner.weather.temperatureUnit"
+    static let unlockGesture = "kassigner.weather.unlockGesture"
     static let unlockTarget = "kassigner.weather.unlockTarget"
     static let unlockTapCount = "kassigner.weather.unlockTapCount"
+    static let unlockHoldDuration = "kassigner.weather.unlockHoldDuration"
     static let cachedSnapshot = "kassigner.weather.cachedSnapshot"
+}
+
+private enum WeatherUnlockGesture: String, CaseIterable, Identifiable {
+    case tap
+    case hold
+    case doubleTapAndHold
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .tap: "Tap"
+        case .hold: "Hold"
+        case .doubleTapAndHold: "Double Tap and Hold"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .tap: "hand.tap"
+        case .hold: "hand.point.up.left"
+        case .doubleTapAndHold: "hand.tap.fill"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .tap: "Tap one weather item several times."
+        case .hold: "Press and hold one weather item."
+        case .doubleTapAndHold: "Tap once, then press and hold the same item."
+        }
+    }
 }
 
 private enum WeatherUnlockTarget: String, CaseIterable, Identifiable {
     case conditionIcon
     case temperature
     case location
+    case forecast
 
     var id: String { rawValue }
 
@@ -23,6 +58,7 @@ private enum WeatherUnlockTarget: String, CaseIterable, Identifiable {
         case .conditionIcon: "Weather Icon"
         case .temperature: "Temperature"
         case .location: "City Name"
+        case .forecast: "Six-Day Forecast"
         }
     }
 }
@@ -238,12 +274,19 @@ struct WeatherCoverView: View {
     @AppStorage(WeatherCoverKey.latitude) private var latitude = 40.7128
     @AppStorage(WeatherCoverKey.longitude) private var longitude = -74.0060
     @AppStorage(WeatherCoverKey.temperatureUnit) private var temperatureUnit = "fahrenheit"
+    @AppStorage(WeatherCoverKey.unlockGesture) private var unlockGesture = WeatherUnlockGesture.tap.rawValue
     @AppStorage(WeatherCoverKey.unlockTarget) private var unlockTarget = WeatherUnlockTarget.conditionIcon.rawValue
     @AppStorage(WeatherCoverKey.unlockTapCount) private var unlockTapCount = 3
+    @AppStorage(WeatherCoverKey.unlockHoldDuration) private var unlockHoldDuration = 3
     @State private var showingSettings = false
     @State private var tapSequenceCount = 0
     @State private var tapSequenceID = UUID()
     @State private var tapEvaluationTask: Task<Void, Never>?
+    @State private var firstDoubleTapTarget: WeatherUnlockTarget?
+    @State private var firstDoubleTapAt: Date?
+    @State private var doubleTapResetTask: Task<Void, Never>?
+    @State private var armedDoubleTapHoldTarget: WeatherUnlockTarget?
+    @State private var suppressNextDoubleTap = false
     @State private var isUnlockRequestInFlight = false
 
     let requestUnlock: () async -> Void
@@ -293,7 +336,7 @@ struct WeatherCoverView: View {
             }
         }
         .tint(.primary)
-        .onDisappear { resetTapSequence() }
+        .onDisappear { resetGestureState() }
     }
 
     private var locationHeader: some View {
@@ -301,9 +344,13 @@ struct WeatherCoverView: View {
             Text(cityName)
                 .font(.title2.weight(.semibold))
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    recordTap(on: .location)
-                }
+                .weatherUnlockGestures(
+                    target: .location,
+                    holdDuration: requiredHoldDuration,
+                    recordTap: recordTap,
+                    pressChanged: pressChanged,
+                    completeHold: completeHold
+                )
             Text(Date.now.formatted(date: .complete, time: .omitted))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -317,16 +364,24 @@ struct WeatherCoverView: View {
                 .symbolRenderingMode(.multicolor)
                 .font(.system(size: 92, weight: .light))
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    recordTap(on: .conditionIcon)
-                }
+                .weatherUnlockGestures(
+                    target: .conditionIcon,
+                    holdDuration: requiredHoldDuration,
+                    recordTap: recordTap,
+                    pressChanged: pressChanged,
+                    completeHold: completeHold
+                )
 
             Text(temperature(model.snapshot?.temperature))
                 .font(.system(size: 72, weight: .thin, design: .rounded))
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    recordTap(on: .temperature)
-                }
+                .weatherUnlockGestures(
+                    target: .temperature,
+                    holdDuration: requiredHoldDuration,
+                    recordTap: recordTap,
+                    pressChanged: pressChanged,
+                    completeHold: completeHold
+                )
 
             Text(conditionName(model.snapshot?.weatherCode))
                 .font(.title3.weight(.medium))
@@ -371,7 +426,15 @@ struct WeatherCoverView: View {
             }
         }
         .padding(18)
+        .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .weatherUnlockGestures(
+            target: .forecast,
+            holdDuration: requiredHoldDuration,
+            recordTap: recordTap,
+            pressChanged: pressChanged,
+            completeHold: completeHold
+        )
     }
 
     @ViewBuilder
@@ -393,6 +456,10 @@ struct WeatherCoverView: View {
         WeatherUnlockTarget(rawValue: unlockTarget) ?? .conditionIcon
     }
 
+    private var gesture: WeatherUnlockGesture {
+        WeatherUnlockGesture(rawValue: unlockGesture) ?? .tap
+    }
+
     private var isFahrenheit: Bool { temperatureUnit == "fahrenheit" }
 
     private func refresh() async {
@@ -403,8 +470,19 @@ struct WeatherCoverView: View {
         min(max(unlockTapCount, 2), 7)
     }
 
+    private var requiredHoldDuration: TimeInterval {
+        TimeInterval(min(max(unlockHoldDuration, 1), 7))
+    }
+
     private func recordTap(on tappedTarget: WeatherUnlockTarget) {
         guard target == tappedTarget, !isUnlockRequestInFlight else { return }
+
+        if gesture == .doubleTapAndHold {
+            recordFirstDoubleTap(on: tappedTarget)
+            return
+        }
+
+        guard gesture == .tap else { return }
 
         tapSequenceCount += 1
         let sequenceID = UUID()
@@ -419,25 +497,123 @@ struct WeatherCoverView: View {
 
             guard tapSequenceID == sequenceID else { return }
             let completedCount = tapSequenceCount
-            resetTapSequence()
+            resetGestureState()
             guard completedCount == requiredTapCount else { return }
-
-            isUnlockRequestInFlight = true
-            await requestUnlock()
-            isUnlockRequestInFlight = false
+            await unlock()
         }
     }
 
-    private func resetTapSequence() {
+    private func recordFirstDoubleTap(on tappedTarget: WeatherUnlockTarget) {
+        if suppressNextDoubleTap {
+            suppressNextDoubleTap = false
+            resetDoubleTapState()
+            return
+        }
+
+        firstDoubleTapTarget = tappedTarget
+        firstDoubleTapAt = Date()
+        doubleTapResetTask?.cancel()
+        doubleTapResetTask = Task { @MainActor in
+            do {
+                try await Task.sleep(for: .milliseconds(500))
+            } catch {
+                return
+            }
+            resetDoubleTapState()
+        }
+    }
+
+    private func pressChanged(
+        on pressedTarget: WeatherUnlockTarget,
+        isPressing: Bool
+    ) {
+        guard gesture == .doubleTapAndHold,
+              target == pressedTarget,
+              !isUnlockRequestInFlight else { return }
+
+        if isPressing {
+            guard firstDoubleTapTarget == pressedTarget,
+                  let firstDoubleTapAt,
+                  Date().timeIntervalSince(firstDoubleTapAt) <= 0.5 else {
+                armedDoubleTapHoldTarget = nil
+                return
+            }
+
+            doubleTapResetTask?.cancel()
+            doubleTapResetTask = nil
+            armedDoubleTapHoldTarget = pressedTarget
+            suppressNextDoubleTap = true
+        } else if armedDoubleTapHoldTarget == pressedTarget {
+            armedDoubleTapHoldTarget = nil
+        }
+    }
+
+    private func completeHold(on heldTarget: WeatherUnlockTarget) {
+        guard target == heldTarget else { return }
+
+        switch gesture {
+        case .hold:
+            Task { await unlock() }
+        case .doubleTapAndHold:
+            guard armedDoubleTapHoldTarget == heldTarget else { return }
+            resetDoubleTapState()
+            Task { await unlock() }
+        case .tap:
+            break
+        }
+    }
+
+    private func unlock() async {
+        guard !isUnlockRequestInFlight else { return }
+        isUnlockRequestInFlight = true
+        resetGestureState()
+        await requestUnlock()
+        isUnlockRequestInFlight = false
+    }
+
+    private func resetGestureState() {
         tapEvaluationTask?.cancel()
         tapEvaluationTask = nil
         tapSequenceCount = 0
         tapSequenceID = UUID()
+        resetDoubleTapState()
+    }
+
+    private func resetDoubleTapState() {
+        doubleTapResetTask?.cancel()
+        doubleTapResetTask = nil
+        firstDoubleTapTarget = nil
+        firstDoubleTapAt = nil
+        armedDoubleTapHoldTarget = nil
+        suppressNextDoubleTap = false
     }
 
     private func temperature(_ value: Double?) -> String {
         guard let value else { return "--°" }
         return "\(Int(value.rounded()))°"
+    }
+}
+
+private extension View {
+    func weatherUnlockGestures(
+        target: WeatherUnlockTarget,
+        holdDuration: TimeInterval,
+        recordTap: @escaping (WeatherUnlockTarget) -> Void,
+        pressChanged: @escaping (WeatherUnlockTarget, Bool) -> Void,
+        completeHold: @escaping (WeatherUnlockTarget) -> Void
+    ) -> some View {
+        simultaneousGesture(
+            TapGesture()
+                .onEnded { recordTap(target) }
+        )
+        .onLongPressGesture(
+            minimumDuration: holdDuration,
+            maximumDistance: 20,
+            perform: { completeHold(target) },
+            onPressingChanged: { isPressing in
+                pressChanged(target, isPressing)
+            }
+        )
     }
 }
 
@@ -592,8 +768,10 @@ private struct CitySearchView: View {
 struct DecoyLaunchSettingsView: View {
     @EnvironmentObject private var appLockService: AppLockService
     @AppStorage(WeatherCoverKey.enabled) private var enabled = false
+    @AppStorage(WeatherCoverKey.unlockGesture) private var unlockGesture = WeatherUnlockGesture.tap.rawValue
     @AppStorage(WeatherCoverKey.unlockTarget) private var unlockTarget = WeatherUnlockTarget.conditionIcon.rawValue
     @AppStorage(WeatherCoverKey.unlockTapCount) private var unlockTapCount = 3
+    @AppStorage(WeatherCoverKey.unlockHoldDuration) private var unlockHoldDuration = 3
     @State private var toggleValue = false
 
     var body: some View {
@@ -616,26 +794,71 @@ struct DecoyLaunchSettingsView: View {
                 if appLockService.isEnabled {
                     Text("When enabled, KasSigner opens to a functional weather screen.")
                 } else {
-                    Text("Turn on Face ID in Security before enabling Weather Cover.")
+                    Text("Turn on \(appLockService.biometricName) in Security before enabling Weather Cover.")
                 }
             }
 
             if enabled {
+                Section("Unlock Gesture") {
+                    ForEach(WeatherUnlockGesture.allCases) { gesture in
+                        Button {
+                            unlockGesture = gesture.rawValue
+                        } label: {
+                            HStack(spacing: 14) {
+                                Image(systemName: gesture.systemImage)
+                                    .font(.title3)
+                                    .foregroundStyle(.tint)
+                                    .frame(width: 28)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(gesture.title)
+                                        .font(.body.weight(.medium))
+                                        .foregroundStyle(.primary)
+                                    Text(gesture.detail)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                if selectedGesture == gesture {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.title3)
+                                        .foregroundStyle(.tint)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
                 Section {
-                    Picker("Tap", selection: $unlockTarget) {
+                    Picker("Weather Item", selection: $unlockTarget) {
                         ForEach(WeatherUnlockTarget.allCases) { target in
                             Text(target.title).tag(target.rawValue)
                         }
                     }
-                    Picker("Number of Taps", selection: $unlockTapCount) {
-                        ForEach(2...7, id: \.self) { count in
-                            Text("\(count)").tag(count)
+
+                    if selectedGesture == .tap {
+                        Picker("Number of Taps", selection: $unlockTapCount) {
+                            ForEach(2...7, id: \.self) { count in
+                                Text("\(count)").tag(count)
+                            }
+                        }
+                    } else {
+                        Picker("Minimum Hold", selection: $unlockHoldDuration) {
+                            ForEach(1...7, id: \.self) { seconds in
+                                Text(seconds == 1 ? "1 Second" : "\(seconds) Seconds")
+                                    .tag(seconds)
+                            }
                         }
                     }
                 } header: {
-                    Text("Unlock Gesture")
+                    Text("Gesture Details")
                 } footer: {
-                    Text("Tap the selected weather item the chosen number of times, then authenticate to open protected content.")
+                    Text(gestureInstructions)
                 }
             }
         }
@@ -652,6 +875,21 @@ struct DecoyLaunchSettingsView: View {
                 enabled = false
                 toggleValue = false
             }
+        }
+    }
+
+    private var selectedGesture: WeatherUnlockGesture {
+        WeatherUnlockGesture(rawValue: unlockGesture) ?? .tap
+    }
+
+    private var gestureInstructions: String {
+        switch selectedGesture {
+        case .tap:
+            "Tap the selected weather item the chosen number of times, then authenticate to open protected content."
+        case .hold:
+            "Press and hold the selected weather item. Authentication begins as soon as the minimum duration is met."
+        case .doubleTapAndHold:
+            "Tap the selected weather item once, then press and hold the same item. Authentication begins as soon as the minimum duration is met."
         }
     }
 }
