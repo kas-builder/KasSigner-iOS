@@ -2,7 +2,7 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 import UIKit
 
-private enum AddressUsageStatus: Equatable {
+enum AddressUsageStatus: Equatable, Sendable {
     case checking
     case fresh
     case used
@@ -19,7 +19,7 @@ private enum AddressUsageError: Error {
     case invalidTransactionCount
 }
 
-private actor AddressUsageChecker {
+actor AddressUsageChecker {
     static let shared = AddressUsageChecker()
 
     private struct CacheEntry {
@@ -71,8 +71,16 @@ private actor AddressUsageChecker {
     }
 }
 
+private enum AddressChain: String, CaseIterable, Identifiable {
+    case receive = "Receive"
+    case change = "Change"
+
+    var id: String { rawValue }
+}
+
 struct ReceiveView: View {
     @Environment(\.colorScheme) private var colorScheme
+    @ScaledMetric(relativeTo: .body) private var addressFontSize: CGFloat = 15.5
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
@@ -86,6 +94,11 @@ struct ReceiveView: View {
     @State private var selectedAddressIndex = 0
     @State private var addressUsageStatus: AddressUsageStatus = .checking
     @State private var addressWasManuallySelected = false
+    @State private var addressChain: AddressChain = .receive
+    @State private var showingChangeAddressWarning = false
+    @State private var showingAddressPicker = false
+    @AppStorage("kassigner.receive.openToFreshAddress.v1")
+    private var opensToFreshAddress = true
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -106,7 +119,7 @@ struct ReceiveView: View {
 
                 VStack(spacing: 10) {
                     HStack(spacing: 8) {
-                        Text("Address #\(selectedAddressIndex + 1)")
+                        Text("\(addressChain.rawValue) Address #\(selectedAddressIndex + 1)")
                             .foregroundStyle(.secondary)
 
                         if preferences.addressStatusDisplayMode.isEnabled {
@@ -114,6 +127,7 @@ struct ReceiveView: View {
                                 showsText: preferences.addressStatusDisplayMode == .iconAndText
                             )
                         }
+
                     }
                         .font(.subheadline.weight(.semibold))
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -137,7 +151,7 @@ struct ReceiveView: View {
 
                         if let image = qrImage {
                             Button {
-                                copyReceiveAddress()
+                                copyCurrentAddress()
                             } label: {
                                 Image(uiImage: image)
                                 .interpolation(.none)
@@ -171,7 +185,7 @@ struct ReceiveView: View {
                                         )
                                 }
                                 .frame(maxWidth: 304)
-                                .id(receiveAddress)
+                                .id(currentAddress)
                                 .transition(.opacity)
                                 .accessibilityLabel("Receive address QR code")
                             }
@@ -183,7 +197,7 @@ struct ReceiveView: View {
                             addressWasManuallySelected = true
                             withAnimation(.easeInOut(duration: 0.22)) {
                                 selectedAddressIndex = min(
-                                    activeProfile.receiveAddresses.count - 1,
+                                    currentAddresses.count - 1,
                                     selectedAddressIndex + 1
                                 )
                             }
@@ -194,9 +208,9 @@ struct ReceiveView: View {
                                 .frame(width: 44, height: 44)
                         }
                         .buttonStyle(SubtlePressButtonStyle())
-                        .disabled(selectedAddressIndex >= activeProfile.receiveAddresses.count - 1)
+                        .disabled(selectedAddressIndex >= currentAddresses.count - 1)
                         .opacity(
-                            selectedAddressIndex >= activeProfile.receiveAddresses.count - 1
+                            selectedAddressIndex >= currentAddresses.count - 1
                                 ? 0.25
                                 : 1
                         )
@@ -204,92 +218,136 @@ struct ReceiveView: View {
                     }
                 }
 
-                HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
                     Button {
-                        copyReceiveAddress()
+                        copyCurrentAddress()
                     } label: {
-                        Text(twoLineReceiveAddress)
-                            .font(.system(size: 14, weight: .regular, design: .monospaced))
+                        Text(twoLineAddress)
+                            .font(.system(size: addressFontSize, weight: .regular, design: .monospaced))
                             .foregroundStyle(.primary)
                             .multilineTextAlignment(.center)
-                            .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(SubtlePressButtonStyle())
                     .accessibilityHint("Copies the full receive address")
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(
+                        .thinMaterial,
+                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    )
 
+                    if addressChain == .receive {
+                        Toggle("Open to Fresh Address", isOn: $opensToFreshAddress)
+                            .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                            .padding(.horizontal, 16)
+                    }
+                }
+
+                if needsMoreDerivedAddresses {
                     Button {
-                        copyReceiveAddress()
+                        addressWasManuallySelected = true
+                        Task {
+                            await generateNextAddress()
+                        }
                     } label: {
-                        Image(systemName: "doc.on.doc")
-                            .font(.title3.weight(.semibold))
-                            .frame(width: 44, height: 44)
+                        Label(
+                            isGeneratingAddress ? "Generating Address…" : "Generate New Address",
+                            systemImage: isGeneratingAddress
+                                ? "arrow.triangle.2.circlepath"
+                                : "plus.circle"
+                        )
+                            .font(.headline)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .foregroundStyle(.tint)
+                            .frame(minHeight: 44)
+                            .padding(.horizontal, 16)
                     }
                     .buttonStyle(SubtlePressButtonStyle())
-                    .accessibilityLabel("Copy receive address")
+                    .disabled(isGeneratingAddress)
                 }
-                .padding(.leading, 16)
-                .padding(.trailing, 8)
-                .padding(.vertical, 10)
-                .background(
-                    .thinMaterial,
-                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                )
-
-                Button {
-                    addressWasManuallySelected = true
-                    Task {
-                        await generateNextReceiveAddress()
-                    }
-                } label: {
-                    Label(
-                        isGeneratingAddress ? "Generating Address…" : "Generate New Address",
-                        systemImage: isGeneratingAddress
-                            ? "arrow.triangle.2.circlepath"
-                            : "plus.circle"
-                    )
-                        .font(.headline)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
-                        .foregroundStyle(.tint)
-                        .frame(minHeight: 44)
-                        .padding(.horizontal, 16)
-                }
-                .buttonStyle(SubtlePressButtonStyle())
-                .disabled(isGeneratingAddress)
 
             }
             .padding()
         }
-        .navigationTitle("Receive")
+        .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                Menu {
+                    Picker("Address Type", selection: $addressChain) {
+                        ForEach(AddressChain.allCases) { chain in
+                            Text(chain.rawValue).tag(chain)
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(addressChain.rawValue)
+                            .font(.headline)
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showingAddressPicker = true
+                } label: {
+                    Image(systemName: "list.bullet")
+                }
+                .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                .accessibilityLabel(
+                    "Browse \(addressChain.rawValue.lowercased()) addresses"
+                )
+            }
+        }
         .task {
             engine.startIfNeeded()
         }
         .task(id: addressUsageTaskID) {
             guard preferences.addressStatusDisplayMode.isEnabled else { return }
-            await checkAddressUsage(receiveAddress)
+            await checkAddressUsage(currentAddress)
         }
         .task(id: oldestFreshAddressTaskID) {
+            guard addressChain == .receive, opensToFreshAddress else { return }
             await selectOldestFreshAddress()
         }
         .onAppear {
             addressWasManuallySelected = false
-            selectedAddressIndex = min(
-                max(
-                    activeProfile.nextReceiveIndex,
-                    walletStore.lastViewedReceiveIndex(
-                        for: profile.id,
-                        addressCount: activeProfile.receiveAddresses.count
-                    )
-                ),
-                max(0, activeProfile.receiveAddresses.count - 1)
-            )
+            selectInitialAddress()
+        }
+        .onChange(of: addressChain) { _, _ in
+            addressWasManuallySelected = false
+            selectInitialAddress()
+        }
+        .onChange(of: opensToFreshAddress) { _, _ in
+            guard addressChain == .receive else { return }
+            addressWasManuallySelected = false
+            selectInitialAddress()
         }
         .onDisappear {
-            persistSelectedAddressIndex()
+            if addressChain != .receive
+                || !opensToFreshAddress
+                || addressWasManuallySelected {
+                persistSelectedAddressIndex()
+            }
+        }
+        .sheet(isPresented: $showingAddressPicker) {
+            AddressNavigationPickerView(
+                profileID: profile.id,
+                chain: addressChain,
+                addresses: currentAddresses,
+                selectedIndex: $selectedAddressIndex
+            ) { index in
+                addressWasManuallySelected = true
+                selectedAddressIndex = index
+                persistSelectedAddressIndex()
+            }
+            .environmentObject(walletStore)
         }
         .alert(
             "Unable to Generate Address",
@@ -304,38 +362,58 @@ struct ReceiveView: View {
         } message: {
             Text(generationError ?? "")
         }
+        .alert("Change Address Copied", isPresented: $showingChangeAddressWarning) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Do not use change addresses as receive addresses. Use an address from the Receive view when requesting funds.")
+        }
     }
 
     private var activeProfile: WalletProfile {
         walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile
     }
 
-    private var receiveAddress: String {
-        guard !activeProfile.receiveAddresses.isEmpty else { return "" }
+    private var currentAddresses: [String] {
+        addressChain == .receive
+            ? activeProfile.receiveAddresses
+            : activeProfile.changeAddresses
+    }
+
+    private var currentAddress: String {
+        guard !currentAddresses.isEmpty else { return "" }
 
         let safeIndex = min(
             max(0, selectedAddressIndex),
-            activeProfile.receiveAddresses.count - 1
+            currentAddresses.count - 1
         )
 
-        return activeProfile.receiveAddresses[safeIndex]
+        return currentAddresses[safeIndex]
     }
 
-    private var twoLineReceiveAddress: String {
-        guard !receiveAddress.isEmpty else { return "" }
-        let midpoint = receiveAddress.index(
-            receiveAddress.startIndex,
-            offsetBy: receiveAddress.count / 2
+    private var needsMoreDerivedAddresses: Bool {
+        guard !currentAddresses.isEmpty else { return true }
+        if addressChain == .receive {
+            return max(activeProfile.nextReceiveIndex, selectedAddressIndex) + 1
+                >= currentAddresses.count
+        }
+        return selectedAddressIndex + 1 >= currentAddresses.count
+    }
+
+    private var twoLineAddress: String {
+        guard !currentAddress.isEmpty else { return "" }
+        let midpoint = currentAddress.index(
+            currentAddress.startIndex,
+            offsetBy: currentAddress.count / 2
         )
-        return String(receiveAddress[..<midpoint]) + "\n" + String(receiveAddress[midpoint...])
+        return String(currentAddress[..<midpoint]) + "\n" + String(currentAddress[midpoint...])
     }
 
     private var addressUsageTaskID: String {
-        "\(preferences.addressStatusDisplayMode.rawValue):\(receiveAddress)"
+        "\(preferences.addressStatusDisplayMode.rawValue):\(currentAddress)"
     }
 
     private var oldestFreshAddressTaskID: String {
-        "\(profile.id.uuidString):\(activeProfile.receiveAddresses.count)"
+        "\(profile.id.uuidString):\(addressChain.rawValue):\(currentAddresses.count):\(opensToFreshAddress)"
     }
 
     @ViewBuilder
@@ -354,7 +432,7 @@ struct ReceiveView: View {
         case .fresh:
             Button {
                 Task {
-                    await checkAddressUsage(receiveAddress, forceRefresh: true)
+                    await checkAddressUsage(currentAddress, forceRefresh: true)
                 }
             } label: {
                 if showsText {
@@ -371,7 +449,7 @@ struct ReceiveView: View {
         case .used:
             Button {
                 Task {
-                    await checkAddressUsage(receiveAddress, forceRefresh: true)
+                    await checkAddressUsage(currentAddress, forceRefresh: true)
                 }
             } label: {
                 if showsText {
@@ -399,11 +477,19 @@ struct ReceiveView: View {
     }
 
     private func persistSelectedAddressIndex(addressCount: Int? = nil) {
-        walletStore.setLastViewedReceiveIndex(
-            selectedAddressIndex,
-            for: profile.id,
-            addressCount: addressCount ?? activeProfile.receiveAddresses.count
-        )
+        if addressChain == .receive {
+            walletStore.setLastViewedReceiveIndex(
+                selectedAddressIndex,
+                for: profile.id,
+                addressCount: addressCount ?? currentAddresses.count
+            )
+        } else {
+            walletStore.setLastViewedChangeIndex(
+                selectedAddressIndex,
+                for: profile.id,
+                addressCount: addressCount ?? currentAddresses.count
+            )
+        }
     }
 
     private var balanceText: String {
@@ -415,8 +501,8 @@ struct ReceiveView: View {
     }
 
     private var qrImage: UIImage? {
-        guard !receiveAddress.isEmpty else { return nil }
-        filter.setValue(Data(receiveAddress.utf8), forKey: "inputMessage")
+        guard !currentAddress.isEmpty else { return nil }
+        filter.setValue(Data(currentAddress.utf8), forKey: "inputMessage")
         filter.correctionLevel = "M"
         guard let outputImage = filter.outputImage else { return nil }
         let transformed = outputImage.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
@@ -424,7 +510,7 @@ struct ReceiveView: View {
         return UIImage(cgImage: cgImage)
     }
 
-    private func generateNextReceiveAddress() async {
+    private func generateNextAddress() async {
         guard !isGeneratingAddress else { return }
 
         isGeneratingAddress = true
@@ -433,16 +519,14 @@ struct ReceiveView: View {
 
         do {
             var updated = activeProfile
-            // Advance from whichever cursor is furthest ahead. The persisted
-            // receive cursor can lag behind the address currently displayed
-            // (for example after browsing with the chevrons), so using it
-            // alone can move the UI backward and reuse an exposed address.
-            let targetIndex = max(
-                updated.nextReceiveIndex,
-                selectedAddressIndex
-            ) + 1
+            let targetIndex: Int
+            if addressChain == .receive {
+                targetIndex = max(updated.nextReceiveIndex, selectedAddressIndex) + 1
+            } else {
+                targetIndex = max(selectedAddressIndex + 1, updated.changeAddresses.count)
+            }
 
-            if targetIndex >= updated.receiveAddresses.count {
+            if addressChain == .receive && targetIndex >= updated.receiveAddresses.count {
                 let derived = try await engine.extendAddresses(
                     for: updated,
                     receiveCount: targetIndex - updated.receiveAddresses.count + 1,
@@ -450,54 +534,85 @@ struct ReceiveView: View {
                 )
                 updated.receiveAddresses = derived.receiveAddresses
                 updated.changeAddresses = derived.changeAddresses
+            } else if addressChain == .change && targetIndex >= updated.changeAddresses.count {
+                let derived = try await engine.extendAddresses(
+                    for: updated,
+                    receiveCount: 0,
+                    changeCount: targetIndex - updated.changeAddresses.count + 1
+                )
+                updated.receiveAddresses = derived.receiveAddresses
+                updated.changeAddresses = derived.changeAddresses
             }
 
-            updated.nextReceiveIndex = targetIndex
+            if addressChain == .receive {
+                updated.nextReceiveIndex = targetIndex
+            }
             walletStore.update(updated)
 
             withAnimation(.easeInOut(duration: 0.22)) {
                 selectedAddressIndex = targetIndex
             }
-            persistSelectedAddressIndex(addressCount: updated.receiveAddresses.count)
+            persistSelectedAddressIndex(
+                addressCount: addressChain == .receive
+                    ? updated.receiveAddresses.count
+                    : updated.changeAddresses.count
+            )
         } catch {
             generationError = error.localizedDescription
         }
     }
 
-    private func copyReceiveAddress() {
-        guard !receiveAddress.isEmpty else { return }
-        UIPasteboard.general.string = receiveAddress
-        copyFeedbackCenter.showCopied(receiveAddress)
+    private func copyCurrentAddress() {
+        guard !currentAddress.isEmpty else { return }
+        PrivatePasteboard.copy(currentAddress)
+        copyFeedbackCenter.showCopied(currentAddress)
+        if addressChain == .change {
+            showingChangeAddressWarning = true
+        }
     }
 
     @MainActor
-    private func selectOldestFreshAddress() async {
+    private func selectOldestFreshAddress(forceRefresh: Bool = false) async {
         let addresses = activeProfile.receiveAddresses
         guard !addresses.isEmpty else { return }
 
-        for (index, address) in addresses.enumerated() {
+        if !forceRefresh,
+           let cachedIndex = activeProfile.earliestFreshReceiveIndex,
+           addresses.indices.contains(cachedIndex),
+           !walletStore.isReceiveAddressLocallyUsed(
+               addresses[cachedIndex],
+               profileID: profile.id
+           ) {
+            selectedAddressIndex = cachedIndex
+            addressUsageStatus = .fresh
+            return
+        }
+
+        do {
+            let historicallyActive = try await TransactionHistoryClient()
+                .activeAddresses(in: addresses)
+            try Task.checkCancellation()
             guard !addressWasManuallySelected else { return }
 
-            do {
-                let status = try await AddressUsageChecker.shared.status(for: address)
-                try Task.checkCancellation()
+            guard let earliestFreshIndex = addresses.firstIndex(where: { address in
+                !historicallyActive.contains(address.lowercased())
+                    && !walletStore.isReceiveAddressLocallyUsed(
+                        address,
+                        profileID: profile.id
+                    )
+            }) else { return }
 
-                guard !addressWasManuallySelected else { return }
-                guard status == .fresh else { continue }
-
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    selectedAddressIndex = index
-                }
-                addressUsageStatus = .fresh
-                persistSelectedAddressIndex(addressCount: addresses.count)
-                return
-            } catch is CancellationError {
-                return
-            } catch {
-                // Without a result for an earlier address, a later address
-                // cannot be identified as the oldest fresh address safely.
-                return
-            }
+            selectedAddressIndex = earliestFreshIndex
+            addressUsageStatus = .fresh
+            var updatedProfile = activeProfile
+            updatedProfile.earliestFreshReceiveIndex = earliestFreshIndex
+            walletStore.update(updatedProfile)
+        } catch is CancellationError {
+            return
+        } catch {
+            // Keep the current address when complete historical activity
+            // cannot be verified; never guess that a later address is fresh.
+            return
         }
     }
 
@@ -508,6 +623,14 @@ struct ReceiveView: View {
     ) async {
         guard preferences.addressStatusDisplayMode.isEnabled, !address.isEmpty else {
             addressUsageStatus = .unavailable
+            return
+        }
+
+        let isLocallyUsed = addressChain == .change
+            ? walletStore.isChangeAddressLocallyUsed(address, profileID: profile.id)
+            : walletStore.isReceiveAddressLocallyUsed(address, profileID: profile.id)
+        if isLocallyUsed {
+            addressUsageStatus = .used
             return
         }
 
@@ -522,16 +645,184 @@ struct ReceiveView: View {
                 forceRefresh: forceRefresh
             )
             try Task.checkCancellation()
-            guard address == receiveAddress else { return }
+            guard address == currentAddress else { return }
             addressUsageStatus = status
+            if addressChain == .receive,
+               opensToFreshAddress,
+               status == .used,
+               activeProfile.earliestFreshReceiveIndex == selectedAddressIndex {
+                await selectOldestFreshAddress(forceRefresh: true)
+            }
         } catch is CancellationError {
             return
         } catch {
-            guard address == receiveAddress else { return }
+            guard address == currentAddress else { return }
             addressUsageStatus = .unavailable
         }
     }
 
+    private func selectInitialAddress() {
+        let addresses = currentAddresses
+        guard !addresses.isEmpty else {
+            selectedAddressIndex = 0
+            return
+        }
+
+        let preferredIndex: Int
+        if addressChain == .receive {
+            if opensToFreshAddress {
+                if let cachedIndex = activeProfile.earliestFreshReceiveIndex,
+                   addresses.indices.contains(cachedIndex),
+                   !walletStore.isReceiveAddressLocallyUsed(
+                       addresses[cachedIndex],
+                       profileID: profile.id
+                   ) {
+                    preferredIndex = cachedIndex
+                } else {
+                    preferredIndex = walletStore.lastViewedReceiveIndex(
+                        for: profile.id,
+                        addressCount: addresses.count
+                    )
+                }
+            } else {
+                preferredIndex = walletStore.lastViewedReceiveIndex(
+                    for: profile.id,
+                    addressCount: addresses.count
+                )
+            }
+        } else {
+            preferredIndex = max(
+                activeProfile.nextChangeIndex,
+                walletStore.lastViewedChangeIndex(
+                    for: profile.id,
+                    addressCount: addresses.count
+                )
+            )
+        }
+        selectedAddressIndex = min(max(0, preferredIndex), addresses.count - 1)
+    }
+
+}
+
+private struct AddressNavigationPickerView: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var walletStore: WalletStore
+
+    let profileID: UUID
+    let chain: AddressChain
+    let addresses: [String]
+    @Binding var selectedIndex: Int
+    let select: (Int) -> Void
+
+    @State private var historicallyActive: Set<String>?
+    @State private var activityLookupFailed = false
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(addresses.enumerated()), id: \.offset) { index, address in
+                    AddressNavigationSelectionRow(
+                        chain: chain,
+                        index: index,
+                        address: address,
+                        isSelected: index == selectedIndex,
+                        status: status(for: address)
+                    ) {
+                        select(index)
+                        dismiss()
+                    }
+                    .listRowInsets(
+                        EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0)
+                    )
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                }
+            }
+            .navigationTitle("\(chain.rawValue) Address")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task(id: addresses.count) {
+                do {
+                    historicallyActive = try await TransactionHistoryClient()
+                        .activeAddresses(in: addresses)
+                    activityLookupFailed = false
+                } catch is CancellationError {
+                    return
+                } catch {
+                    activityLookupFailed = true
+                }
+            }
+        }
+    }
+
+    private func status(for address: String) -> AddressUsageStatus {
+        let locallyUsed = chain == .receive
+            ? walletStore.isReceiveAddressLocallyUsed(address, profileID: profileID)
+            : walletStore.isChangeAddressLocallyUsed(address, profileID: profileID)
+        if locallyUsed { return .used }
+        if activityLookupFailed { return .unavailable }
+        guard let historicallyActive else { return .checking }
+        return historicallyActive.contains(address.lowercased()) ? .used : .fresh
+    }
+}
+
+private struct AddressNavigationSelectionRow: View {
+    let chain: AddressChain
+    let index: Int
+    let address: String
+    let isSelected: Bool
+    let status: AddressUsageStatus
+    let select: () -> Void
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        Button(action: select) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(chain.rawValue) Address #\(index + 1)")
+                        .foregroundStyle(.primary)
+                    Text(address)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                statusView
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(.secondarySystemGroupedBackground))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(
+                        isSelected
+                            ? accentColor.opacity(0.78)
+                            : Color.primary.opacity(0.03),
+                        lineWidth: isSelected ? 2 : 1
+                    )
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var statusView: some View {
+        switch status {
+        case .checking: ProgressView().controlSize(.mini)
+        case .fresh: Text("Fresh").foregroundStyle(.green)
+        case .used: Text("Used").foregroundStyle(.orange)
+        case .unavailable: Text("Unavailable").foregroundStyle(.secondary)
+        }
+    }
 }
 
 struct SharedQRCodeView: View {

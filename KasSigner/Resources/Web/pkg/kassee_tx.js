@@ -2594,28 +2594,28 @@ export function create_send_pskb_selected(wallet_json, dest_address, amount_somp
 }
 
 /**
- * Create unsigned PSKB with explicit UTXO data (no re-fetch, no stale indices).
- * utxos_json: JSON array of {tx_id, index, amount, script_public_key, block_daa_score} objects.
  * @param {string} wallet_json
- * @param {string} dest_address
- * @param {bigint} amount_sompi
+ * @param {string} transaction_mode
+ * @param {string} recipients_json
  * @param {bigint} exact_fee_sompi
  * @param {number} fee_rate_sompi_per_gram
  * @param {boolean} send_max
+ * @param {string} change_outputs_json
  * @param {string} utxos_json
- * @param {string} ws_url
  * @returns {Promise<string>}
  */
-export function create_send_pskb_with_utxos(wallet_json, dest_address, amount_sompi, exact_fee_sompi, fee_rate_sompi_per_gram, send_max, utxos_json, ws_url) {
+export function create_send_pskb_with_utxos(wallet_json, transaction_mode, recipients_json, exact_fee_sompi, fee_rate_sompi_per_gram, send_max, change_outputs_json, utxos_json) {
     const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ptr1 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr1 = passStringToWasm0(transaction_mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
-    const ptr2 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr2 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
-    const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const ptr3 = passStringToWasm0(change_outputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
-    const ret = wasm.create_send_pskb_with_utxos(ptr0, len0, ptr1, len1, amount_sompi, exact_fee_sompi, fee_rate_sompi_per_gram, send_max, ptr2, len2, ptr3, len3);
+    const ptr4 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len4 = WASM_VECTOR_LEN;
+    const ret = wasm.create_send_pskb_with_utxos(ptr0, len0, ptr1, len1, ptr2, len2, exact_fee_sompi, fee_rate_sompi_per_gram, send_max, ptr3, len3, ptr4, len4);
     return ret;
 }
 
@@ -3231,6 +3231,45 @@ export function parse_kpub(kpub_str) {
 }
 
 /**
+ * @param {string} wallet_json
+ * @param {string} transaction_mode
+ * @param {string} recipients_json
+ * @param {bigint} exact_fee_sompi
+ * @param {number} fee_rate_sompi_per_gram
+ * @param {string} change_outputs_json
+ * @param {string} utxos_json
+ * @returns {string}
+ */
+export function plan_send_change_outputs_with_utxos(wallet_json, transaction_mode, recipients_json, exact_fee_sompi, fee_rate_sompi_per_gram, change_outputs_json, utxos_json) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(transaction_mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(change_outputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.plan_send_change_outputs_with_utxos(ptr0, len0, ptr1, len1, ptr2, len2, exact_fee_sompi, fee_rate_sompi_per_gram, ptr3, len3, ptr4, len4);
+        var ptr6 = ret[0];
+        var len6 = ret[1];
+        if (ret[3]) {
+            ptr6 = 0; len6 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred7_0 = ptr6;
+        deferred7_1 = len6;
+        return getStringFromWasm0(ptr6, len6);
+    } finally {
+        wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
  * Inspect a hex payload (output of the multi-frame QR decoder) and
  * return the detected format as a short string: "pskb", "pskt", or
  * "unknown". JS uses this to route a decoded payload to either the
@@ -3397,6 +3436,40 @@ export function pskt_summary(wire_hex, network) {
         return getStringFromWasm0(ptr3, len3);
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Strict signed-return boundary for the iOS signing flow. Requires the
+ * returned KSPT to match the exact relay emitted for approval and verifies
+ * every returned Schnorr signature before merging into the original PSKB.
+ * @param {string} signed_kspt_hex
+ * @param {string} original_relay_kspt_hex
+ * @param {string} original_pskb_hex
+ * @returns {string}
+ */
+export function pskt_verify_and_merge_signed_kspt(signed_kspt_hex, original_relay_kspt_hex, original_pskb_hex) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(signed_kspt_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(original_relay_kspt_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(original_pskb_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.pskt_verify_and_merge_signed_kspt(ptr0, len0, ptr1, len1, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
 
@@ -4405,22 +4478,22 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 389, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 162, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 500, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 507, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_a36ba44a4de80ab___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 389, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 162, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 388, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 161, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_);
             return ret;
         },

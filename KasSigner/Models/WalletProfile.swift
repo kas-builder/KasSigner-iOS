@@ -10,6 +10,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var changeAddresses: [String]
     var nextReceiveIndex: Int
     var nextChangeIndex: Int
+    var earliestFreshReceiveIndex: Int?
+    var lastHistoricalDiscoveryAt: Date?
+    var requiresInitialDiscovery: Bool
+    var requiresInitialHistorySync: Bool
 
     init(
         id: UUID = UUID(),
@@ -20,7 +24,11 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         receiveAddresses: [String] = [],
         changeAddresses: [String] = [],
         nextReceiveIndex: Int = 0,
-        nextChangeIndex: Int = 0
+        nextChangeIndex: Int = 0,
+        earliestFreshReceiveIndex: Int? = nil,
+        lastHistoricalDiscoveryAt: Date? = nil,
+        requiresInitialDiscovery: Bool = false,
+        requiresInitialHistorySync: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -31,6 +39,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.changeAddresses = changeAddresses
         self.nextReceiveIndex = max(0, nextReceiveIndex)
         self.nextChangeIndex = max(0, nextChangeIndex)
+        self.earliestFreshReceiveIndex = earliestFreshReceiveIndex.map { max(0, $0) }
+        self.lastHistoricalDiscoveryAt = lastHistoricalDiscoveryAt
+        self.requiresInitialDiscovery = requiresInitialDiscovery
+        self.requiresInitialHistorySync = requiresInitialHistorySync
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -43,6 +55,10 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case changeAddresses
         case nextReceiveIndex
         case nextChangeIndex
+        case earliestFreshReceiveIndex
+        case lastHistoricalDiscoveryAt
+        case requiresInitialDiscovery
+        case requiresInitialHistorySync
     }
 
     init(from decoder: Decoder) throws {
@@ -62,5 +78,21 @@ struct WalletProfile: Identifiable, Codable, Equatable {
             0,
             try container.decodeIfPresent(Int.self, forKey: .nextChangeIndex) ?? 0
         )
+        earliestFreshReceiveIndex = try container.decodeIfPresent(
+            Int.self,
+            forKey: .earliestFreshReceiveIndex
+        ).map { max(0, $0) }
+        lastHistoricalDiscoveryAt = try container.decodeIfPresent(
+            Date.self,
+            forKey: .lastHistoricalDiscoveryAt
+        )
+        requiresInitialDiscovery = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresInitialDiscovery
+        ) ?? false
+        requiresInitialHistorySync = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .requiresInitialHistorySync
+        ) ?? false
     }
 }

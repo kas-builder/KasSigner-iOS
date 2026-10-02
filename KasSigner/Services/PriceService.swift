@@ -25,6 +25,7 @@ final class PriceService: ObservableObject {
     @Published private(set) var isPreparingInitialHistory = false
     @Published private(set) var historicalPreparationProgress = 0.0
     @Published private(set) var historyRevision = 0
+    @Published private(set) var historicalRefreshWarning: String?
 
     private struct CachedPrices: Codable {
         let values: [String: Double]
@@ -74,6 +75,8 @@ final class PriceService: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var lastRefreshAttempt: Date?
     private var lastHistoricalRefreshFailure: Date?
+    private var historicalRefreshAttempts: [Int: Date] = [:]
+    private var historicalRefreshTask: Task<Void, Never>?
     private var isHistoricalPrepared = false
     private var historicalDiskCache: HistoricalPriceDiskCache?
     private let historicalCacheURL = HistoricalPriceCacheStore.defaultCacheURL()
@@ -95,9 +98,24 @@ final class PriceService: ObservableObject {
     func historicalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
         await prepareHistoricalPrices()
         let requestedDays = max(1, Int(days) ?? 1)
-        if requestedDays <= 1 {
-            await refreshHistoricalPricesIfNeeded()
+        await refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
+        return try historicalUSDPricesFromCache(requestedDays: requestedDays)
+    }
+
+    func cachedHistoricalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
+        await prepareHistoricalPrices()
+        let requestedDays = max(1, Int(days) ?? 1)
+        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays)
+
+        Task { @MainActor [weak self] in
+            await self?.refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
         }
+        return points
+    }
+
+    private func historicalUSDPricesFromCache(
+        requestedDays: Int
+    ) throws -> [HistoricalPricePoint] {
         guard let historicalDiskCache else {
             throw PriceError.invalidResponse
         }
@@ -115,7 +133,12 @@ final class PriceService: ObservableObject {
         let recentHourlyPoints = historicalDiskCache.hourlyPoints.filter { $0.timestamp >= cutoff }
 
         var points: [HistoricalPricePoint]
-        if requestedDays <= 1, recentHourlyPoints.count >= 2 {
+        if requestedDays <= 90,
+           hasIntradayCoverage(
+               recentHourlyPoints,
+               cutoff: cutoff,
+               requestedDays: requestedDays
+           ) {
             points = recentHourlyPoints
         } else {
             points = Array(dailyPoints)
@@ -172,58 +195,130 @@ final class PriceService: ObservableObject {
             historyRevision += 1
 
             let elapsed = Date().timeIntervalSince(startedAt)
-            if elapsed < 0.45 {
-                try? await Task.sleep(for: .seconds(0.45 - elapsed))
-            }
+            let remainingPresentationTime = max(5 - elapsed, 0.25)
+            try? await Task.sleep(for: .seconds(remainingPresentationTime))
         } catch {
             isHistoricalPrepared = historicalDiskCache != nil
+            if historicalDiskCache != nil {
+                historicalRefreshWarning = "Showing saved chart data. Local price history could not be updated."
+            }
         }
 
         isPreparingInitialHistory = false
     }
 
-    func refreshHistoricalPricesIfNeeded() async {
+    func refreshHistoricalPricesIfNeeded(requestedDays: Int = 1) async {
         await prepareHistoricalPrices()
-        guard var cache = historicalDiskCache else { return }
+        guard historicalDiskCache != nil else { return }
 
-        let todayUTC = utcDayString(Date())
-        if cache.lastRefreshAttemptDayUTC == todayUTC,
-           hasSufficientRecentIntradayPoints(cache.hourlyPoints) {
+        if let historicalRefreshTask {
+            await historicalRefreshTask.value
             return
         }
+
+        let normalizedDays = normalizedHistoricalRange(requestedDays)
+        let now = Date()
+        if let lastAttempt = historicalRefreshAttempts[normalizedDays],
+           now.timeIntervalSince(lastAttempt) < historicalRefreshInterval(for: normalizedDays) {
+            return
+        }
+        historicalRefreshAttempts[normalizedDays] = now
         if let lastHistoricalRefreshFailure,
            Date().timeIntervalSince(lastHistoricalRefreshFailure) < historicalRefreshRetryInterval {
             return
         }
 
-        let requestedDays = historicalRefreshDays(for: cache)
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performHistoricalRefresh(normalizedDays: normalizedDays)
+        }
+        historicalRefreshTask = task
+        await task.value
+        historicalRefreshTask = nil
+    }
+
+    private func performHistoricalRefresh(normalizedDays: Int) async {
+        guard var cache = historicalDiskCache else { return }
+
+        let missingHistoryDays = Int(historicalRefreshDays(for: cache)) ?? 2
+        let fetchDays = normalizedDays <= 90
+            ? max(normalizedDays, missingHistoryDays)
+            : missingHistoryDays
+        let fetchDaysText = String(fetchDays)
         let fetched: [HistoricalPricePoint]
+        var usedFallbackProvider = false
         do {
-            fetched = try await fetchCoinGeckoHistory(days: requestedDays)
+            fetched = try await fetchCoinGeckoHistory(days: fetchDaysText)
         } catch {
-            let fallbackDays = min(Int(requestedDays) ?? 2, 365)
+            let fallbackDays = min(fetchDays, 365)
             guard let dailyFallback = try? await fetchCoinPaprikaHistory(
                 days: String(fallbackDays)
             ) else {
                 lastHistoricalRefreshFailure = Date()
+                historicalRefreshWarning = "Showing saved chart data. Price history could not be refreshed."
                 return
             }
             let intradayFallback = (try? await fetchCoinPaprikaHistory(days: "1")) ?? []
             fetched = normalizedHistoricalPoints(dailyFallback + intradayFallback)
+            usedFallbackProvider = true
         }
 
-        let cutoff = Date().addingTimeInterval(-72 * 60 * 60)
+        let cutoff = Date().addingTimeInterval(-100 * 24 * 60 * 60)
         cache.hourlyPoints = normalizedHistoricalPoints(
             cache.hourlyPoints.filter { $0.timestamp >= cutoff } + fetched
         )
         mergeCompletedDailyCandles(from: fetched, into: &cache)
-        cache.lastRefreshAttemptDayUTC = todayUTC
+        cache.lastRefreshAttemptDayUTC = utcDayString(Date())
         historicalDiskCache = cache
-        try? saveHistoricalDiskCache()
+        do {
+            try saveHistoricalDiskCache()
+        } catch {
+            historicalRefreshWarning = "Chart updated, but the refreshed price history could not be saved."
+            historyRevision += 1
+            return
+        }
         lastHistoricalRefreshFailure = hasSufficientRecentIntradayPoints(cache.hourlyPoints)
             ? nil
             : Date()
+        historicalRefreshWarning = usedFallbackProvider
+            ? "CoinGecko is unavailable. Showing CoinPaprika price history."
+            : nil
         historyRevision += 1
+    }
+
+    private func normalizedHistoricalRange(_ requestedDays: Int) -> Int {
+        switch requestedDays {
+        case ...1: 1
+        case 2...7: 7
+        case 8...30: 30
+        case 31...90: 90
+        default: requestedDays
+        }
+    }
+
+    private func historicalRefreshInterval(for requestedDays: Int) -> TimeInterval {
+        switch requestedDays {
+        case ...1: 5 * 60
+        case 2...30: 30 * 60
+        case 31...90: 60 * 60
+        default: 12 * 60 * 60
+        }
+    }
+
+    private func hasIntradayCoverage(
+        _ points: [HistoricalPricePoint],
+        cutoff: Date,
+        requestedDays: Int
+    ) -> Bool {
+        guard points.count >= 2,
+              let first = points.first,
+              let last = points.last else {
+            return false
+        }
+        let allowedLeadingGap = max(6 * 60 * 60, Double(requestedDays) * 60 * 60)
+        let allowedTrailingGap: TimeInterval = requestedDays <= 1 ? 2 * 60 * 60 : 6 * 60 * 60
+        return first.timestamp <= cutoff.addingTimeInterval(allowedLeadingGap)
+            && last.timestamp >= Date().addingTimeInterval(-allowedTrailingGap)
     }
 
     private func hasSufficientRecentIntradayPoints(_ points: [HistoricalPricePoint]) -> Bool {

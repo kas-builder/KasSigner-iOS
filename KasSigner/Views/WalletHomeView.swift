@@ -8,6 +8,14 @@ private extension Notification.Name {
     )
 }
 
+enum SendTransactionType: String, CaseIterable, Identifiable, Codable, Hashable {
+    case standard
+    case privacyFocused
+    case decoy
+
+    var id: Self { self }
+}
+
 struct WalletHomeView: View {
     private enum WalletRoute: Hashable {
         case receive(UUID)
@@ -31,6 +39,8 @@ struct WalletHomeView: View {
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @State private var showingAddWallet = false
     @State private var showingSecondaryCurrency = false
+    @State private var showingCurrencyConverter = false
+    @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -41,14 +51,14 @@ struct WalletHomeView: View {
                     ContentUnavailableView {
                         Label("No Account", systemImage: "wallet.pass")
                     } description: {
-                        Text("Import the public wallet data exported by KasSigner. Private keys remain on the M5 device.")
+                        Text("Import the public wallet data exported by KasSigner. Private keys remain on the signing device.")
                     } actions: {
-                        Button("Add KasSigner Account") { showingAddWallet = true }
+                        Button("Add Account") { showingAddWallet = true }
                             .buttonStyle(.borderedProminent)
                     }
                 }
             }
-            .navigationTitle(walletStore.selectedProfile == nil ? "KasSigner" : "")
+            .navigationTitle(walletStore.selectedProfile == nil ? "KasSigner-iOS" : "")
             .navigationBarTitleDisplayMode(walletStore.selectedProfile == nil ? .large : .inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -59,6 +69,28 @@ struct WalletHomeView: View {
             }
             .sheet(isPresented: $showingAddWallet) {
                 AddWalletView()
+            }
+            .sheet(isPresented: $showingCurrencyConverter) {
+                NavigationStack {
+                    KaspaPriceDetail(
+                        priceService: priceService,
+                        preferences: preferences,
+                        accentColor: Color(red: 0.20, green: 0.62, blue: 0.57),
+                        showsOnlyConverter: true,
+                        onConverterModeChange: { isManual in
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                currencyConverterDetent = isManual
+                                    ? .fraction(0.62)
+                                    : .fraction(0.54)
+                            }
+                        }
+                    )
+                }
+                .presentationDetents(
+                    [.fraction(0.54), .fraction(0.62)],
+                    selection: $currencyConverterDetent
+                )
+                .presentationDragIndicator(.visible)
             }
             .task {
                 async let walletRefresh: Void = refreshSelectedWallet(force: false)
@@ -142,13 +174,9 @@ struct WalletHomeView: View {
     private func walletContent(_ profile: WalletProfile) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 0) {
-                    Text("Kas")
-                        .foregroundStyle(.primary)
-                    Text("Signer")
-                        .foregroundStyle(.primary)
-                }
-                .font(.largeTitle.weight(.bold))
+                Text("KasSigner-iOS")
+                    .foregroundStyle(.primary)
+                    .font(.largeTitle.weight(.bold))
                     .offset(y: -12)
                     .padding(.bottom, -10)
 
@@ -242,6 +270,38 @@ struct WalletHomeView: View {
                         .padding(.vertical, 5)
                 }
                 .buttonStyle(.bordered)
+                if syncService.isCheckingHistoricalAddresses {
+                    Label("Checking historical address coverage…", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let coverageMessage = historicalCoverageMessage(for: profile) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Address coverage", systemImage: "exclamationmark.triangle.fill")
+                            .font(.subheadline.weight(.semibold))
+                        Text(coverageMessage)
+                            .font(.footnote)
+                        if syncService.historicalDiscoveryError != nil {
+                            Button("Retry check") {
+                                Task {
+                                    await syncService.checkHistoricalAddressesIfNeeded(
+                                        profile: profile,
+                                        walletStore: walletStore,
+                                        engine: engine,
+                                        preferences: preferences,
+                                        force: true
+                                    )
+                                }
+                            }
+                            .font(.footnote.weight(.semibold))
+                        }
+                    }
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding()
+                    .background(.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+                }
 
                 if let snapshot = syncService.snapshot {
                     VStack(alignment: .leading, spacing: 12) {
@@ -252,6 +312,39 @@ struct WalletHomeView: View {
                     }
                     .padding()
                     .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    if preferences.showsCurrencyConverterInWallet {
+                        Button {
+                            currencyConverterDetent = .fraction(0.54)
+                            showingCurrencyConverter = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Currency Converter")
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    Text("Spot Price")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.headline)
+                                    .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                            }
+                            .padding()
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                .thinMaterial,
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(SubtlePressButtonStyle())
+                        .accessibilityHint("Opens the KAS and USD currency converter")
+                    }
                 } else if syncService.state == .syncing {
                     HStack(spacing: 8) {
                         Image(systemName: "dot.radiowaves.left.and.right")
@@ -278,11 +371,16 @@ struct WalletHomeView: View {
             _ = await (walletRefresh, priceRefresh)
         }
         .navigationDestination(isPresented: $showingSendFlow) {
-            SendUTXOSelectionView(
+            SendTransactionTypeSelectionView(
                 profile: profile,
-                clearSelectionOnAppear: true,
                 showingSendFlow: $showingSendFlow
             )
+        }
+        .onChange(of: showingSendFlow) { _, isShowing in
+            if !isShowing {
+                walletStore.cancelSendSession(profileID: profile.id)
+                coinControlStore.clearSelection()
+            }
         }
     }
 
@@ -388,7 +486,7 @@ struct WalletHomeView: View {
     private func copyWalletHomeReceiveAddress(for profile: WalletProfile) {
         guard !profile.receiveAddresses.isEmpty else { return }
         let address = walletHomeReceiveAddress(for: profile)
-        UIPasteboard.general.string = address
+        PrivatePasteboard.copy(address)
         copyFeedbackCenter.showCopied(address)
     }
 
@@ -440,6 +538,23 @@ struct WalletHomeView: View {
             preferences: preferences,
             force: true
         )
+        if force {
+            await syncService.checkHistoricalAddressesIfNeeded(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true
+            )
+        }
+    }
+
+    private func historicalCoverageMessage(for profile: WalletProfile) -> String? {
+        if let error = syncService.historicalDiscoveryError { return error }
+        if max(profile.nextReceiveIndex, profile.nextChangeIndex) >= 462 {
+            return "This account is near the supported 512-address limit. A full 50-address buffer may no longer be available."
+        }
+        return nil
     }
 
     private func compactActionLabel(_ title: String, systemImage: String) -> some View {
@@ -2202,14 +2317,149 @@ private enum VaultFundingFeeChoice: String, CaseIterable, Identifiable {
     var title: String { rawValue.capitalized }
 }
 
+struct SendTransactionTypeSelectionView: View {
+    let profile: WalletProfile
+    @Binding var showingSendFlow: Bool
+
+    @State private var selectedType: SendTransactionType = .standard
+    @State private var showingUTXOSelection = false
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    transactionTypeCard(
+                        .standard,
+                        title: "Standard",
+                        subtitle: "1–4 recipients • 0–1 change output",
+                        detail: "The simplest option with the lowest transaction fee.",
+                        systemImage: "arrow.up.right"
+                    )
+
+                    transactionTypeCard(
+                        .privacyFocused,
+                        title: "Privacy",
+                        subtitle: "1–4 recipients • 2–4 change outputs",
+                        detail: "Splits change across fresh wallet addresses for added ambiguity.",
+                        systemImage: "shield.lefthalf.filled"
+                    )
+
+                    transactionTypeCard(
+                        .decoy,
+                        title: "Decoy",
+                        subtitle: "1 recipient • 4 change outputs",
+                        detail: "Creates a matching decoy amount and additional change outputs.",
+                        systemImage: "theatermasks"
+                    )
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .background(Color(.systemGroupedBackground))
+
+            Button {
+                showingUTXOSelection = true
+            } label: {
+                Text("Continue")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(accentColor)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+        }
+        .navigationTitle("Transaction Type")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
+        .navigationDestination(isPresented: $showingUTXOSelection) {
+            SendUTXOSelectionView(
+                profile: profile,
+                transactionType: selectedType,
+                clearSelectionOnAppear: true,
+                showingSendFlow: $showingSendFlow
+            )
+        }
+    }
+
+    private func transactionTypeCard(
+        _ type: SendTransactionType,
+        title: String,
+        subtitle: String,
+        detail: String,
+        systemImage: String
+    ) -> some View {
+        Button {
+            selectedType = type
+        } label: {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(accentColor)
+                    .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text(subtitle)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(accentColor)
+
+                    Text(detail)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: selectedType == type ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(selectedType == type ? accentColor : Color.secondary)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selectedType == type
+                    ? accentColor.opacity(0.12)
+                    : Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(
+                        selectedType == type ? accentColor : Color.clear,
+                        lineWidth: 1.5
+                    )
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(SubtlePressButtonStyle())
+        .accessibilityLabel("\(title). \(subtitle). \(detail)")
+        .accessibilityAddTraits(selectedType == type ? .isSelected : [])
+    }
+}
+
 struct SendUTXOSelectionView: View {
     let profile: WalletProfile
+    let transactionType: SendTransactionType
     let clearSelectionOnAppear: Bool
     @Binding var showingSendFlow: Bool
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var priceService: PriceService
     @State private var showingUTXOSelectionLimit = false
+    @State private var showingDestination = false
+    @State private var showingSessionError = false
+    @State private var activeSessionID: UUID?
 
     private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -2235,19 +2485,25 @@ struct SendUTXOSelectionView: View {
                                 sendUTXOCard(utxo)
                             }
                         }
+                        .padding(.top, 2)
                         .padding(.horizontal, 14)
                         .padding(.bottom, 20)
                     }
                     .background(Color(.systemGroupedBackground))
 
-                    NavigationLink {
-                        SendDestinationView(
-                            profile: profile,
+                    Button {
+                        guard let session = walletStore.beginSendSession(
+                            profileID: profile.id,
                             selectedUTXOs: selectedUTXOs,
-                            showingSendFlow: $showingSendFlow
-                        )
+                            transactionType: transactionType
+                        ) else {
+                            showingSessionError = true
+                            return
+                        }
+                        activeSessionID = session.id
+                        showingDestination = true
                     } label: {
-                        Text(selectedUTXOs.count == 1 ? "Send UTXO" : "Send UTXOs")
+                        Text(selectedUTXOs.count == 1 ? "Spend UTXO" : "Spend UTXOs")
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
@@ -2263,6 +2519,21 @@ struct SendUTXOSelectionView: View {
         .navigationTitle("Select UTXOs")
         .navigationBarTitleDisplayMode(.inline)
         .background(Color(.systemGroupedBackground))
+        .navigationDestination(isPresented: $showingDestination) {
+            if let activeSessionID,
+               let session = walletStore.sendSession(
+                   id: activeSessionID,
+                   profileID: profile.id
+               ) {
+                SendDestinationView(
+                    profile: profile,
+                    selectedUTXOs: session.selectedUTXOs,
+                    transactionType: session.transactionType,
+                    sessionID: activeSessionID,
+                    showingSendFlow: $showingSendFlow
+                )
+            }
+        }
         .onAppear {
             coinControlStore.activate(profileID: profile.id)
             if clearSelectionOnAppear {
@@ -2273,6 +2544,22 @@ struct SendUTXOSelectionView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("KasSigner supports at most 8 selected UTXOs in one transaction. Additional UTXOs were not selected.")
+        }
+        .alert("Send could not begin", isPresented: $showingSessionError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(sendSessionErrorMessage)
+        }
+    }
+
+    private var sendSessionErrorMessage: String {
+        switch transactionType {
+        case .standard:
+            "No fresh change address is available. Refresh the wallet and try again."
+        case .privacyFocused:
+            "Privacy-Focused Send requires at least two available change addresses. Refresh the wallet and try again."
+        case .decoy:
+            "Decoy Transaction requires at least four available change addresses. Refresh the wallet and try again."
         }
     }
 
@@ -2305,57 +2592,35 @@ struct SendUTXOSelectionView: View {
     }
 
     private var selectionHeader: some View {
-        VStack(spacing: 11) {
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Selected")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("\(selectedUTXOs.count) UTXO\(selectedUTXOs.count == 1 ? "" : "s")")
-                        .font(.system(size: 16, weight: .semibold))
-                }
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text("Input total")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text(
-                        selectedTotalSompi.map {
-                            formatKas(sompi: $0)
-                        } ?? "Invalid total"
-                    )
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                }
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(selectedUTXOs.count) of \(maximumSelectableCount) selected")
+                    .font(.headline)
+                Text(
+                    selectedTotalSompi.map {
+                        "\(formatKas(sompi: $0)) total"
+                    } ?? "Invalid total"
+                )
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 10) {
-                Button(selectedUTXOs.count == maximumSelectableCount
-                    ? "Clear All"
-                    : (utxos.count > UTXOCoinControlStore.maximumSelectedUTXOs
-                        ? "Select First 8"
-                        : "Select All")) {
-                    if selectedUTXOs.count == maximumSelectableCount {
-                        coinControlStore.clearSelection()
-                    } else {
-                        if coinControlStore.selectAll(utxos) > 0 {
-                            showingUTXOSelectionLimit = true
-                        }
+            Spacer(minLength: 8)
+
+            if selectedUTXOs.isEmpty {
+                Button("Select All") {
+                    if coinControlStore.selectAll(utxos) > 0 {
+                        showingUTXOSelectionLimit = true
                     }
                 }
                 .font(.subheadline.weight(.semibold))
                 .buttonStyle(.bordered)
-
-                if !selectedUTXOs.isEmpty && selectedUTXOs.count != maximumSelectableCount {
-                    Button("Clear") {
-                        coinControlStore.clearSelection()
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .buttonStyle(.bordered)
+            } else {
+                Button("Clear All") {
+                    coinControlStore.clearSelection()
                 }
-
-                Spacer()
+                .font(.subheadline.weight(.semibold))
+                .buttonStyle(.bordered)
             }
         }
         .padding(.horizontal, 13)
@@ -2374,19 +2639,36 @@ struct SendUTXOSelectionView: View {
         } label: {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {
-                    Text(formatKas(sompi: utxo.amount))
-                        .font(.body.weight(.regular).monospacedDigit())
-                        .foregroundStyle(.primary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(formatKas(sompi: utxo.amount))
+                            .font(.body.weight(.regular).monospacedDigit())
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .allowsTightening(true)
+                            .foregroundStyle(.primary)
+
+                        if let usdValue = usdValueText(for: utxo) {
+                            Text(usdValue)
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
 
                     Spacer()
 
-                    Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(
-                            utxo.blockDAAScore > 0
-                                ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                                : Color.orange
-                        )
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(
+                                utxo.blockDAAScore > 0
+                                    ? Color(red: 0.18, green: 0.68, blue: 0.62)
+                                    : Color.orange
+                            )
+
+                        Text(utxoTypeLabel(for: utxo))
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Divider()
@@ -2455,5 +2737,24 @@ struct SendUTXOSelectionView: View {
             )
 
         return "\(whole).\(fractionalText) KAS"
+    }
+
+    private func utxoTypeLabel(for utxo: WalletUTXO) -> String {
+        switch utxo.derivationChain?.lowercased() {
+        case "receive": "Receive"
+        case "change": "Change"
+        default: "Unknown"
+        }
+    }
+
+    private func usdValueText(for utxo: WalletUTXO) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        return (utxo.amountKas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(2))
+        )
     }
 }

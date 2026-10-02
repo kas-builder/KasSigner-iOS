@@ -28,12 +28,26 @@ struct FeeEstimate: Decodable, Equatable {
     }
 }
 
+struct ChangeFeePlan: Decodable, Equatable {
+    let feeSompi: UInt64
+    let availableChangeSompi: UInt64
+    let amountsSompi: [UInt64]
+
+    private enum CodingKeys: String, CodingKey {
+        case feeSompi = "fee_sompi"
+        case availableChangeSompi = "available_change_sompi"
+        case amountsSompi = "amounts_sompi"
+    }
+}
+
 struct SendDraftInput: Encodable, Hashable {
     let transactionID: String
     let index: UInt32
     let amountSompi: UInt64
     let scriptPublicKey: String
     let blockDAAScore: UInt64
+    let derivationChain: String
+    let derivationIndex: UInt32
 
     init(utxo: WalletUTXO) throws {
         let transactionID = utxo.txID.trimmingCharacters(
@@ -60,11 +74,20 @@ struct SendDraftInput: Encodable, Hashable {
             throw SendDraftError.zeroValueInput
         }
 
+        guard let derivationChain = utxo.derivationChain,
+              derivationChain == "receive" || derivationChain == "change",
+              let derivationIndex = utxo.derivationIndex
+        else {
+            throw SendDraftError.unresolvedInputDerivation(outpoint: utxo.id)
+        }
+
         self.transactionID = transactionID.lowercased()
         self.index = utxo.index
         self.amountSompi = utxo.amount
         self.scriptPublicKey = scriptPublicKey.lowercased()
         self.blockDAAScore = utxo.blockDAAScore
+        self.derivationChain = derivationChain
+        self.derivationIndex = derivationIndex
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -73,6 +96,8 @@ struct SendDraftInput: Encodable, Hashable {
         case amountSompi = "amount"
         case scriptPublicKey = "script_public_key"
         case blockDAAScore = "block_daa_score"
+        case derivationChain = "derivation_chain"
+        case derivationIndex = "derivation_index"
     }
 
     var outpointKey: String {
@@ -82,34 +107,48 @@ struct SendDraftInput: Encodable, Hashable {
 
 struct SendDraft {
     let profile: WalletProfile
+    let transactionType: SendTransactionType
     let selectedInputs: [SendDraftInput]
+    let recipients: [SendDraftRecipient]
     let destination: String
     let amountSompi: UInt64
     let feeSompi: UInt64
     let feeRateSompiPerGram: Double
     let usesExactFee: Bool
     let sendMax: Bool
+    let changeOutputs: [PlannedChangeOutput]
     let selectedTotalSompi: UInt64
 
     init(
         profile: WalletProfile,
+        transactionType: SendTransactionType = .standard,
         selectedUTXOs: [WalletUTXO],
-        destination: String,
-        amountSompi: UInt64,
+        recipients: [SendDraftRecipient],
         feeSompi: UInt64,
         feeRateSompiPerGram: Double,
         usesExactFee: Bool,
-        sendMax: Bool
+        sendMax: Bool,
+        changeOutputs: [PlannedChangeOutput] = []
     ) throws {
-        let destination = destination.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )
-
-        guard !destination.isEmpty else {
+        guard !recipients.isEmpty, recipients.count <= 4 else {
             throw SendDraftError.emptyDestination
         }
-
-        guard amountSompi > 0 else {
+        guard transactionType != .decoy || recipients.count == 1 else {
+            throw SendDraftError.tooManyRecipientsForDecoy
+        }
+        let normalizedRecipients = recipients.map {
+            SendDraftRecipient(
+                address: $0.address.trimmingCharacters(in: .whitespacesAndNewlines),
+                amountSompi: $0.amountSompi
+            )
+        }
+        guard normalizedRecipients.allSatisfy({ !$0.address.isEmpty }) else {
+            throw SendDraftError.emptyDestination
+        }
+        guard Set(normalizedRecipients.map { $0.address.lowercased() }).count == normalizedRecipients.count else {
+            throw SendDraftError.duplicateRecipient
+        }
+        guard normalizedRecipients.allSatisfy({ $0.amountSompi > 0 }) else {
             throw SendDraftError.zeroAmount
         }
 
@@ -145,7 +184,13 @@ struct SendDraft {
             selectedTotalSompi = addition.partialValue
         }
 
-        let required = amountSompi.addingReportingOverflow(feeSompi)
+        let recipientTotal = normalizedRecipients.reduce(into: UInt64?.some(0)) { total, recipient in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(recipient.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+        guard let recipientTotal else { throw SendDraftError.requiredTotalOverflow }
+        let required = recipientTotal.addingReportingOverflow(feeSompi)
 
         guard !required.overflow else {
             throw SendDraftError.requiredTotalOverflow
@@ -156,19 +201,24 @@ struct SendDraft {
         }
 
         self.profile = profile
+        self.transactionType = transactionType
         self.selectedInputs = selectedInputs
-        self.destination = destination
-        self.amountSompi = amountSompi
+        self.recipients = normalizedRecipients
+        self.destination = normalizedRecipients[0].address
+        self.amountSompi = normalizedRecipients[0].amountSompi
         self.feeSompi = feeSompi
         self.feeRateSompiPerGram = feeRateSompiPerGram
         self.usesExactFee = usesExactFee
         self.sendMax = sendMax
+        self.changeOutputs = changeOutputs
         self.selectedTotalSompi = selectedTotalSompi
     }
 }
 
 enum SendDraftError: LocalizedError {
     case emptyDestination
+    case duplicateRecipient
+    case tooManyRecipientsForDecoy
     case zeroAmount
     case noSelectedInputs
     case tooManySelectedInputs
@@ -179,11 +229,16 @@ enum SendDraftError: LocalizedError {
     case inputTotalOverflow
     case requiredTotalOverflow
     case insufficientSelectedInputs
+    case unresolvedInputDerivation(outpoint: String)
 
     var errorDescription: String? {
         switch self {
         case .emptyDestination:
             return "The destination address is empty."
+        case .duplicateRecipient:
+            return "Each destination address may be used only once."
+        case .tooManyRecipientsForDecoy:
+            return "Decoy Transaction supports exactly one recipient."
         case .zeroAmount:
             return "The send amount must be greater than zero."
         case .noSelectedInputs:
@@ -204,7 +259,19 @@ enum SendDraftError: LocalizedError {
             return "The amount and fee total is too large."
         case .insufficientSelectedInputs:
             return "The selected UTXOs cannot cover the amount and fee."
+        case let .unresolvedInputDerivation(outpoint):
+            return "The selected UTXO \(outpoint) could not be matched to a receive or change address in this wallet."
         }
+    }
+}
+
+struct SendDraftRecipient: Codable, Equatable {
+    let address: String
+    let amountSompi: UInt64
+
+    private enum CodingKeys: String, CodingKey {
+        case address
+        case amountSompi = "amount_sompi"
     }
 }
 
@@ -379,15 +446,15 @@ final class KasSignerEngine: NSObject, ObservableObject {
     @Published private(set) var statusText = "Starting KasSigner…"
 
     private let schemeHandler = KasSignerSchemeHandler()
+    private let bridgeLoadToken = UUID().uuidString
     private var hasStarted = false
     private var desiredRuntimeActive = true
 
     private lazy var webView: WKWebView = {
         let configuration = WKWebViewConfiguration()
-        // The engine contains no private keys. Using the default store allows
-        // WebKit to cache the local WASM module instead of recompiling it on
-        // every launch.
-        configuration.websiteDataStore = .default()
+        // The engine is fully bundled and does not need persistent website
+        // storage. Keep transaction and wallet bridge state memory-only.
+        configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.userContentController.add(self, name: "kaspi")
         configuration.setURLSchemeHandler(
@@ -464,6 +531,39 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
 
         return Data(values.map { UInt8(truncating: $0) })
+    }
+
+    func addressesOwningUTXOs(
+        _ utxos: [WalletUTXO],
+        profile: WalletProfile
+    ) async throws -> [String] {
+        guard !utxos.isEmpty else { return [] }
+        try await ensureReady()
+
+        let scripts = utxos.map { utxo in
+            utxo.scriptPublicKey.map { String(format: "%02x", $0) }.joined()
+        }
+        let addresses = profile.receiveAddresses + profile.changeAddresses
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const targets = new Set(scripts.map(value => String(value).toLowerCase()));
+            return addresses.filter(address => {
+                const script = scriptKey(scriptPublicKeyForAddress(address));
+                return targets.has(script.toLowerCase());
+            });
+            """,
+            arguments: [
+                "scripts": scripts,
+                "addresses": addresses
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let matched = result as? [String] else {
+            throw EngineError.invalidResponse
+        }
+        return Array(Set(matched)).sorted()
     }
 
     func importKpub(_ kpub: String) async throws -> WalletImportResult {
@@ -606,10 +706,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
     }
 
 
-    func buildUnsignedPSKB(
-        from draft: SendDraft,
-        nodeConfiguration: [String: Any]
-    ) async throws -> String {
+    func buildUnsignedPSKB(from draft: SendDraft) async throws -> String {
         try await ensureReady()
 
         let wallet: [String: Any] = [
@@ -635,19 +732,26 @@ final class KasSignerEngine: NSObject, ObservableObject {
             throw EngineError.invalidResponse
         }
 
+        let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
+        let recipientsData = try JSONEncoder().encode(draft.recipients)
+        guard let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8),
+              let recipientsJSON = String(data: recipientsData, encoding: .utf8) else {
+            throw EngineError.invalidResponse
+        }
+
         let result = try await webView.callAsyncJavaScript(
             """
             try {
                 const value = await window.kaspi.buildUnsignedPSKB(
                     wallet,
-                    destination,
-                    amountSompi,
+                    transactionMode,
+                    recipientsJSON,
                     feeSompi,
                     feeRateSompiPerGram,
                     usesExactFee,
                     sendMax,
-                    utxosJSON,
-                    nodeConfig
+                    changeOutputsJSON,
+                    utxosJSON
                 );
                 return { ok: true, value };
             } catch (error) {
@@ -659,14 +763,14 @@ final class KasSignerEngine: NSObject, ObservableObject {
             """,
             arguments: [
                 "wallet": wallet,
-                "destination": draft.destination,
-                "amountSompi": String(draft.amountSompi),
+                "transactionMode": draft.transactionType.rawValue,
+                "recipientsJSON": recipientsJSON,
                 "feeSompi": String(draft.feeSompi),
                 "feeRateSompiPerGram": draft.feeRateSompiPerGram,
                 "usesExactFee": draft.usesExactFee,
                 "sendMax": draft.sendMax,
-                "utxosJSON": utxosJSON,
-                "nodeConfig": nodeConfiguration
+                "changeOutputsJSON": changeOutputsJSON,
+                "utxosJSON": utxosJSON
             ],
             in: nil,
             contentWorld: .page
@@ -703,6 +807,77 @@ final class KasSignerEngine: NSObject, ObservableObject {
 
         return normalized.lowercased()
     }
+
+    func planChangeOutputs(from draft: SendDraft) async throws -> ChangeFeePlan {
+        try await ensureReady()
+
+        let wallet: [String: Any] = [
+            "kpub": draft.profile.kpub,
+            "receive_addresses": draft.profile.receiveAddresses,
+            "change_addresses": draft.profile.changeAddresses,
+            "next_receive_index": draft.profile.nextReceiveIndex,
+            "next_change_index": draft.profile.nextChangeIndex
+        ]
+        let utxosData = try JSONEncoder().encode(draft.selectedInputs)
+        let changeOutputsData = try JSONEncoder().encode(draft.changeOutputs)
+        let recipientsData = try JSONEncoder().encode(draft.recipients)
+        guard let utxosJSON = String(data: utxosData, encoding: .utf8),
+              let changeOutputsJSON = String(data: changeOutputsData, encoding: .utf8),
+              let recipientsJSON = String(data: recipientsData, encoding: .utf8)
+        else {
+            throw EngineError.invalidResponse
+        }
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.planChangeOutputs(
+                    wallet,
+                    transactionMode,
+                    recipientsJSON,
+                    feeSompi,
+                    feeRateSompiPerGram,
+                    usesExactFee,
+                    changeOutputsJSON,
+                    utxosJSON
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "wallet": wallet,
+                "transactionMode": draft.transactionType.rawValue,
+                "recipientsJSON": recipientsJSON,
+                "feeSompi": String(draft.feeSompi),
+                "feeRateSompiPerGram": draft.feeRateSompiPerGram,
+                "usesExactFee": draft.usesExactFee,
+                "changeOutputsJSON": changeOutputsJSON,
+                "utxosJSON": utxosJSON
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let response = result as? [String: Any],
+              let succeeded = response["ok"] as? Bool
+        else {
+            throw EngineError.invalidResponse
+        }
+        guard succeeded else {
+            throw EngineError.javascript(
+                response["error"] as? String ?? "The fee calculation failed."
+            )
+        }
+        guard let json = response["value"] as? String,
+              let data = json.data(using: .utf8)
+        else {
+            throw EngineError.invalidResponse
+        }
+        return try JSONDecoder().decode(ChangeFeePlan.self, from: data)
+    }
+
+
 
     func buildProtectedVaultFundingPSKB(
         profile: WalletProfile,
@@ -936,6 +1111,88 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
 
         return merged
+    }
+
+    func verifyAndMergeSignedKSPTIntoPSKB(
+        signedKSPTHex: String,
+        originalRelayKSPTHex: String,
+        originalPSKBHex: String
+    ) async throws -> String {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return window.kaspi.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex,
+                originalRelayKSPTHex,
+                originalPSKBHex
+            );
+            """,
+            arguments: [
+                "signedKSPTHex": signedKSPTHex,
+                "originalRelayKSPTHex": originalRelayKSPTHex,
+                "originalPSKBHex": originalPSKBHex
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let responseJSON = result as? String,
+              let responseData = responseJSON.data(using: .utf8),
+              let response = try JSONSerialization.jsonObject(
+                with: responseData
+              ) as? [String: Any]
+        else {
+            throw EngineError.invalidResponse
+        }
+
+        if let message = response["error"] as? String {
+            throw EngineError.javascript(message)
+        }
+
+        guard let merged = response["value"] as? String else {
+            throw EngineError.invalidResponse
+        }
+
+        let normalized = merged.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )
+        guard !normalized.isEmpty,
+              normalized.count.isMultiple(of: 2),
+              normalized.allSatisfy({ $0.isHexDigit })
+        else {
+            throw EngineError.javascript(
+                "Verified signed PSKB was not valid hexadecimal."
+            )
+        }
+        return normalized.lowercased()
+    }
+
+    func finalizeAndBroadcastPSKB(
+        _ wireHex: String,
+        wsURL: String
+    ) async throws -> String {
+        try await ensureReady()
+
+        let result = try await webView.callAsyncJavaScript(
+            """
+            return window.kaspi.finalizeAndBroadcastPSKB(
+                wireHex,
+                wsURL
+            );
+            """,
+            arguments: [
+                "wireHex": wireHex,
+                "wsURL": wsURL
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+
+        guard let transactionID = result as? String else {
+            throw EngineError.invalidResponse
+        }
+        return transactionID
     }
 
     func broadcastSignedKSPT(
@@ -1190,6 +1447,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
     private struct QRFrameDecodeResult: Decodable {
         let complete: Bool
         let payload: String?
+        let jsError: String?
     }
 
     func decodeQRFrame(
@@ -1226,6 +1484,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
                 "QR decoder response could not be decoded: "
                     + error.localizedDescription
             )
+        }
+
+        if let jsError = decoded.jsError,
+           !jsError.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw EngineError.javascript(jsError)
         }
 
         guard decoded.complete,
@@ -1449,7 +1712,7 @@ final class KasSignerEngine: NSObject, ObservableObject {
         guard let url = URL(
             string:
                 "\(KasSignerSchemeHandler.scheme)://engine/bridge.html"
-                + "?runtime=9942e6e152b814d4"
+                + "?load=\(bridgeLoadToken)"
         ) else {
             statusText = "KasSigner startup URL invalid"
             return

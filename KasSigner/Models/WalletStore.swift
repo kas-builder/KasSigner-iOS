@@ -1,21 +1,670 @@
 import Foundation
+import Security
+
+final class ProtectedWalletStorage {
+    static let shared = ProtectedWalletStorage()
+
+    private let fileManager: FileManager
+    let directoryURL: URL
+
+    init(
+        fileManager: FileManager = .default,
+        directoryURL: URL? = nil
+    ) {
+        self.fileManager = fileManager
+        self.directoryURL = directoryURL ?? fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first!
+            .appending(path: "KasSigner", directoryHint: .isDirectory)
+            .appending(path: "ProtectedWalletData", directoryHint: .isDirectory)
+    }
+
+    func load<Value: Decodable>(
+        _ type: Value.Type,
+        fileName: String
+    ) -> Value? {
+        guard let data = try? Data(contentsOf: fileURL(fileName)) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(type, from: data)
+    }
+
+    func loadIfPresent<Value: Decodable>(
+        _ type: Value.Type,
+        fileName: String
+    ) throws -> Value? {
+        let url = fileURL(fileName)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        return try JSONDecoder().decode(type, from: Data(contentsOf: url))
+    }
+
+    @discardableResult
+    func save<Value: Encodable>(
+        _ value: Value,
+        fileName: String
+    ) -> Bool {
+        do {
+            try prepareDirectory()
+            let data = try JSONEncoder().encode(value)
+            let url = fileURL(fileName)
+            try data.write(
+                to: url,
+                options: [.atomic, .completeFileProtection]
+            )
+            try protectAndExcludeFromBackup(url)
+
+            // Legacy data is removed only after an exact read-after-write check.
+            guard try Data(contentsOf: url) == data else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func remove(fileName: String) {
+        try? fileManager.removeItem(at: fileURL(fileName))
+    }
+
+    func contains(fileName: String) -> Bool {
+        fileManager.fileExists(atPath: fileURL(fileName).path)
+    }
+
+    private func fileURL(_ fileName: String) -> URL {
+        directoryURL.appending(path: fileName, directoryHint: .notDirectory)
+    }
+
+    private func prepareDirectory() throws {
+        try fileManager.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.protectionKey: FileProtectionType.complete]
+        )
+        try protectAndExcludeFromBackup(directoryURL)
+    }
+
+    private func protectAndExcludeFromBackup(_ url: URL) throws {
+        try fileManager.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: url.path
+        )
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        var mutableURL = url
+        try mutableURL.setResourceValues(values)
+    }
+}
+
+private struct WalletPersistentState: Codable {
+    var profiles: [WalletProfile] = []
+    var selectedProfileID: UUID?
+    var receiveIndices: [String: Int] = [:]
+    var changeIndices: [String: Int] = [:]
+    var usedChangeAddresses: [String: [String]] = [:]
+    var usedReceiveAddresses: [String: [String]] = [:]
+}
+
+enum WalletTransactionDirection: String, Codable, Equatable {
+    case sent
+    case received
+}
+
+enum WalletTransactionKind: String, Codable, Equatable {
+    case sent
+    case received
+    case internalTransfer
+}
+
+enum WalletTransactionStatus: String, Codable, Equatable {
+    case pending
+    case confirmed
+}
+
+enum WalletConfirmationPresentation: Equatable {
+    case pending
+    case checking
+    case count(UInt64)
+    case confirmed
+}
+
+struct WalletTransaction: Identifiable, Codable, Equatable {
+    static let confirmationThreshold: UInt64 = 250
+
+    let id: UUID
+    let profileID: UUID
+    let transactionID: String
+    let destination: String
+    let amountSompi: UInt64
+    let feeSompi: UInt64
+    let broadcastAt: Date
+    let direction: WalletTransactionDirection
+    let kind: WalletTransactionKind
+    let status: WalletTransactionStatus
+    let acceptingBlockBlueScore: UInt64?
+
+    init(
+        id: UUID = UUID(),
+        profileID: UUID,
+        transactionID: String,
+        destination: String,
+        amountSompi: UInt64,
+        feeSompi: UInt64,
+        broadcastAt: Date,
+        direction: WalletTransactionDirection,
+        kind: WalletTransactionKind? = nil,
+        status: WalletTransactionStatus,
+        acceptingBlockBlueScore: UInt64? = nil
+    ) {
+        self.id = id
+        self.profileID = profileID
+        self.transactionID = transactionID
+        self.destination = destination
+        self.amountSompi = amountSompi
+        self.feeSompi = feeSompi
+        self.broadcastAt = broadcastAt
+        self.direction = direction
+        self.kind = kind ?? (direction == .sent ? .sent : .received)
+        self.status = status
+        self.acceptingBlockBlueScore = acceptingBlockBlueScore
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case profileID
+        case transactionID
+        case destination
+        case amountSompi
+        case feeSompi
+        case broadcastAt
+        case direction
+        case kind
+        case status
+        case acceptingBlockBlueScore
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        profileID = try container.decode(UUID.self, forKey: .profileID)
+        transactionID = try container.decode(String.self, forKey: .transactionID)
+        destination = try container.decode(String.self, forKey: .destination)
+        amountSompi = try container.decode(UInt64.self, forKey: .amountSompi)
+        feeSompi = try container.decode(UInt64.self, forKey: .feeSompi)
+        broadcastAt = try container.decode(Date.self, forKey: .broadcastAt)
+        direction = try container.decodeIfPresent(
+            WalletTransactionDirection.self,
+            forKey: .direction
+        ) ?? .sent
+        kind = try container.decodeIfPresent(
+            WalletTransactionKind.self,
+            forKey: .kind
+        ) ?? (direction == .sent ? .sent : .received)
+        status = try container.decodeIfPresent(
+            WalletTransactionStatus.self,
+            forKey: .status
+        ) ?? .pending
+        acceptingBlockBlueScore = try container.decodeIfPresent(
+            UInt64.self,
+            forKey: .acceptingBlockBlueScore
+        )
+    }
+
+    func preservingID(_ id: UUID) -> WalletTransaction {
+        WalletTransaction(
+            id: id,
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: destination,
+            amountSompi: amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: broadcastAt,
+            direction: direction,
+            kind: kind,
+            status: status,
+            acceptingBlockBlueScore: acceptingBlockBlueScore
+        )
+    }
+
+    func preservingLocallyBroadcastInternalTransfer(from existing: WalletTransaction) -> WalletTransaction {
+        let hasExactLocalTransferDetails = existing.kind == .internalTransfer
+            || (existing.status == .pending && existing.amountSompi > 0)
+
+        guard hasExactLocalTransferDetails,
+              direction == .sent,
+              amountSompi == 0,
+              destination == "Self transfer" else {
+            return preservingID(existing.id)
+        }
+
+        return WalletTransaction(
+            id: existing.id,
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "Internal Transfer",
+            amountSompi: existing.amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: broadcastAt,
+            direction: .sent,
+            kind: .internalTransfer,
+            status: status,
+            acceptingBlockBlueScore: acceptingBlockBlueScore
+        )
+    }
+
+    func confirmationCount(currentBlueScore: UInt64?) -> UInt64? {
+        guard let acceptingBlockBlueScore,
+              let currentBlueScore else {
+            return nil
+        }
+        guard currentBlueScore >= acceptingBlockBlueScore else { return 0 }
+        return currentBlueScore - acceptingBlockBlueScore
+    }
+
+    func confirmationPresentation(
+        currentBlueScore: UInt64?,
+        presentsPending: Bool = false
+    ) -> WalletConfirmationPresentation {
+        if presentsPending || status == .pending { return .pending }
+        guard let count = confirmationCount(currentBlueScore: currentBlueScore) else {
+            return .checking
+        }
+        return count >= Self.confirmationThreshold ? .confirmed : .count(count)
+    }
+
+    func needsConfirmationUpdates(currentBlueScore: UInt64?) -> Bool {
+        guard acceptingBlockBlueScore != nil else { return false }
+        guard let count = confirmationCount(currentBlueScore: currentBlueScore) else {
+            return true
+        }
+        return count < Self.confirmationThreshold
+    }
+}
+
+enum SendSessionStage: String, Equatable {
+    case draft
+    case verified
+    case signing
+    case signed
+}
+
+struct PlannedChangeOutput: Identifiable, Codable, Equatable, Hashable {
+    let addressIndex: Int
+    let address: String
+    var amountSompi: UInt64
+
+    var id: String {
+        address
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case addressIndex = "address_index"
+        case address
+        case amountSompi = "amount_sompi"
+    }
+}
+
+enum ChangeOutputPlanningError: LocalizedError, Equatable {
+    case noOutputs
+    case tooManyOutputs
+    case duplicateAddress
+    case invalidMinimumAmount
+    case insufficientChange
+    case secureRandomFailure(OSStatus)
+
+    var errorDescription: String? {
+        switch self {
+        case .noOutputs:
+            return "Select at least one change address."
+        case .tooManyOutputs:
+            return "Select no more than four change addresses."
+        case .duplicateAddress:
+            return "Each change address may be selected only once."
+        case .invalidMinimumAmount:
+            return "The minimum change-output amount is invalid."
+        case .insufficientChange:
+            return "The available change cannot fund every selected output."
+        case .secureRandomFailure:
+            return "Secure change splitting is unavailable. Try again."
+        }
+    }
+}
+
+enum ChangeOutputPlanner {
+    static let maximumOutputCount = 4
+
+    static func autoSplit(
+        availableChangeSompi: UInt64,
+        selectedOutputs: [PlannedChangeOutput],
+        minimumOutputSompi: UInt64
+    ) throws -> [PlannedChangeOutput] {
+        guard !selectedOutputs.isEmpty else {
+            throw ChangeOutputPlanningError.noOutputs
+        }
+        guard selectedOutputs.count <= maximumOutputCount else {
+            throw ChangeOutputPlanningError.tooManyOutputs
+        }
+        guard minimumOutputSompi > 0 else {
+            throw ChangeOutputPlanningError.invalidMinimumAmount
+        }
+        guard Set(selectedOutputs.map(\.id)).count == selectedOutputs.count else {
+            throw ChangeOutputPlanningError.duplicateAddress
+        }
+
+        let reserved = minimumOutputSompi.multipliedReportingOverflow(
+            by: UInt64(selectedOutputs.count)
+        )
+        guard !reserved.overflow,
+              availableChangeSompi >= reserved.partialValue
+        else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        var result = selectedOutputs
+        try secureShuffle(&result)
+
+        if result.count == 1 {
+            result[0].amountSompi = availableChangeSompi
+            return result
+        }
+
+        let outputCount = UInt64(result.count)
+        let average = availableChangeSompi / outputCount
+        let lowerBound = max(minimumOutputSompi, average - average / 4)
+        let upperBase = average.addingReportingOverflow(average / 4)
+        guard !upperBase.overflow else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+        let upperBound = upperBase.partialValue
+            + (average % 4 == 0 ? 0 : 1)
+
+        var remaining = availableChangeSompi
+        for index in result.indices.dropLast() {
+            let remainingCount = UInt64(result.count - index - 1)
+            let maximumForRemaining = upperBound.multipliedReportingOverflow(
+                by: remainingCount
+            )
+            let minimumForRemaining = lowerBound.multipliedReportingOverflow(
+                by: remainingCount
+            )
+            guard !maximumForRemaining.overflow,
+                  !minimumForRemaining.overflow,
+                  remaining >= minimumForRemaining.partialValue
+            else {
+                throw ChangeOutputPlanningError.insufficientChange
+            }
+
+            let feasibleMinimum = max(
+                lowerBound,
+                remaining > maximumForRemaining.partialValue
+                    ? remaining - maximumForRemaining.partialValue
+                    : 0
+            )
+            let feasibleMaximum = min(
+                upperBound,
+                remaining - minimumForRemaining.partialValue
+            )
+            guard feasibleMinimum <= feasibleMaximum else {
+                throw ChangeOutputPlanningError.insufficientChange
+            }
+
+            let range = feasibleMaximum - feasibleMinimum + 1
+            let share = feasibleMinimum + (try secureRandom(upperBound: range))
+            result[index].amountSompi = share
+            remaining -= share
+        }
+
+        guard let finalIndex = result.indices.last,
+              remaining >= lowerBound,
+              remaining <= upperBound
+        else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+        result[finalIndex].amountSompi = remaining
+
+        let verifiedTotal = result.reduce(into: UInt64?.some(0)) { total, output in
+            guard let current = total else { return }
+            let addition = current.addingReportingOverflow(output.amountSompi)
+            total = addition.overflow ? nil : addition.partialValue
+        }
+        guard verifiedTotal == availableChangeSompi else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        return result
+    }
+
+    private static func secureRandom(upperBound: UInt64) throws -> UInt64 {
+        guard upperBound > 0 else {
+            throw ChangeOutputPlanningError.insufficientChange
+        }
+
+        let rejectionThreshold = (0 &- upperBound) % upperBound
+        while true {
+            var value: UInt64 = 0
+            let status = withUnsafeMutableBytes(of: &value) { bytes in
+                SecRandomCopyBytes(
+                    kSecRandomDefault,
+                    bytes.count,
+                    bytes.baseAddress!
+                )
+            }
+            guard status == errSecSuccess else {
+                throw ChangeOutputPlanningError.secureRandomFailure(status)
+            }
+            if value >= rejectionThreshold {
+                return value % upperBound
+            }
+        }
+    }
+
+    private static func secureShuffle<T>(_ values: inout [T]) throws {
+        guard values.count > 1 else { return }
+        for upperIndex in stride(from: values.count - 1, through: 1, by: -1) {
+            let selectedIndex = Int(
+                try secureRandom(upperBound: UInt64(upperIndex + 1))
+            )
+            values.swapAt(upperIndex, selectedIndex)
+        }
+    }
+}
+
+struct SendSession: Identifiable, Equatable {
+    let id: UUID
+    let profileID: UUID
+    let transactionType: SendTransactionType
+    var selectedUTXOs: [WalletUTXO]
+    var changeOutputs: [PlannedChangeOutput]
+    var usesManualChangeAllocation: Bool
+    var recipients: [SendRecipientDraft]
+    var destination: String
+    var amountText: String
+    var sendMax: Bool
+    var feeChoice: String
+    var customFeeText: String
+    var unsignedPSKB: String?
+    var verifiedDigest: String?
+    var stage: SendSessionStage
+    let createdAt: Date
+    var updatedAt: Date
+}
+
+struct SendRecipientDraft: Identifiable, Equatable {
+    let id: UUID
+    var address: String
+    var amountText: String
+
+    init(id: UUID = UUID(), address: String = "", amountText: String = "") {
+        self.id = id
+        self.address = address
+        self.amountText = amountText
+    }
+}
+
+private final class WalletTransactionCache {
+    private let fileManager: FileManager
+    private let directoryURL: URL?
+
+    init(fileManager: FileManager = .default, directoryURL: URL? = nil) {
+        self.fileManager = fileManager
+        self.directoryURL = directoryURL ?? fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?
+            .appending(path: "KasSigner", directoryHint: .isDirectory)
+            .appending(path: "TransactionHistory", directoryHint: .isDirectory)
+    }
+
+    func load(profileID: UUID) -> [WalletTransaction]? {
+        guard let fileURL = fileURL(profileID: profileID),
+              let data = try? Data(contentsOf: fileURL),
+              let transactions = try? JSONDecoder().decode(
+                  [WalletTransaction].self,
+                  from: data
+              ) else {
+            return nil
+        }
+
+        let profileTransactions = transactions.filter { $0.profileID == profileID }
+        // Rewriting on read upgrades any cache created by an older release to
+        // complete file protection and applies the backup exclusion before use.
+        guard save(profileTransactions, profileID: profileID) else {
+            return nil
+        }
+        return profileTransactions
+    }
+
+    @discardableResult
+    func save(_ transactions: [WalletTransaction], profileID: UUID) -> Bool {
+        guard let directoryURL,
+              let fileURL = fileURL(profileID: profileID),
+              let data = try? JSONEncoder().encode(
+                  transactions.filter { $0.profileID == profileID }
+              ) else {
+            return false
+        }
+
+        do {
+            try fileManager.createDirectory(
+                at: directoryURL,
+                withIntermediateDirectories: true,
+                attributes: [.protectionKey: FileProtectionType.complete]
+            )
+            try data.write(
+                to: fileURL,
+                options: [.atomic, .completeFileProtection]
+            )
+            try fileManager.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: directoryURL.path
+            )
+            try fileManager.setAttributes(
+                [.protectionKey: FileProtectionType.complete],
+                ofItemAtPath: fileURL.path
+            )
+            var directoryValues = URLResourceValues()
+            directoryValues.isExcludedFromBackup = true
+            var mutableDirectoryURL = directoryURL
+            try mutableDirectoryURL.setResourceValues(directoryValues)
+            var fileValues = URLResourceValues()
+            fileValues.isExcludedFromBackup = true
+            var mutableFileURL = fileURL
+            try mutableFileURL.setResourceValues(fileValues)
+            guard try Data(contentsOf: fileURL) == data else { return false }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    func remove(profileID: UUID) {
+        guard let fileURL = fileURL(profileID: profileID) else { return }
+        try? fileManager.removeItem(at: fileURL)
+    }
+
+    private func fileURL(profileID: UUID) -> URL? {
+        directoryURL?.appending(
+            path: profileID.uuidString.lowercased() + ".json",
+            directoryHint: .notDirectory
+        )
+    }
+}
 
 @MainActor
 final class WalletStore: ObservableObject {
     @Published private(set) var profiles: [WalletProfile] = []
-    @Published var selectedProfileID: UUID? { didSet { save() } }
+    @Published private(set) var transactions: [WalletTransaction] = []
+    @Published private(set) var pendingTransactions: [WalletTransaction] = []
+    @Published private(set) var sendSessions: [SendSession] = []
+    @Published private(set) var transactionRevision: UInt64 = 0
+    @Published var selectedProfileID: UUID? {
+        didSet {
+            guard !isLoading else { return }
+            guard selectedProfileID != pendingImportedProfile?.id else { return }
+            save()
+        }
+    }
+
+    @Published private(set) var pendingImportedProfile: WalletProfile?
+    private var selectionBeforePendingImport: UUID?
 
     private let storageKey = "kassigner.walletProfiles.v1"
+    private let transactionsStorageKey = "kassigner.walletTransactions.v1"
     private let selectionKey = "kassigner.selectedWalletProfile.v1"
+    private let sendSessionsKey = "kassigner.sendSessions.v1"
     private let receiveIndexKeyPrefix = "kassigner.lastViewedReceiveIndex.v1."
+    private let changeIndexKeyPrefix = "kassigner.lastViewedChangeIndex.v1."
+    private let usedChangeAddressesKeyPrefix = "kassigner.usedChangeAddresses.v1."
+    private let usedReceiveAddressesKeyPrefix = "kassigner.usedReceiveAddresses.v1."
+    private let protectedStorage: ProtectedWalletStorage
+    private let defaults: UserDefaults
+    private let transactionCache: WalletTransactionCache
+    private var persistentState = WalletPersistentState()
+    private var isLoading = true
 
-    init() {
+    init(
+        protectedStorage: ProtectedWalletStorage = .shared,
+        defaults: UserDefaults = .standard,
+        transactionCacheDirectoryURL: URL? = nil
+    ) {
+        self.protectedStorage = protectedStorage
+        self.defaults = defaults
+        transactionCache = WalletTransactionCache(
+            directoryURL: transactionCacheDirectoryURL
+        )
         load()
+        isLoading = false
     }
 
     var selectedProfile: WalletProfile? {
+        if selectedProfileID == pendingImportedProfile?.id {
+            return pendingImportedProfile
+        }
         guard let selectedProfileID else { return profiles.first }
         return profiles.first(where: { $0.id == selectedProfileID }) ?? profiles.first
+    }
+
+    func beginPendingImport(_ profile: WalletProfile) {
+        selectionBeforePendingImport = selectedProfileID
+        pendingImportedProfile = profile
+        selectedProfileID = profile.id
+    }
+
+    func commitPendingImport(_ profile: WalletProfile) {
+        guard pendingImportedProfile?.id == profile.id else { return }
+        profiles.append(profile)
+        pendingImportedProfile = nil
+        selectionBeforePendingImport = nil
+        selectedProfileID = profile.id
+        save()
+    }
+
+    func discardPendingImport() {
+        guard pendingImportedProfile != nil else { return }
+        pendingImportedProfile = nil
+        selectedProfileID = selectionBeforePendingImport
+        selectionBeforePendingImport = nil
     }
 
     func add(_ profile: WalletProfile) {
@@ -24,10 +673,97 @@ final class WalletStore: ObservableObject {
         save()
     }
 
-    func update(_ profile: WalletProfile) {
-        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+    @discardableResult
+    func update(_ profile: WalletProfile) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
         profiles[index] = profile
+        return save()
+    }
+
+    func moveProfiles(from source: IndexSet, to destination: Int) {
+        profiles.move(fromOffsets: source, toOffset: destination)
         save()
+    }
+
+    @discardableResult
+    func beginSendSession(
+        profileID: UUID,
+        selectedUTXOs: [WalletUTXO],
+        transactionType: SendTransactionType = .standard
+    ) -> SendSession? {
+        guard !selectedUTXOs.isEmpty,
+              let profile = profiles.first(where: { $0.id == profileID })
+        else { return nil }
+
+        let initialChangeCount: Int
+        switch transactionType {
+        case .standard:
+            initialChangeCount = 1
+        case .privacyFocused:
+            initialChangeCount = 2
+        case .decoy:
+            initialChangeCount = 4
+        }
+        let initialIndices = profile.nextChangeIndex..<(profile.nextChangeIndex + initialChangeCount)
+        guard initialIndices.allSatisfy(profile.changeAddresses.indices.contains) else {
+            return nil
+        }
+
+        let now = Date()
+        let session = SendSession(
+            id: UUID(),
+            profileID: profileID,
+            transactionType: transactionType,
+            selectedUTXOs: selectedUTXOs,
+            changeOutputs: initialIndices.map { index in
+                PlannedChangeOutput(
+                    addressIndex: index,
+                    address: profile.changeAddresses[index],
+                    amountSompi: 0
+                )
+            },
+            usesManualChangeAllocation: false,
+            recipients: [SendRecipientDraft()],
+            destination: "",
+            amountText: "",
+            sendMax: false,
+            feeChoice: "normal",
+            customFeeText: "",
+            unsignedPSKB: nil,
+            verifiedDigest: nil,
+            stage: .draft,
+            createdAt: now,
+            updatedAt: now
+        )
+        sendSessions.removeAll { $0.profileID == profileID }
+        sendSessions.append(session)
+        return session
+    }
+
+    func sendSession(profileID: UUID) -> SendSession? {
+        sendSessions.first { $0.profileID == profileID }
+    }
+
+    func sendSession(id: UUID, profileID: UUID) -> SendSession? {
+        sendSessions.first { $0.id == id && $0.profileID == profileID }
+    }
+
+    func updateSendSession(_ session: SendSession) {
+        guard profiles.contains(where: { $0.id == session.profileID }),
+              sendSessions.contains(where: {
+                  $0.id == session.id && $0.profileID == session.profileID
+              }) else { return }
+        var updated = session
+        updated.updatedAt = Date()
+        replaceSendSession(updated)
+    }
+
+    func cancelSendSession(profileID: UUID) {
+        sendSessions.removeAll { $0.profileID == profileID }
+    }
+
+    func cancelSendSession(id: UUID, profileID: UUID) {
+        sendSessions.removeAll { $0.id == id && $0.profileID == profileID }
     }
 
     @discardableResult
@@ -58,19 +794,265 @@ final class WalletStore: ObservableObject {
 
     func lastViewedReceiveIndex(for profileID: UUID, addressCount: Int) -> Int {
         guard addressCount > 0 else { return 0 }
-        let stored = UserDefaults.standard.integer(
-            forKey: receiveIndexKeyPrefix + profileID.uuidString
-        )
+        let stored = persistentState.receiveIndices[profileID.uuidString] ?? 0
         return min(max(0, stored), addressCount - 1)
     }
 
     func setLastViewedReceiveIndex(_ index: Int, for profileID: UUID, addressCount: Int) {
         guard addressCount > 0 else { return }
         let clamped = min(max(0, index), addressCount - 1)
-        UserDefaults.standard.set(
-            clamped,
-            forKey: receiveIndexKeyPrefix + profileID.uuidString
+        persistentState.receiveIndices[profileID.uuidString] = clamped
+        persistProtectedState()
+    }
+
+    func lastViewedChangeIndex(for profileID: UUID, addressCount: Int) -> Int {
+        guard addressCount > 0 else { return 0 }
+        let stored = persistentState.changeIndices[profileID.uuidString] ?? 0
+        return min(max(0, stored), addressCount - 1)
+    }
+
+    func setLastViewedChangeIndex(_ index: Int, for profileID: UUID, addressCount: Int) {
+        guard addressCount > 0 else { return }
+        let clamped = min(max(0, index), addressCount - 1)
+        persistentState.changeIndices[profileID.uuidString] = clamped
+        persistProtectedState()
+    }
+
+    func isChangeAddressLocallyUsed(_ address: String, profileID: UUID) -> Bool {
+        locallyUsedChangeAddresses(for: profileID).contains(
+            normalizedWalletAddress(address)
         )
+    }
+
+    func isReceiveAddressLocallyUsed(_ address: String, profileID: UUID) -> Bool {
+        locallyUsedReceiveAddresses(for: profileID).contains(
+            normalizedWalletAddress(address)
+        )
+    }
+
+    @discardableResult
+    func recordBroadcastedTransaction(
+        profileID: UUID,
+        transactionID: String,
+        destination: String,
+        amountSompi: UInt64,
+        feeSompi: UInt64,
+        committedChangeIndices: [Int] = []
+    ) -> Bool {
+        let normalizedTransactionID = transactionID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        guard !normalizedTransactionID.isEmpty else { return false }
+
+        if !committedChangeIndices.isEmpty {
+            guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+                  Set(committedChangeIndices).count == committedChangeIndices.count,
+                  committedChangeIndices.allSatisfy(
+                    profiles[profileIndex].changeAddresses.indices.contains
+                  )
+            else {
+                return false
+            }
+
+            for committedChangeIndex in committedChangeIndices {
+                markChangeAddressLocallyUsed(
+                    profiles[profileIndex].changeAddresses[committedChangeIndex],
+                    profileID: profileID
+                )
+            }
+
+            guard let highestCommittedIndex = committedChangeIndices.max() else {
+                return false
+            }
+            profiles[profileIndex].nextChangeIndex = max(
+                profiles[profileIndex].nextChangeIndex,
+                highestCommittedIndex + 1
+            )
+        }
+        sendSessions.removeAll { $0.profileID == profileID }
+
+        let normalizedDestination = destination
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let profile = profiles.first(where: { $0.id == profileID })
+        if profile?.receiveAddresses.contains(where: {
+            normalizedWalletAddress($0) == normalizedDestination
+        }) == true {
+            markReceiveAddressLocallyUsed(
+                normalizedDestination,
+                profileID: profileID
+            )
+        }
+        let knownWalletAddresses = Set(
+            ((profile?.receiveAddresses ?? []) + (profile?.changeAddresses ?? []))
+                .map {
+                    $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                }
+        )
+        let isInternalTransfer = knownWalletAddresses.contains(normalizedDestination)
+
+        let pendingTransaction = WalletTransaction(
+            profileID: profileID,
+            transactionID: normalizedTransactionID,
+            destination: isInternalTransfer ? "Internal Transfer" : destination,
+            amountSompi: amountSompi,
+            feeSompi: feeSompi,
+            broadcastAt: Date(),
+            direction: .sent,
+            kind: isInternalTransfer ? .internalTransfer : .sent,
+            status: .pending
+        )
+
+        var updatedPending = pendingTransactions
+        if let existingIndex = updatedPending.firstIndex(where: {
+            $0.profileID == profileID
+                && $0.transactionID.caseInsensitiveCompare(normalizedTransactionID) == .orderedSame
+        }) {
+            updatedPending[existingIndex] = pendingTransaction.preservingID(
+                updatedPending[existingIndex].id
+            )
+        } else {
+            updatedPending.append(pendingTransaction)
+        }
+
+        pendingTransactions = updatedPending
+        rebuildPublishedTransactions()
+        transactionRevision &+= 1
+        save()
+        return true
+    }
+
+    func recordObservedUTXOTransactions(
+        profileID: UUID,
+        addedUTXOs: [WalletUTXO]
+    ) {
+        let pendingIDs = Set(pendingTransactions.filter { $0.profileID == profileID }
+            .map { $0.transactionID.lowercased() })
+        let existingIDs = Set(transactions.filter { $0.profileID == profileID }
+            .map { $0.transactionID.lowercased() })
+        let grouped = Dictionary(grouping: addedUTXOs) { $0.txID.lowercased() }
+        var additions: [WalletTransaction] = []
+
+        for (transactionID, utxos) in grouped {
+            guard !transactionID.isEmpty,
+                  !pendingIDs.contains(transactionID),
+                  !existingIDs.contains(transactionID) else { continue }
+
+            additions.append(
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Multiple senders",
+                    amountSompi: utxos.reduce(UInt64(0)) { $0 &+ $1.amount },
+                    feeSompi: 0,
+                    broadcastAt: Date(),
+                    direction: .received,
+                    // A UTXO notification proves the transaction is visible,
+                    // but it does not provide the accepting blue score needed
+                    // to calculate confirmations. Keep the card pending until
+                    // transaction reconciliation supplies that score.
+                    status: .pending
+                )
+            )
+        }
+
+        guard !additions.isEmpty else { return }
+        transactions = transactions + additions
+        pendingTransactions.append(contentsOf: additions)
+        transactionRevision &+= 1
+        save()
+    }
+
+    @discardableResult
+    func mergeSyncedTransactions(
+        _ syncedTransactions: [WalletTransaction],
+        profileID: UUID
+    ) -> Bool {
+        let existingForProfile = transactions.filter { $0.profileID == profileID }
+        let existingByID = Dictionary(
+            existingForProfile.map { ($0.transactionID.lowercased(), $0) },
+            uniquingKeysWith: { current, _ in current }
+        )
+        let syncedIDs = Set(syncedTransactions.map { $0.transactionID.lowercased() })
+        let confirmed = syncedTransactions.map { transaction in
+            guard let existing = existingByID[transaction.transactionID.lowercased()] else {
+                return transaction
+            }
+            return transaction.preservingLocallyBroadcastInternalTransfer(from: existing)
+        }
+        let pending = pendingTransactions.filter {
+            $0.profileID == profileID
+                && !syncedIDs.contains($0.transactionID.lowercased())
+        }
+        pendingTransactions.removeAll {
+            $0.profileID == profileID
+                && syncedIDs.contains($0.transactionID.lowercased())
+        }
+        let retainedPending = existingForProfile.filter {
+            $0.status == .pending && !syncedIDs.contains($0.transactionID.lowercased())
+        }
+
+        transactions = transactions.filter { $0.profileID != profileID }
+            + confirmed
+            + pending
+            + retainedPending.filter { retained in
+                !pending.contains { $0.transactionID.caseInsensitiveCompare(retained.transactionID) == .orderedSame }
+            }
+        transactionRevision &+= 1
+        return transactionCache.save(
+            transactions.filter { $0.profileID == profileID },
+            profileID: profileID
+        )
+    }
+
+    @discardableResult
+    func completeInitialHistorySync(profileID: UUID) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profileID }) else { return false }
+        guard profiles[index].requiresInitialHistorySync else { return true }
+        profiles[index].requiresInitialHistorySync = false
+        guard persistProtectedState() else {
+            profiles[index].requiresInitialHistorySync = true
+            persistentState.profiles = profiles
+            return false
+        }
+        return true
+    }
+
+    func mergeResolvedTransactions(
+        _ resolvedTransactions: [WalletTransaction],
+        profileID: UUID
+    ) {
+        guard !resolvedTransactions.isEmpty else { return }
+        var updated = transactions
+
+        for transaction in resolvedTransactions where transaction.profileID == profileID {
+            if let index = updated.firstIndex(where: {
+                $0.profileID == profileID
+                    && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
+            }) {
+                updated[index] = transaction.preservingLocallyBroadcastInternalTransfer(from: updated[index])
+            } else {
+                updated.append(transaction)
+            }
+        }
+
+        let resolvedIDs = Set(resolvedTransactions.map { $0.transactionID.lowercased() })
+        pendingTransactions.removeAll {
+            $0.profileID == profileID
+                && resolvedIDs.contains($0.transactionID.lowercased())
+        }
+        transactions = updated
+        transactionRevision &+= 1
+        save()
+    }
+
+    func reloadCachedTransactions(profileID: UUID) {
+        guard let cached = transactionCache.load(profileID: profileID) else { return }
+        transactions = transactions.filter { $0.profileID != profileID } + cached
+        pendingTransactions = pendingTransactions.filter { $0.profileID != profileID }
+            + cached.filter { $0.status == .pending }
+        transactionRevision &+= 1
     }
 
     func remove(at offsets: IndexSet) {
@@ -79,10 +1061,19 @@ final class WalletStore: ObservableObject {
         }
 
         for profileID in removedProfileIDs {
-            UserDefaults.standard.removeObject(
-                forKey: receiveIndexKeyPrefix + profileID.uuidString
-            )
+            let key = profileID.uuidString
+            persistentState.receiveIndices.removeValue(forKey: key)
+            persistentState.changeIndices.removeValue(forKey: key)
+            persistentState.usedChangeAddresses.removeValue(forKey: key)
+            persistentState.usedReceiveAddresses.removeValue(forKey: key)
+            transactionCache.remove(profileID: profileID)
+            TransactionGraphCache.shared.remove(profileID: profileID)
         }
+
+        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
+
+        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
 
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
@@ -92,22 +1083,200 @@ final class WalletStore: ObservableObject {
     }
 
     private func load() {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data)
-        else { return }
-        profiles = decoded
-        if let raw = UserDefaults.standard.string(forKey: selectionKey),
-           let id = UUID(uuidString: raw),
-           decoded.contains(where: { $0.id == id }) {
-            selectedProfileID = id
+        if let protectedState = protectedStorage.load(
+            WalletPersistentState.self,
+            fileName: "wallet-state.json"
+        ) {
+            persistentState = protectedState
         } else {
-            selectedProfileID = decoded.first?.id
+            persistentState = legacyPersistentState()
+            if protectedStorage.save(
+                persistentState,
+                fileName: "wallet-state.json"
+            ) {
+                removeLegacyWalletState()
+            }
+        }
+
+        let incompleteProfiles = persistentState.profiles.filter(\.requiresInitialDiscovery)
+        profiles = persistentState.profiles.filter { !$0.requiresInitialDiscovery }
+        let interruptedImport = incompleteProfiles.first {
+            $0.id == persistentState.selectedProfileID
+        }
+        if let interruptedImport {
+            // Imports from builds that persisted discovery too early are made
+            // transient. A later relaunch falls back to the last completed wallet.
+            pendingImportedProfile = interruptedImport
+            selectionBeforePendingImport = profiles.first?.id
+            selectedProfileID = interruptedImport.id
+            persistentState.profiles = profiles
+            persistentState.selectedProfileID = selectionBeforePendingImport
+            _ = protectedStorage.save(
+                persistentState,
+                fileName: "wallet-state.json"
+            )
+        } else if let selectedID = persistentState.selectedProfileID,
+           profiles.contains(where: { $0.id == selectedID }) {
+            selectedProfileID = selectedID
+        } else {
+            selectedProfileID = profiles.first?.id
+        }
+
+        for incompleteProfile in incompleteProfiles {
+            transactionCache.remove(profileID: incompleteProfile.id)
+            TransactionGraphCache.shared.remove(profileID: incompleteProfile.id)
+        }
+
+        let legacyTransactions: [WalletTransaction]
+        if let data = defaults.data(forKey: transactionsStorageKey),
+           let decoded = try? JSONDecoder().decode([WalletTransaction].self, from: data) {
+            legacyTransactions = decoded
+        } else {
+            legacyTransactions = []
+        }
+
+        var migratedLegacyHistory = false
+        transactions = profiles.flatMap { profile in
+            if let cached = transactionCache.load(profileID: profile.id) {
+                return cached
+            }
+
+            let legacyForProfile = legacyTransactions.filter {
+                $0.profileID == profile.id
+            }
+            if !legacyForProfile.isEmpty {
+                migratedLegacyHistory = true
+            }
+            return legacyForProfile
+        }
+        pendingTransactions = transactions.filter { $0.status == .pending }
+
+        // Signing drafts are intentionally never restored. Existing persisted
+        // drafts are purged during the upgrade to memory-only sessions.
+        defaults.removeObject(forKey: sendSessionsKey)
+        sendSessions = []
+
+        if migratedLegacyHistory {
+            if persistTransactionCache() {
+                defaults.removeObject(forKey: transactionsStorageKey)
+            }
         }
     }
 
-    private func save() {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
-        UserDefaults.standard.set(selectedProfileID?.uuidString, forKey: selectionKey)
+    @discardableResult
+    private func save() -> Bool {
+        persistentState.profiles = profiles
+        persistentState.selectedProfileID = selectedProfileID
+        let didSaveWalletState = persistProtectedState()
+        _ = persistTransactionCache()
+        return didSaveWalletState
+    }
+
+    private func replaceSendSession(_ session: SendSession) {
+        sendSessions.removeAll { $0.profileID == session.profileID }
+        sendSessions.append(session)
+    }
+
+    private func locallyUsedChangeAddresses(for profileID: UUID) -> Set<String> {
+        Set(persistentState.usedChangeAddresses[profileID.uuidString] ?? [])
+    }
+
+    private func markChangeAddressLocallyUsed(_ address: String, profileID: UUID) {
+        var addresses = locallyUsedChangeAddresses(for: profileID)
+        addresses.insert(normalizedWalletAddress(address))
+        persistentState.usedChangeAddresses[profileID.uuidString] = addresses.sorted()
+        persistProtectedState()
+    }
+
+    private func locallyUsedReceiveAddresses(for profileID: UUID) -> Set<String> {
+        Set(persistentState.usedReceiveAddresses[profileID.uuidString] ?? [])
+    }
+
+    private func markReceiveAddressLocallyUsed(_ address: String, profileID: UUID) {
+        var addresses = locallyUsedReceiveAddresses(for: profileID)
+        addresses.insert(normalizedWalletAddress(address))
+        persistentState.usedReceiveAddresses[profileID.uuidString] = addresses.sorted()
+        persistProtectedState()
+    }
+
+    private func normalizedWalletAddress(_ address: String) -> String {
+        address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    @discardableResult
+    private func persistTransactionCache() -> Bool {
+        guard !profiles.isEmpty || transactions.isEmpty else { return false }
+        return profiles.allSatisfy { profile in
+            transactionCache.save(
+                transactions.filter { $0.profileID == profile.id },
+                profileID: profile.id
+            )
+        }
+    }
+
+    @discardableResult
+    private func persistProtectedState() -> Bool {
+        persistentState.profiles = profiles
+        persistentState.selectedProfileID = selectedProfileID
+        return protectedStorage.save(
+            persistentState,
+            fileName: "wallet-state.json"
+        )
+    }
+
+    private func legacyPersistentState() -> WalletPersistentState {
+        let legacyProfiles: [WalletProfile]
+        if let data = defaults.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([WalletProfile].self, from: data) {
+            legacyProfiles = decoded
+        } else {
+            legacyProfiles = []
+        }
+
+        let selectedID = defaults.string(forKey: selectionKey)
+            .flatMap(UUID.init(uuidString:))
+        var state = WalletPersistentState(
+            profiles: legacyProfiles,
+            selectedProfileID: selectedID
+        )
+        for profile in legacyProfiles {
+            let id = profile.id.uuidString
+            state.receiveIndices[id] = defaults.integer(
+                forKey: receiveIndexKeyPrefix + id
+            )
+            state.changeIndices[id] = defaults.integer(
+                forKey: changeIndexKeyPrefix + id
+            )
+            state.usedChangeAddresses[id] = defaults.stringArray(
+                forKey: usedChangeAddressesKeyPrefix + id
+            ) ?? []
+            state.usedReceiveAddresses[id] = defaults.stringArray(
+                forKey: usedReceiveAddressesKeyPrefix + id
+            ) ?? []
+        }
+        return state
+    }
+
+    private func removeLegacyWalletState() {
+        defaults.removeObject(forKey: storageKey)
+        defaults.removeObject(forKey: selectionKey)
+        for profile in persistentState.profiles {
+            let id = profile.id.uuidString
+            defaults.removeObject(forKey: receiveIndexKeyPrefix + id)
+            defaults.removeObject(forKey: changeIndexKeyPrefix + id)
+            defaults.removeObject(forKey: usedChangeAddressesKeyPrefix + id)
+            defaults.removeObject(forKey: usedReceiveAddressesKeyPrefix + id)
+        }
+    }
+
+    private func rebuildPublishedTransactions() {
+        let pendingKeys = Set(pendingTransactions.map {
+            "\($0.profileID.uuidString.lowercased()):\($0.transactionID.lowercased())"
+        })
+        transactions = transactions.filter {
+            !pendingKeys.contains(
+                "\($0.profileID.uuidString.lowercased()):\($0.transactionID.lowercased())"
+            )
+        } + pendingTransactions
     }
 }

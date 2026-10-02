@@ -61,6 +61,11 @@ struct KasSignerApp: App {
 private struct HistoricalPricePreparationView: View {
     let progress: Double
 
+    @State private var displayedProgress = 0.04
+    @State private var hasFinishedInitialRamp = false
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
     var body: some View {
         ZStack {
             Color(uiColor: .systemBackground)
@@ -70,8 +75,9 @@ private struct HistoricalPricePreparationView: View {
                 Text("Preparing Price History")
                     .font(.headline)
 
-                ProgressView(value: progress)
+                ProgressView(value: displayedProgress)
                     .progressViewStyle(.linear)
+                    .tint(teal)
                     .frame(maxWidth: 240)
 
                 Text("Building the local portfolio chart cache")
@@ -80,14 +86,35 @@ private struct HistoricalPricePreparationView: View {
             }
             .padding(28)
         }
+        .task {
+            withAnimation(.linear(duration: 4.75)) {
+                displayedProgress = 0.95
+            }
+            try? await Task.sleep(for: .seconds(4.75))
+            hasFinishedInitialRamp = true
+            completeProgressIfReady()
+        }
+        .onChange(of: progress) { _, _ in
+            completeProgressIfReady()
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Preparing local portfolio price history")
-        .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
+        .accessibilityValue(
+            displayedProgress.formatted(.percent.precision(.fractionLength(0)))
+        )
+    }
+
+    private func completeProgressIfReady() {
+        guard hasFinishedInitialRamp, progress >= 1 else { return }
+        withAnimation(.linear(duration: 0.25)) {
+            displayedProgress = 1
+        }
     }
 }
 
 private struct AppSecurityContainer<Content: View>: View {
     @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var syncService: WalletSyncService
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
     private var decoyLaunchScreenEnabled = false
@@ -130,6 +157,7 @@ private struct AppSecurityContainer<Content: View>: View {
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
             case .background:
+                syncService.persistObservedVirtualBlueScore()
                 privacyCoverUnlocked = false
                 appLockService.sceneDidEnterBackground()
             case .active:

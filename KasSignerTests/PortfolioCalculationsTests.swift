@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import KasSigner
 
@@ -311,9 +312,764 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
     }
 }
 
+@MainActor
+final class UTXOBadgePersistenceTests: XCTestCase {
+    private func utxo(_ id: String) -> WalletUTXO {
+        WalletUTXO(
+            txID: id, index: 0, amount: 100_000_000,
+            scriptPublicKey: [], blockDAAScore: 1, covenantID: nil
+        )
+    }
+
+    func testManualBadgeSurvivesReloadAndDefaultDoesNotReplaceIt() {
+        let storage = ProtectedWalletStorage(directoryURL: FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-\(UUID().uuidString)"))
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let profileID = UUID()
+        let output = utxo("existing")
+        let first = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        first.activate(profileID: profileID)
+        first.applyDefaultKYCStatus(to: [output], defaultStatus: .kyc)
+        first.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(first.persistenceAlert)
+
+        let reloaded = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        reloaded.activate(profileID: profileID)
+        reloaded.applyDefaultKYCStatus(to: [output, utxo("new")], defaultStatus: .kyc)
+        XCTAssertEqual(reloaded.kycStatus(for: output), .nonKYC)
+        XCTAssertEqual(reloaded.kycStatus(for: utxo("new")), .kyc)
+    }
+
+    func testFailedBadgeSaveLeavesPreviousValueAndShowsError() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-blocked-\(UUID().uuidString)")
+        try Data().write(to: parent)
+        let storage = ProtectedWalletStorage(directoryURL: parent)
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let store = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        let output = utxo("manual")
+        store.activate(profileID: UUID())
+        store.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(store.kycStatus(for: output))
+        XCTAssertNotNil(store.persistenceAlert)
+    }
+
+    func testUnreadableSavedBadgesBlockChanges() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("utxo-badges-corrupt-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let profileID = UUID()
+        try Data("invalid".utf8).write(to: directory.appendingPathComponent(
+            "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
+        ))
+        let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
+        let store = UTXOCoinControlStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: directory), defaults: defaults
+        )
+        let output = utxo("manual")
+        store.activate(profileID: profileID)
+        store.setKYCStatus(.nonKYC, for: output)
+        XCTAssertNil(store.kycStatus(for: output))
+        XCTAssertNotNil(store.persistenceAlert)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent(
+            "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
+        )), Data("invalid".utf8))
+    }
+}
+
 final class PortfolioCalculationsTests: XCTestCase {
+    func testTransactionGraphRejectsMissingInputOrOutputLists() {
+        let client = TransactionHistoryClient()
+        let input = IndexedTransactionInput(
+            previousOutpointAddress: "kaspa:qqqqqqqqq",
+            previousOutpointAmount: 200
+        )
+        let output = IndexedTransactionOutput(
+            amount: 190,
+            scriptPublicKeyAddress: "kaspa:qqqqqqqqq"
+        )
+
+        func indexed(
+            inputs: [IndexedTransactionInput]?,
+            outputs: [IndexedTransactionOutput]?
+        ) -> IndexedTransaction {
+            IndexedTransaction(
+                transactionID: "abc",
+                blockTime: nil,
+                isAccepted: nil,
+                acceptingBlockTime: nil,
+                acceptingBlockBlueScore: nil,
+                inputs: inputs,
+                outputs: outputs
+            )
+        }
+
+        XCTAssertThrowsError(
+            try client.makeTransactionGraph(indexed(inputs: nil, outputs: [output]), fallbackID: "abc")
+        )
+        XCTAssertThrowsError(
+            try client.makeTransactionGraph(indexed(inputs: [input], outputs: nil), fallbackID: "abc")
+        )
+        let graph = try? client.makeTransactionGraph(
+            indexed(inputs: [input], outputs: [output]),
+            fallbackID: "abc"
+        )
+        XCTAssertEqual(graph?.feeSompi, 10)
+    }
+
+    func testGraphAddressFormatRejectsIncompleteAddresses() {
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqq"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqqb"))
+        XCTAssertFalse(TransactionGraphAddress.hasPlausibleFormat("https://example.com"))
+        XCTAssertTrue(TransactionGraphAddress.hasPlausibleFormat("kaspa:qqqqqqqqq"))
+    }
+
+    @MainActor
+    func testPartialGraphCacheRefreshesAndPersistsCompleteGraph() async {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graph-cache-test-\(UUID().uuidString)")
+        let storage = ProtectedWalletStorage(directoryURL: directory)
+        let cache = TransactionGraphCache(storage: storage)
+        let profileID = UUID()
+        let partial = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [TransactionGraphInput(outpoint: "prior:0", address: nil, amountSompi: nil)],
+            outputs: [TransactionGraphOutput(index: 0, address: "kaspa:qqqqqqqqq", amountSompi: 190)],
+            feeSompi: nil
+        )
+
+        await cache.save([partial], profileID: profileID)
+        XCTAssertTrue(cache.shouldRefresh(partial, profileID: profileID))
+        await cache.save([partial], profileID: profileID, markRefreshed: true)
+        XCTAssertFalse(cache.shouldRefresh(partial, profileID: profileID))
+
+        let complete = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [TransactionGraphInput(
+                outpoint: "prior:0",
+                address: "kaspa:qqqqqqqqq",
+                amountSompi: 200
+            )],
+            outputs: partial.outputs,
+            feeSompi: 10
+        )
+        await cache.save([complete], profileID: profileID)
+        XCTAssertFalse(cache.shouldRefresh(complete, profileID: profileID))
+        await cache.save([partial], profileID: profileID)
+        let reloadedGraph = await TransactionGraphCache(storage: storage).graph(
+            profileID: profileID,
+            transactionID: "ABC"
+        )
+        XCTAssertEqual(reloadedGraph, complete)
+    }
+
+    @MainActor
+    func testGraphCacheReadsEarlierDiskFormat() async {
+        struct EarlierDiskCache: Encodable {
+            let schemaVersion: Int
+            let graphs: [String: TransactionGraphDetails]
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graph-cache-legacy-test-\(UUID().uuidString)")
+        let storage = ProtectedWalletStorage(directoryURL: directory)
+        let profileID = UUID()
+        let graph = TransactionGraphDetails(
+            transactionID: "abc",
+            inputs: [],
+            outputs: [TransactionGraphOutput(
+                index: 0,
+                address: "kaspa:qqqqqqqqq",
+                amountSompi: 100
+            )],
+            feeSompi: nil
+        )
+        let name = "transaction-graphs-\(profileID.uuidString.lowercased()).json"
+        XCTAssertTrue(storage.save(
+            EarlierDiskCache(schemaVersion: 1, graphs: ["abc": graph]),
+            fileName: name
+        ))
+
+        let loaded = await TransactionGraphCache(storage: storage).graph(
+            profileID: profileID,
+            transactionID: "abc"
+        )
+        XCTAssertEqual(loaded, graph)
+    }
+
+    @MainActor
+    func testCopyToastShowsFirstAndLastSixCharacters() {
+        let feedback = CopyFeedbackCenter()
+
+        feedback.showCopied("kaspa:exampleaddress1234")
+
+        XCTAssertEqual(feedback.message, "Address exampl...ss1234 copied")
+    }
+
+    func testCompactKpubPayloadAcceptsExactM5Format() throws {
+        var raw = [UInt8](repeating: 0, count: 78)
+        raw.replaceSubrange(0..<4, with: [0x03, 0x8f, 0x33, 0x2e])
+        raw[4] = 3
+        raw.replaceSubrange(9..<13, with: [0x80, 0x00, 0x00, 0x00])
+        raw[45] = 0x02
+        let payload = [UInt8(0x01)] + raw
+        let payloadHex = payload.map { String(format: "%02x", $0) }.joined()
+
+        XCTAssertEqual(
+            try KpubQRPayload.rawKpubHex(from: payloadHex),
+            raw.map { String(format: "%02x", $0) }.joined()
+        )
+    }
+
+    func testCompactKpubPayloadRejectsPrivateOrUnknownFormats() {
+        var raw = [UInt8](repeating: 0, count: 78)
+        raw.replaceSubrange(0..<4, with: [0x03, 0x8f, 0x33, 0x2e])
+        raw[4] = 3
+        raw.replaceSubrange(9..<13, with: [0x80, 0x00, 0x00, 0x00])
+        raw[45] = 0x02
+
+        func hex(_ bytes: [UInt8]) -> String {
+            bytes.map { String(format: "%02x", $0) }.joined()
+        }
+
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(from: hex([0x02] + raw))
+        )
+
+        var wrongVersion = raw
+        wrongVersion[0] = 0x04
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(from: hex([0x01] + wrongVersion))
+        )
+
+        XCTAssertThrowsError(
+            try KpubQRPayload.rawKpubHex(
+                from: hex([0x01] + Array(raw.dropLast()))
+            )
+        )
+    }
+
+    @MainActor
+    func testCompactKpubUsesStandardBundledImporter() async throws {
+        let engine = KasSignerEngine()
+        _ = engine.attachedWebView()
+        let raw =
+            "038f332e" + "03" + "00000000" + "80000000" +
+            String(repeating: "01", count: 32) +
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        let canonicalKpub = try KpubQRPayload.canonicalKpub(
+            from: "01" + raw
+        )
+        let imported = try await engine.importKpub(canonicalKpub)
+
+        XCTAssertTrue(canonicalKpub.hasPrefix("kpub"))
+        XCTAssertTrue(imported.kpub.hasPrefix("kpub"))
+        XCTAssertFalse(imported.receiveAddresses.isEmpty)
+        XCTAssertFalse(imported.changeAddresses.isEmpty)
+    }
+
+    @MainActor
+    func testCompactKpubFramesReassembleOutOfOrderWithoutEarlyImport() async throws {
+        let engine = KasSignerEngine()
+        _ = engine.attachedWebView()
+        let rawHex =
+            "038f332e" + "03" + "00000000" + "80000000" +
+            String(repeating: "01", count: 32) +
+            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        let payloadHex = "01" + rawHex
+        let payload = stride(from: 0, to: payloadHex.count, by: 2).map { offset in
+            let start = payloadHex.index(payloadHex.startIndex, offsetBy: offset)
+            let end = payloadHex.index(start, offsetBy: 2)
+            return UInt8(payloadHex[start..<end], radix: 16)!
+        }
+        let digest = Array(SHA256.hash(data: Data(payload)))
+        func frame(index: UInt8, fragment: ArraySlice<UInt8>) -> String {
+            var bytes: [UInt8] = [0x4b, 0x51, 0x02, 0x02]
+            bytes += digest[16..<24]
+            bytes += [UInt8(payload.count >> 8), UInt8(payload.count & 0xff)]
+            bytes += digest[0..<16]
+            bytes += [index, 0x02, UInt8(fragment.count)]
+            bytes += fragment
+            return bytes.map { String(format: "%02x", $0) }.joined()
+        }
+        let firstFrame = frame(index: 0, fragment: payload[0..<40])
+        let secondFrame = frame(index: 1, fragment: payload[40..<79])
+
+        try await engine.resetQRDecoder()
+        let incomplete = try await engine.decodeQRFrame(secondFrame)
+        XCTAssertNil(incomplete)
+        let duplicate = try await engine.decodeQRFrame(secondFrame)
+        XCTAssertNil(duplicate)
+        let completed = try await engine.decodeQRFrame(firstFrame)
+
+        XCTAssertEqual(completed, payloadHex)
+        let canonical = try KpubQRPayload.canonicalKpub(
+            from: XCTUnwrap(completed)
+        )
+        let imported = try await engine.importKpub(canonical)
+        XCTAssertTrue(imported.kpub.hasPrefix("kpub"))
+    }
+
+    @MainActor
+    func testStrictSignedReturnVerifierIsAvailableThroughBundledWebAssembly() async {
+        let engine = KasSignerEngine()
+        let firstWebView = engine.attachedWebView()
+
+        do {
+            _ = try await engine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "00",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Malformed KSPT input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 4 bytes at pos 0, only 1 remain"
+            )
+        }
+
+        do {
+            _ = try await engine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "4b5350540101",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Truncated M5 KSPT v1 input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 2 bytes at pos 6, only 0 remain"
+            )
+        }
+
+        let secondEngine = KasSignerEngine()
+        let secondWebView = secondEngine.attachedWebView()
+        do {
+            _ = try await secondEngine.verifyAndMergeSignedKSPTIntoPSKB(
+                signedKSPTHex: "00",
+                originalRelayKSPTHex: "00",
+                originalPSKBHex: "00"
+            )
+            XCTFail("Malformed KSPT input unexpectedly passed verification.")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "KSPT truncated: want 4 bytes at pos 0, only 1 remain"
+            )
+        }
+
+        XCTAssertNotEqual(firstWebView.url, secondWebView.url)
+    }
+
+    func testVerifiedSignedPSKBGateArmsOnlyAfterAcceptance() {
+        var gate = VerifiedSignedPSKBGate()
+        XCTAssertFalse(gate.isArmed)
+        XCTAssertNil(gate.payload)
+
+        gate.accept("verified-pskb")
+
+        XCTAssertTrue(gate.isArmed)
+        XCTAssertEqual(gate.payload, "verified-pskb")
+    }
+
+    func testVerifiedSignedPSKBGateClearsPreviouslyAcceptedPayload() {
+        var gate = VerifiedSignedPSKBGate()
+        gate.accept("previously-verified-pskb")
+
+        gate.clear()
+
+        XCTAssertFalse(gate.isArmed)
+        XCTAssertNil(gate.payload)
+    }
+
     private let portfolioID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
     private let baseDate = Date(timeIntervalSince1970: 1_700_000_000)
+
+    func testSompiFormattingUsesSelectedDecimalPlaces() {
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_550_000_000, decimalPlaces: .zero),
+            "26"
+        )
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_550_000_000, decimalPlaces: .two),
+            "25.50"
+        )
+        XCTAssertEqual(
+            KasBalanceFormatter.string(fromSompi: 2_500_000_000, decimalPlaces: .four),
+            "25.0000"
+        )
+    }
+
+    @MainActor
+    func testBroadcastTransactionPublishesImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "a", count: 64)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "kaspa:testdestination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(store.pendingTransactions.count, 1)
+        XCTAssertEqual(store.pendingTransactions.first?.transactionID, transactionID)
+        XCTAssertTrue(store.transactions.contains {
+            $0.profileID == profileID && $0.transactionID == transactionID
+        })
+    }
+
+    @MainActor
+    func testOutOfOrderChangeAddressIsMarkedUsedWithoutMovingCursorBackward() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 5
+            )
+        )
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "d", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndices: [1]
+        )
+
+        XCTAssertTrue(
+            store.isChangeAddressLocallyUsed(changeAddresses[1], profileID: profileID)
+        )
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            5
+        )
+
+        if let index = store.profiles.firstIndex(where: { $0.id == profileID }) {
+            store.remove(at: IndexSet(integer: index))
+        }
+    }
+
+    @MainActor
+    func testNonContiguousChangeAddressesAreAllMarkedUsedAndAdvanceCursor() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Multiple Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 1
+            )
+        )
+
+        let recorded = store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "e", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndices: [1, 3, 5]
+        )
+
+        XCTAssertTrue(recorded)
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[1], profileID: profileID))
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[3], profileID: profileID))
+        XCTAssertTrue(store.isChangeAddressLocallyUsed(changeAddresses[5], profileID: profileID))
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[2], profileID: profileID))
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[4], profileID: profileID))
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            6
+        )
+    }
+
+    @MainActor
+    func testInvalidChangeIndexRejectsBroadcastRecordWithoutPartialMarking() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let changeAddresses = (0..<3).map { "kaspa:change-\($0)" }
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Invalid Change Address Test",
+                kpub: "kpub-test",
+                changeAddresses: changeAddresses,
+                nextChangeIndex: 0
+            )
+        )
+
+        let recorded = store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "f", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            committedChangeIndices: [0, 4]
+        )
+
+        XCTAssertFalse(recorded)
+        XCTAssertFalse(store.isChangeAddressLocallyUsed(changeAddresses[0], profileID: profileID))
+        XCTAssertEqual(
+            store.profiles.first(where: { $0.id == profileID })?.nextChangeIndex,
+            0
+        )
+    }
+
+    func testAutoSplitPreservesExactTotalAndMinimumAcrossRepeatedRuns() throws {
+        let minimum: UInt64 = 66_900
+        let available: UInt64 = 42_000_000_000
+        let outputs = (0..<4).map {
+            PlannedChangeOutput(
+                addressIndex: $0,
+                address: "kaspa:change-\($0)",
+                amountSompi: 0
+            )
+        }
+
+        for _ in 0..<128 {
+            let split = try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: available,
+                selectedOutputs: outputs,
+                minimumOutputSompi: minimum
+            )
+
+            XCTAssertEqual(split.count, outputs.count)
+            XCTAssertTrue(split.allSatisfy { $0.amountSompi >= minimum })
+            XCTAssertEqual(
+                split.reduce(UInt64(0)) { $0 + $1.amountSompi },
+                available
+            )
+        }
+    }
+
+    func testAutoSplitRejectsDuplicateAddresses() {
+        let outputs = [
+            PlannedChangeOutput(
+                addressIndex: 0,
+                address: "kaspa:duplicate",
+                amountSompi: 0
+            ),
+            PlannedChangeOutput(
+                addressIndex: 1,
+                address: " KASPA:DUPLICATE ",
+                amountSompi: 0
+            )
+        ]
+
+        XCTAssertThrowsError(
+            try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: 1_000_000,
+                selectedOutputs: outputs,
+                minimumOutputSompi: 66_900
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChangeOutputPlanningError,
+                .duplicateAddress
+            )
+        }
+    }
+
+    func testAutoSplitRejectsInsufficientChangeWithoutOverflow() {
+        let outputs = (0..<4).map {
+            PlannedChangeOutput(
+                addressIndex: $0,
+                address: "kaspa:change-\($0)",
+                amountSompi: 0
+            )
+        }
+
+        XCTAssertThrowsError(
+            try ChangeOutputPlanner.autoSplit(
+                availableChangeSompi: 267_599,
+                selectedOutputs: outputs,
+                minimumOutputSompi: 66_900
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ChangeOutputPlanningError,
+                .insufficientChange
+            )
+        }
+    }
+
+    @MainActor
+    func testBroadcastToOwnedReceiveAddressMarksItUsedImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let receiveAddress = "kaspa:owned-receive-address"
+        store.add(
+            WalletProfile(
+                id: profileID,
+                name: "Receive Address Test",
+                kpub: "kpub-test",
+                receiveAddresses: [receiveAddress]
+            )
+        )
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: String(repeating: "e", count: 64),
+            destination: receiveAddress,
+            amountSompi: 100_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertTrue(
+            store.isReceiveAddressLocallyUsed(receiveAddress, profileID: profileID)
+        )
+
+        if let index = store.profiles.firstIndex(where: { $0.id == profileID }) {
+            store.remove(at: IndexSet(integer: index))
+        }
+    }
+
+    @MainActor
+    func testKnownWalletBroadcastPreservesInternalTransferAmountWhenConfirmed() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let internalAddress = "kaspa:internal"
+        let transactionID = String(repeating: "b", count: 64)
+        let profile = WalletProfile(
+            id: profileID,
+            name: "Internal Transfer Test",
+            kpub: "kpub-test",
+            receiveAddresses: [internalAddress]
+        )
+        store.add(profile)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: internalAddress,
+            amountSompi: 250_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(store.pendingTransactions.first?.kind, .internalTransfer)
+        XCTAssertEqual(store.pendingTransactions.first?.destination, "Internal Transfer")
+        XCTAssertEqual(store.pendingTransactions.first?.amountSompi, 250_000_000)
+
+        store.mergeSyncedTransactions(
+            [
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Self transfer",
+                    amountSompi: 0,
+                    feeSompi: 1_000,
+                    broadcastAt: Date(),
+                    direction: .sent,
+                    status: .confirmed
+                )
+            ],
+            profileID: profileID
+        )
+
+        let confirmed = store.transactions.first { $0.transactionID == transactionID }
+        XCTAssertEqual(confirmed?.kind, .internalTransfer)
+        XCTAssertEqual(confirmed?.destination, "Internal Transfer")
+        XCTAssertEqual(confirmed?.amountSompi, 250_000_000)
+        XCTAssertEqual(confirmed?.status, .confirmed)
+    }
+
+    @MainActor
+    func testLocallyBroadcastTransferToUncachedWalletAddressBecomesInternalWhenConfirmed() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "c", count: 64)
+        let profile = WalletProfile(
+            id: profileID,
+            name: "Uncached Internal Transfer Test",
+            kpub: "kpub-test"
+        )
+        store.add(profile)
+
+        store.recordBroadcastedTransaction(
+            profileID: profileID,
+            transactionID: transactionID,
+            destination: "kaspa:uncached-wallet-address",
+            amountSompi: 375_000_000,
+            feeSompi: 1_000
+        )
+
+        XCTAssertTrue(store.transactions.contains {
+            $0.transactionID == transactionID && $0.amountSompi == 375_000_000
+        })
+
+        store.mergeResolvedTransactions(
+            [
+                WalletTransaction(
+                    profileID: profileID,
+                    transactionID: transactionID,
+                    destination: "Self transfer",
+                    amountSompi: 0,
+                    feeSompi: 1_000,
+                    broadcastAt: Date(),
+                    direction: .sent,
+                    status: .confirmed
+                )
+            ],
+            profileID: profileID
+        )
+
+        let confirmed = store.transactions.first { $0.transactionID == transactionID }
+        XCTAssertEqual(confirmed?.kind, .internalTransfer)
+        XCTAssertEqual(confirmed?.destination, "Internal Transfer")
+        XCTAssertEqual(confirmed?.amountSompi, 375_000_000)
+        XCTAssertEqual(confirmed?.status, .confirmed)
+    }
+
+    @MainActor
+    func testAddedUTXOTransactionPublishesImmediately() {
+        let store = WalletStore()
+        let profileID = UUID()
+        let transactionID = String(repeating: "b", count: 64)
+
+        store.recordObservedUTXOTransactions(
+            profileID: profileID,
+            addedUTXOs: [
+                WalletUTXO(
+                    txID: transactionID,
+                    index: 0,
+                    amount: 75_000_000,
+                    scriptPublicKey: [],
+                    blockDAAScore: 1,
+                    covenantID: nil
+                ),
+                WalletUTXO(
+                    txID: transactionID,
+                    index: 1,
+                    amount: 25_000_000,
+                    scriptPublicKey: [],
+                    blockDAAScore: 1,
+                    covenantID: nil
+                )
+            ]
+        )
+
+        let transaction = store.transactions.first {
+            $0.profileID == profileID && $0.transactionID == transactionID
+        }
+        XCTAssertEqual(transaction?.amountSompi, 100_000_000)
+        XCTAssertEqual(transaction?.direction, .received)
+        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertNil(transaction?.acceptingBlockBlueScore)
+        XCTAssertEqual(store.pendingTransactions.map(\.transactionID), [transactionID])
+    }
 
     func testMultipleBuysUseWeightedAverageCost() {
         let summary = PortfolioHoldingSummary(transactions: [
@@ -472,6 +1228,31 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
 
         XCTAssertEqual(points.map(\.valueUSD), [2, 3, 2.4])
+    }
+
+    func testChartValueDomainFollowsRealSpreadInsteadOfPortfolioMagnitude() {
+        let points = [
+            PortfolioChartPoint(timestamp: baseDate, valueUSD: 1_000),
+            PortfolioChartPoint(timestamp: baseDate.addingTimeInterval(60), valueUSD: 1_010)
+        ]
+
+        let domain = PortfolioChartBuilder.valueDomain(for: points)
+
+        XCTAssertEqual(domain.lowerBound, 998.8, accuracy: 0.000_000_01)
+        XCTAssertEqual(domain.upperBound, 1_011.2, accuracy: 0.000_000_01)
+    }
+
+    func testChartValueDomainDoesNotForceOneDollarRangeForSmallPortfolio() {
+        let points = [
+            PortfolioChartPoint(timestamp: baseDate, valueUSD: 0.10),
+            PortfolioChartPoint(timestamp: baseDate.addingTimeInterval(60), valueUSD: 0.11)
+        ]
+
+        let domain = PortfolioChartBuilder.valueDomain(for: points)
+
+        XCTAssertLessThan(domain.upperBound - domain.lowerBound, 0.02)
+        XCTAssertGreaterThan(domain.upperBound, 0.11)
+        XCTAssertLessThan(domain.lowerBound, 0.10)
     }
 
     func testDownsamplingPreservesEndpointsAndExtremes() {
@@ -694,6 +1475,537 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertTrue(preview.issues.isEmpty)
     }
 
+    func testPortfolioCSVExportRoundTripsTransactionsAndEscapesNotes() throws {
+        let portfolioID = UUID()
+        let later = PortfolioTransaction(
+            portfolioID: portfolioID,
+            type: PortfolioTransactionType.sell.rawValue,
+            kasAmount: 25.5,
+            kasPriceUSD: 0.12345678,
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-14T16:30:00Z")!,
+            notes: "Partial sale, \"summer\"\nlot",
+            feeUSD: 1.25
+        )
+        let earlier = PortfolioTransaction(
+            portfolioID: portfolioID,
+            type: PortfolioTransactionType.buy.rawValue,
+            kasAmount: 100,
+            kasPriceUSD: 0.10,
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-13T14:00:00Z")!,
+            notes: "First lot"
+        )
+
+        let exportedData = PortfolioCSVExporter.data(transactions: [later, earlier])
+        let exportedText = String(decoding: exportedData, as: UTF8.self)
+        XCTAssertTrue(exportedText.hasPrefix("\u{feff}Date (UTC-4:00),Coin,Type"))
+        let exportedRows = exportedText.components(separatedBy: "\r\n")
+        XCTAssertTrue(exportedRows[1].hasPrefix("2026-08-14 12:30:00"))
+        XCTAssertTrue(exportedRows[2].hasPrefix("2026-08-13 10:00:00"))
+
+        let preview = try PortfolioCSVImporter.preview(
+            data: exportedData,
+            fileName: "export.csv",
+            portfolioID: portfolioID,
+            existingTransactions: [],
+            now: ISO8601DateFormatter().date(from: "2026-08-15T12:00:00Z")!
+        )
+
+        XCTAssertEqual(preview.transactions.count, 2)
+        XCTAssertEqual(preview.transactions.map(\.type), [.sell, .buy])
+        XCTAssertEqual(preview.transactions[0].notes, "Partial sale, \"summer\"\nlot")
+        XCTAssertEqual(preview.transactions[0].feeUSD, 1.25, accuracy: 0.000_001)
+        XCTAssertTrue(preview.issues.isEmpty)
+    }
+
+    func testPortfolioCSVExportCreatesNativeFriendlyFileName() {
+        let date = ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z")!
+        XCTAssertEqual(
+            PortfolioCSVExporter.suggestedFileName(portfolioName: "Long Term / Wallet", date: date),
+            "KasSigner-Long-Term-Wallet-Transactions-2026-08-18"
+        )
+    }
+
+    func testWalletTransactionCSVExportUsesLocalDatesAndEscapesNotes() {
+        let timeZone = TimeZone(secondsFromGMT: -4 * 60 * 60)!
+        let earlier = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-20T03:40:00Z")!,
+            kind: .received,
+            priceUSD: 0.029,
+            amountKas: 9.85,
+            notes: "Gift, \"summer\"\nwallet"
+        )
+        let later = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-21T15:11:00Z")!,
+            kind: .sent,
+            priceUSD: 0.03,
+            amountKas: 28,
+            notes: "Payment"
+        )
+
+        let data = WalletTransactionCSVExporter.data(
+            records: [later, earlier],
+            timeZone: timeZone
+        )
+        let text = String(decoding: data, as: UTF8.self)
+
+        XCTAssertTrue(text.hasPrefix("\u{feff}Date (Local Time),Coin,Type,Price (USD),Amount (KAS),Value (USD),Notes\r\n"))
+        XCTAssertTrue(text.contains("2026-08-19 23:40:00 -04:00,KAS,Received,0.029,9.85,0.28565"))
+        XCTAssertTrue(text.contains("2026-08-21 11:11:00 -04:00,KAS,Sent,0.03,28,0.84,Payment"))
+        XCTAssertTrue(text.contains("\"Gift, \"\"summer\"\"\nwallet\""))
+        XCTAssertLessThan(
+            text.range(of: "Sent")!.lowerBound,
+            text.range(of: "Received")!.lowerBound
+        )
+    }
+
+    func testWalletTransactionCSVExportCreatesWalletSpecificFileName() {
+        let date = ISO8601DateFormatter().date(from: "2026-08-21T12:00:00Z")!
+        XCTAssertEqual(
+            WalletTransactionCSVExporter.suggestedFileName(
+                walletName: "Cold / Savings Wallet",
+                date: date
+            ),
+            "KasSigner-Cold-Savings-Wallet-Transactions-2026-08-21"
+        )
+    }
+
+    func testWalletTransactionCSVExportIncludesInternalTransferValue() {
+        let record = WalletTransactionCSVRecord(
+            timestamp: ISO8601DateFormatter().date(from: "2026-08-21T15:11:00Z")!,
+            kind: .internalTransfer,
+            priceUSD: 0.03,
+            amountKas: 250,
+            notes: "Moved to savings"
+        )
+
+        let text = String(
+            decoding: WalletTransactionCSVExporter.data(records: [record]),
+            as: UTF8.self
+        )
+        XCTAssertTrue(text.contains(",KAS,Internal Transfer,0.03,250,7.5,Moved to savings"))
+    }
+
+    func testLegacyBroadcastTransactionDecodesAsPendingSentTransaction() throws {
+        struct LegacyTransaction: Encodable {
+            let id: UUID
+            let profileID: UUID
+            let transactionID: String
+            let destination: String
+            let amountSompi: UInt64
+            let feeSompi: UInt64
+            let broadcastAt: Date
+        }
+
+        let legacy = LegacyTransaction(
+            id: UUID(),
+            profileID: UUID(),
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100,
+            feeSompi: 2,
+            broadcastAt: baseDate
+        )
+        let decoded = try JSONDecoder().decode(
+            WalletTransaction.self,
+            from: JSONEncoder().encode(legacy)
+        )
+
+        XCTAssertEqual(decoded.direction, .sent)
+        XCTAssertEqual(decoded.kind, .sent)
+        XCTAssertEqual(decoded.status, .pending)
+        XCTAssertNil(decoded.acceptingBlockBlueScore)
+    }
+
+    func testTransactionConfirmationCountUsesTwoHundredFiftyConfirmationThreshold() {
+        let transaction = WalletTransaction(
+            profileID: UUID(),
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:destination",
+            amountSompi: 100_000_000,
+            feeSompi: 1_000,
+            broadcastAt: Date(),
+            direction: .sent,
+            status: .confirmed,
+            acceptingBlockBlueScore: 1_000
+        )
+
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_000), 0)
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_249), 249)
+        XCTAssertEqual(transaction.confirmationCount(currentBlueScore: 1_250), 250)
+        XCTAssertTrue(transaction.needsConfirmationUpdates(currentBlueScore: 1_249))
+        XCTAssertFalse(transaction.needsConfirmationUpdates(currentBlueScore: 1_250))
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: nil),
+            .checking
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: 1_249),
+            .count(249)
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(currentBlueScore: 1_250),
+            .confirmed
+        )
+        XCTAssertEqual(
+            transaction.confirmationPresentation(
+                currentBlueScore: 1_250,
+                presentsPending: true
+            ),
+            .pending
+        )
+    }
+
+    @MainActor
+    func testCachedVirtualBlueScoreIsAvailableBeforeNetworkRefresh() throws {
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let previousSession = WalletSyncService(defaults: defaults)
+        previousSession.rememberVirtualBlueScore(1_250)
+        previousSession.rememberVirtualBlueScore(1_249)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1250"
+        )
+
+        let service = WalletSyncService(defaults: defaults)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+
+        service.preload(profile: WalletProfile(name: "Cached", kpub: "kpub-test"))
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+    }
+
+    @MainActor
+    func testLiveBlueScoreDoesNotPublishEveryNotificationAndFlushesOnBackground() throws {
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let service = WalletSyncService(defaults: defaults)
+        service.observeVirtualBlueScore(1_250)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+
+        service.observeVirtualBlueScore(1_251)
+        service.observeVirtualBlueScore(1_252)
+        XCTAssertEqual(service.virtualBlueScore, 1_250)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1250"
+        )
+
+        service.persistObservedVirtualBlueScore()
+        XCTAssertEqual(service.virtualBlueScore, 1_252)
+        XCTAssertEqual(
+            defaults.string(forKey: WalletSyncService.cachedVirtualBlueScoreKey),
+            "1252"
+        )
+    }
+
+    @MainActor
+    func testSinkBlueScoreSubscriptionAndNotificationParsing() {
+        let request = KaspaLiveRPCService.sinkBlueScoreSubscriptionRequest(
+            requestID: 7
+        )
+        XCTAssertEqual(
+            [UInt8](request),
+            [
+                1, 7, 0, 0, 0, 0, 0, 0, 0, 3,
+                12, 0, 0, 0,
+                1, 0, 5, 0, 0, 0,
+                2, 0, 0, 0, 1, 0
+            ]
+        )
+
+        let score: UInt64 = 521_833_464
+        var notification = Data([0, 0, 0, 1, 0, 5, 0, 10, 0, 0, 0, 1, 0])
+        withUnsafeBytes(of: score.littleEndian) {
+            notification.append(contentsOf: $0)
+        }
+        XCTAssertEqual(
+            KaspaLiveRPCService.sinkBlueScore(from: notification),
+            score
+        )
+    }
+
+    func testDiscoveryRetainsFiftyAddressesAfterHighestHistoricalUse() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[65], change[31]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 116)
+        XCTAssertEqual(plan.changeCount, 82)
+        XCTAssertEqual(plan.nextReceiveIndex, 66)
+        XCTAssertEqual(plan.nextChangeIndex, 32)
+        XCTAssertFalse(plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryFindsActivityAfterAHistoryGap() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: [],
+            activeAddresses: [receive[2], receive[107]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 158)
+        XCTAssertEqual(plan.nextReceiveIndex, 108)
+    }
+
+    func testDiscoveryExpandsPastSavedRangeForSpentOnlyActivity() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        // The wallet previously retained only indices 0–49. Historical
+        // activity at 70 must still advance coverage even with no UTXO there.
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[70]],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.nextReceiveIndex, 71)
+        XCTAssertEqual(plan.receiveCount, 121)
+        XCTAssertEqual(plan.changeCount, 50)
+    }
+
+    func testDiscoveryRetainsFiftyFreshAddressesForUnusedWallet() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [],
+            currentNextReceiveIndex: 0,
+            currentNextChangeIndex: 0
+        )
+
+        XCTAssertEqual(plan.receiveCount, 50)
+        XCTAssertEqual(plan.changeCount, 50)
+        XCTAssertEqual(plan.nextReceiveIndex, 0)
+        XCTAssertEqual(plan.nextChangeIndex, 0)
+        XCTAssertFalse(plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryPreservesLocalFrontierAndFiftyAddressBuffer() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[4], change[2]],
+            currentNextReceiveIndex: 80,
+            currentNextChangeIndex: 40
+        )
+
+        XCTAssertEqual(plan.receiveCount, 130)
+        XCTAssertEqual(plan.changeCount, 90)
+        XCTAssertEqual(plan.nextReceiveIndex, 80)
+        XCTAssertEqual(plan.nextChangeIndex, 40)
+        XCTAssertFalse(plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryPreservesReservedIndicesAndReportsSafetyLimit() {
+        let receive = (0..<512).map { "kaspa:receive-\($0)" }
+        let change = (0..<512).map { "kaspa:change-\($0)" }
+        let plan = WalletSyncService.discoveryPlan(
+            receiveAddresses: receive,
+            changeAddresses: change,
+            activeAddresses: [receive[500]],
+            currentNextReceiveIndex: 507,
+            currentNextChangeIndex: 9
+        )
+
+        XCTAssertEqual(plan.receiveCount, 512)
+        XCTAssertEqual(plan.nextReceiveIndex, 507)
+        XCTAssertEqual(plan.nextChangeIndex, 9)
+        XCTAssertTrue(plan.reachedSafetyLimit)
+    }
+
+    func testLegacyWalletProfileDoesNotUnexpectedlyRequireDiscovery() throws {
+        let profile = WalletProfile(
+            name: "Legacy",
+            kpub: "kpub-test",
+            receiveAddresses: ["kaspa:receive"],
+            changeAddresses: ["kaspa:change"]
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(profile))
+                as? [String: Any]
+        )
+        object.removeValue(forKey: "requiresInitialDiscovery")
+        object.removeValue(forKey: "requiresInitialHistorySync")
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(WalletProfile.self, from: legacyData)
+
+        XCTAssertFalse(decoded.requiresInitialDiscovery)
+        XCTAssertFalse(decoded.requiresInitialHistorySync)
+    }
+
+    func testHistoricalDiscoveryTimestampPersistsWithoutBreakingOlderProfiles() throws {
+        var profile = WalletProfile(name: "Coverage", kpub: "kpub-test")
+        let legacyData = try JSONEncoder().encode(profile)
+        let legacy = try JSONDecoder().decode(WalletProfile.self, from: legacyData)
+        XCTAssertNil(legacy.lastHistoricalDiscoveryAt)
+
+        let checkedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        profile.lastHistoricalDiscoveryAt = checkedAt
+        let restored = try JSONDecoder().decode(
+            WalletProfile.self,
+            from: JSONEncoder().encode(profile)
+        )
+        XCTAssertEqual(restored.lastHistoricalDiscoveryAt, checkedAt)
+    }
+
+    func testAcceptedHistoryWaitsForBlueScoreBeforeShowingConfirmed() {
+        let profileID = UUID()
+        let walletAddress = "kaspa:wallet"
+        let indexed = IndexedTransaction(
+            transactionID: String(repeating: "b", count: 64),
+            blockTime: 1_700_000_000_000,
+            isAccepted: true,
+            acceptingBlockTime: 1_700_000_001_000,
+            acceptingBlockBlueScore: nil,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: "kaspa:external",
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(
+                    amount: 1_000,
+                    scriptPublicKeyAddress: walletAddress
+                )
+            ]
+        )
+
+        let transaction = TransactionHistoryClient().mapTransactions(
+            [indexed],
+            profileID: profileID,
+            receiveAddresses: Set([walletAddress]),
+            changeAddresses: []
+        ).first
+
+        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertNil(transaction?.acceptingBlockBlueScore)
+    }
+
+    func testIndexedHistoryMapsIncomingAndOutgoingNetActivity() {
+        let profileID = UUID()
+        let walletAddress = "kaspa:wallet"
+        let externalAddress = "kaspa:external"
+        let client = TransactionHistoryClient()
+        let incoming = IndexedTransaction(
+            transactionID: String(repeating: "1", count: 64),
+            blockTime: 1_700_000_000_000,
+            isAccepted: true,
+            acceptingBlockTime: 1_700_000_001_000,
+            acceptingBlockBlueScore: 1_000,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: externalAddress,
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(amount: 900, scriptPublicKeyAddress: walletAddress),
+                IndexedTransactionOutput(amount: 90, scriptPublicKeyAddress: externalAddress)
+            ]
+        )
+        let outgoing = IndexedTransaction(
+            transactionID: String(repeating: "2", count: 64),
+            blockTime: 1_700_000_002_000,
+            isAccepted: true,
+            acceptingBlockTime: nil,
+            acceptingBlockBlueScore: 1_010,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: walletAddress,
+                    previousOutpointAmount: 1_000
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(amount: 600, scriptPublicKeyAddress: externalAddress),
+                IndexedTransactionOutput(amount: 390, scriptPublicKeyAddress: walletAddress)
+            ]
+        )
+
+        let transactions = client.mapTransactions(
+            [incoming, outgoing, incoming],
+            profileID: profileID,
+            receiveAddresses: Set([walletAddress]),
+            changeAddresses: []
+        )
+
+        XCTAssertEqual(transactions.count, 2)
+        let received = transactions.first { $0.direction == .received }
+        XCTAssertEqual(received?.amountSompi, 900)
+        XCTAssertEqual(received?.feeSompi, 0)
+        XCTAssertEqual(received?.destination, externalAddress)
+        XCTAssertEqual(received?.status, .confirmed)
+        XCTAssertEqual(received?.acceptingBlockBlueScore, 1_000)
+
+        let sent = transactions.first { $0.direction == .sent }
+        XCTAssertEqual(sent?.amountSompi, 600)
+        XCTAssertEqual(sent?.feeSompi, 10)
+        XCTAssertEqual(sent?.destination, externalAddress)
+        XCTAssertEqual(sent?.status, .confirmed)
+        XCTAssertEqual(sent?.acceptingBlockBlueScore, 1_010)
+    }
+
+    func testIndexedHistoryMapsInternalDestinationSeparatelyFromChange() {
+        let profileID = UUID()
+        let inputAddress = "kaspa:qz5esder"
+        let internalReceiveAddress = "kaspa:qq47r9e5"
+        let changeAddress = "kaspa:qq0ycwwa"
+        let client = TransactionHistoryClient()
+        let indexed = IndexedTransaction(
+            transactionID: "c29d9dc3f1ce740b9c743563483a5d0d9ab214358faa7bb7cb25bbb1d7d6b986",
+            blockTime: 1_787_763_994_363,
+            isAccepted: true,
+            acceptingBlockTime: 1_787_763_994_583,
+            acceptingBlockBlueScore: 2_000,
+            inputs: [
+                IndexedTransactionInput(
+                    previousOutpointAddress: inputAddress,
+                    previousOutpointAmount: 30_905_800_294
+                )
+            ],
+            outputs: [
+                IndexedTransactionOutput(
+                    amount: 2_400_000_000,
+                    scriptPublicKeyAddress: internalReceiveAddress
+                ),
+                IndexedTransactionOutput(
+                    amount: 28_505_471_694,
+                    scriptPublicKeyAddress: changeAddress
+                )
+            ]
+        )
+
+        let transaction = client.mapTransactions(
+            [indexed],
+            profileID: profileID,
+            receiveAddresses: Set([inputAddress, internalReceiveAddress]),
+            changeAddresses: Set([changeAddress])
+        ).first
+
+        XCTAssertEqual(transaction?.kind, .internalTransfer)
+        XCTAssertEqual(transaction?.destination, "Internal Transfer")
+        XCTAssertEqual(transaction?.amountSompi, 2_400_000_000)
+        XCTAssertEqual(transaction?.feeSompi, 328_600)
+    }
+
     func testOldDatedManualTransactionUsesHistoricalPriceInsteadOfLivePrice() {
         let oldTransactionDate = baseDate.addingTimeInterval(30)
         let now = baseDate.addingTimeInterval(86_400 * 30)
@@ -722,6 +2034,442 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
 
         XCTAssertEqual(resolvedPrice!, 0.0255, accuracy: 0.000_000_01)
+    }
+
+    func testProtectedWalletStorageUsesCompleteProtectionAndBackupExclusion() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let payload = ["kaspa:receive", "kaspa:change"]
+
+        XCTAssertTrue(storage.save(payload, fileName: "test.json"))
+        XCTAssertEqual(
+            storage.load([String].self, fileName: "test.json"),
+            payload
+        )
+
+        let fileURL = root.appending(path: "test.json")
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: fileURL.path
+        )
+        #if targetEnvironment(simulator)
+        // CoreSimulator does not expose NSFileProtection attributes even when
+        // the write and setAttributes calls succeed. The device build verifies
+        // the actual protection class; here we still verify the protected write.
+        XCTAssertEqual(try Data(contentsOf: fileURL), try JSONEncoder().encode(payload))
+        #else
+        XCTAssertEqual(
+            attributes[.protectionKey] as? FileProtectionType,
+            .complete
+        )
+        #endif
+        XCTAssertEqual(
+            try fileURL.resourceValues(
+                forKeys: [.isExcludedFromBackupKey]
+            ).isExcludedFromBackup,
+            true
+        )
+    }
+
+    @MainActor
+    func testLegacyWalletMigratesButLegacySigningDraftIsPurged() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let profile = WalletProfile(
+            name: "Migrated Wallet",
+            kpub: "kpub-migration-test",
+            receiveAddresses: ["kaspa:receive"],
+            changeAddresses: ["kaspa:change"]
+        )
+        defaults.set(
+            try JSONEncoder().encode([profile]),
+            forKey: "kassigner.walletProfiles.v1"
+        )
+        defaults.set(profile.id.uuidString, forKey: "kassigner.selectedWalletProfile.v1")
+        defaults.set(Data("legacy-draft".utf8), forKey: "kassigner.sendSessions.v1")
+
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertTrue(store.sendSessions.isEmpty)
+        XCTAssertTrue(storage.contains(fileName: "wallet-state.json"))
+        XCTAssertNil(defaults.object(forKey: "kassigner.walletProfiles.v1"))
+        XCTAssertNil(defaults.object(forKey: "kassigner.sendSessions.v1"))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedStore.profiles, [profile])
+        XCTAssertTrue(relaunchedStore.sendSessions.isEmpty)
+    }
+
+    @MainActor
+    func testFailedProtectedMigrationDoesNotDeleteLegacyWallet() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data("blocks-directory-creation".utf8).write(to: root)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let profile = WalletProfile(
+            name: "Legacy Wallet",
+            kpub: "kpub-preserved-after-failed-migration"
+        )
+        defaults.set(
+            try JSONEncoder().encode([profile]),
+            forKey: "kassigner.walletProfiles.v1"
+        )
+
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: FileManager.default.temporaryDirectory
+                .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        )
+
+        XCTAssertEqual(store.profiles, [profile])
+        XCTAssertNotNil(defaults.object(forKey: "kassigner.walletProfiles.v1"))
+    }
+
+    @MainActor
+    func testSendSessionsAreFreshMemoryOnlyAndRejectStaleUpdates() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "Session Wallet",
+            kpub: "kpub-session-test",
+            changeAddresses: ["kaspa:change"]
+        )
+        store.add(profile)
+        let utxo = WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: 0,
+            amount: 100_000_000,
+            scriptPublicKey: [0x20],
+            blockDAAScore: 1,
+            covenantID: nil
+        )
+
+        var first = try XCTUnwrap(
+            store.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo])
+        )
+        let second = try XCTUnwrap(
+            store.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo])
+        )
+        XCTAssertNotEqual(first.id, second.id)
+
+        first.destination = "kaspa:stale-destination"
+        store.updateSendSession(first)
+        XCTAssertEqual(
+            store.sendSession(id: second.id, profileID: profile.id)?.destination,
+            ""
+        )
+
+        store.cancelSendSession(id: second.id, profileID: profile.id)
+        XCTAssertNil(store.sendSession(id: second.id, profileID: profile.id))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertTrue(relaunchedStore.sendSessions.isEmpty)
+        XCTAssertEqual(relaunchedStore.profiles, [profile])
+    }
+
+    @MainActor
+    func testSendSessionTransactionTypesSelectRequiredFreshChangeAddresses() throws {
+        let store = WalletStore()
+        let profile = WalletProfile(
+            name: "Mode Wallet",
+            kpub: "kpub-mode-test",
+            changeAddresses: (0..<6).map { "kaspa:change-\($0)" },
+            nextChangeIndex: 1
+        )
+        store.add(profile)
+        let utxo = WalletUTXO(
+            txID: String(repeating: "b", count: 64),
+            index: 0,
+            amount: 1_000_000_000,
+            scriptPublicKey: [0x20],
+            blockDAAScore: 1,
+            covenantID: nil
+        )
+
+        let standard = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .standard
+        ))
+        XCTAssertEqual(standard.transactionType, .standard)
+        XCTAssertEqual(standard.changeOutputs.map(\.addressIndex), [1])
+
+        let privacy = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .privacyFocused
+        ))
+        XCTAssertEqual(privacy.transactionType, .privacyFocused)
+        XCTAssertEqual(privacy.changeOutputs.map(\.addressIndex), [1, 2])
+
+        let decoy = try XCTUnwrap(store.beginSendSession(
+            profileID: profile.id,
+            selectedUTXOs: [utxo],
+            transactionType: .decoy
+        ))
+        XCTAssertEqual(decoy.transactionType, .decoy)
+        XCTAssertEqual(decoy.changeOutputs.map(\.addressIndex), [1, 2, 3, 4])
+    }
+
+    @MainActor
+    func testImportedWalletIsNotPersistedUntilDiscoveryCommits() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let completed = WalletProfile(name: "Completed", kpub: "kpub-completed")
+        let pending = WalletProfile(
+            name: "Pending",
+            kpub: "kpub-pending",
+            requiresInitialDiscovery: true,
+            requiresInitialHistorySync: true
+        )
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        store.add(completed)
+        store.beginPendingImport(pending)
+
+        XCTAssertEqual(store.selectedProfile, pending)
+        XCTAssertEqual(store.profiles, [completed])
+
+        let relaunchedBeforeCommit = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedBeforeCommit.profiles, [completed])
+        XCTAssertEqual(relaunchedBeforeCommit.selectedProfile, completed)
+
+        var discovered = pending
+        discovered.requiresInitialDiscovery = false
+        store.commitPendingImport(discovered)
+
+        let relaunchedAfterCommit = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunchedAfterCommit.profiles, [completed, discovered])
+        XCTAssertEqual(relaunchedAfterCommit.selectedProfile, discovered)
+        XCTAssertTrue(relaunchedAfterCommit.selectedProfile?.requiresInitialHistorySync == true)
+
+        var historyComplete = discovered
+        historyComplete.requiresInitialHistorySync = false
+        store.update(historyComplete)
+
+        let relaunchedAfterHistory = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(relaunchedAfterHistory.selectedProfile?.requiresInitialHistorySync ?? true)
+    }
+
+    @MainActor
+    func testInitialHistoryStaysHiddenUntilCacheSaveSucceedsAndRetrySurvivesRelaunch() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try Data("blocks-cache-directory".utf8).write(to: cache)
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "History Retry",
+            kpub: "kpub-history-retry",
+            requiresInitialHistorySync: true
+        )
+        store.add(profile)
+
+        let transaction = WalletTransaction(
+            profileID: profile.id,
+            transactionID: String(repeating: "a", count: 64),
+            destination: "kaspa:receive",
+            amountSompi: 100_000_000,
+            feeSompi: 0,
+            broadcastAt: Date(),
+            direction: .received,
+            status: .confirmed
+        )
+        let history = TransactionHistorySyncResult(transactions: [transaction], graphs: [])
+        let service = WalletSyncService(defaults: defaults)
+        service.preload(profile: profile)
+
+        let didInitiallySave = await service.commitIndexedTransactionHistory(
+            history,
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertFalse(didInitiallySave)
+        service.completeTransactionHistoryReconciliation(
+            profileID: profile.id,
+            walletStore: store
+        )
+        XCTAssertTrue(store.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertNotNil(service.transactionHistoryError)
+
+        let beforeRetry = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertTrue(beforeRetry.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertTrue(beforeRetry.transactions.isEmpty)
+
+        try FileManager.default.removeItem(at: cache)
+        let didRetryLocally = await service.retryInitialHistoryPersistenceIfNeeded(
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didRetryLocally)
+        XCTAssertFalse(store.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertNil(service.transactionHistoryError)
+
+        let afterRetry = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(afterRetry.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertEqual(afterRetry.transactions.map(\.transactionID), [transaction.transactionID])
+    }
+
+    @MainActor
+    func testInitialHistoryStaysHiddenWhenCompletionStateCannotBeSaved() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        let profile = WalletProfile(
+            name: "Completion Retry",
+            kpub: "kpub-completion-retry",
+            requiresInitialHistorySync: true
+        )
+        store.add(profile)
+        let service = WalletSyncService(defaults: defaults)
+        service.preload(profile: profile)
+        let didSaveHistory = await service.commitIndexedTransactionHistory(
+            TransactionHistorySyncResult(transactions: [], graphs: []),
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didSaveHistory)
+
+        let stateFile = root.appending(path: "wallet-state.json")
+        try FileManager.default.removeItem(at: stateFile)
+        try FileManager.default.createDirectory(at: stateFile, withIntermediateDirectories: false)
+        service.completeTransactionHistoryReconciliation(
+            profileID: profile.id,
+            walletStore: store
+        )
+        XCTAssertTrue(store.selectedProfile?.requiresInitialHistorySync == true)
+        XCTAssertNotNil(service.transactionHistoryError)
+
+        try FileManager.default.removeItem(at: stateFile)
+        let didRetryLocally = await service.retryInitialHistoryPersistenceIfNeeded(
+            profile: profile,
+            walletStore: store
+        )
+        XCTAssertTrue(didRetryLocally)
+        XCTAssertFalse(store.selectedProfile?.requiresInitialHistorySync ?? true)
+        XCTAssertNil(service.transactionHistoryError)
+
+        let relaunched = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertFalse(relaunched.selectedProfile?.requiresInitialHistorySync ?? true)
+    }
+
+    @MainActor
+    func testHistoricalCoverageAndFreshBufferSurviveWalletStoreRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let cache = root.appending(path: "history", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        var profile = WalletProfile(name: "Coverage", kpub: "kpub-test")
+        store.add(profile)
+        profile.receiveAddresses = (0..<121).map { "kaspa:receive-\($0)" }
+        profile.changeAddresses = (0..<50).map { "kaspa:change-\($0)" }
+        profile.nextReceiveIndex = 71
+        profile.lastHistoricalDiscoveryAt = Date(timeIntervalSince1970: 1_800_000_000)
+        XCTAssertTrue(store.update(profile))
+
+        let relaunched = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: cache
+        )
+        XCTAssertEqual(relaunched.selectedProfile, profile)
+        XCTAssertEqual(relaunched.selectedProfile?.receiveAddresses.count, 121)
+        XCTAssertEqual(relaunched.selectedProfile?.nextReceiveIndex, 71)
     }
 
     private var utcCalendar: Calendar {

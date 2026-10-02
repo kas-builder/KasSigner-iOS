@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct SettingsView: View {
-    let onWalletSelected: (() -> Void)?
+    let onWalletSelected: ((WalletProfile) -> Void)?
 
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
@@ -16,8 +16,9 @@ struct SettingsView: View {
     @State private var profileBeingRenamed: WalletProfile?
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
+    @State private var showingAccountReorder = false
 
-    init(onWalletSelected: (() -> Void)? = nil) {
+    init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
     }
 
@@ -28,9 +29,12 @@ struct SettingsView: View {
                     Section("Accounts") {
                         ForEach(walletStore.profiles) { profile in
                             Button {
-                                walletStore.selectedProfileID = profile.id
-                                syncService.preload(profile: profile)
-                                onWalletSelected?()
+                                if let onWalletSelected {
+                                    onWalletSelected(profile)
+                                } else {
+                                    walletStore.selectedProfileID = profile.id
+                                    syncService.preload(profile: profile)
+                                }
                             } label: {
                                 HStack {
                                     VStack(alignment: .leading) {
@@ -118,6 +122,14 @@ struct SettingsView: View {
                         }
                     }
 
+                    Toggle("Graph Colors", isOn: $preferences.showsGraphColors)
+
+                    Picker("UTXO Card Default", selection: $preferences.utxoCardDefault) {
+                        ForEach(UTXOCardDefault.allCases) { option in
+                            Text(option.title).tag(option)
+                        }
+                    }
+
                     Picker("Address Status", selection: $preferences.addressStatusDisplayMode) {
                         ForEach(AddressStatusDisplayMode.allCases) { mode in
                             Text(mode.title).tag(mode)
@@ -195,7 +207,7 @@ struct SettingsView: View {
                 }
 
                 Section("About") {
-                    LabeledContent("App", value: "KasSigner")
+                    LabeledContent("App", value: "KasSigner-iOS")
                     LabeledContent(
                         "Version",
                         value: Bundle.main.object(
@@ -242,12 +254,24 @@ struct SettingsView: View {
                 Text("Enter a new name for this watch-only account.")
             }
             .navigationTitle("Settings")
-            .alert(
-                "Delete account?",
-                isPresented: deleteAlertIsPresented,
+            .toolbar {
+                if walletStore.profiles.count > 1 {
+                    Button("Edit") {
+                        showingAccountReorder = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showingAccountReorder) {
+                AccountReorderView()
+                    .environmentObject(walletStore)
+            }
+            .confirmationDialog(
+                "Delete Account?",
+                isPresented: deleteConfirmationIsPresented,
+                titleVisibility: .visible,
                 presenting: profilePendingDeletion
             ) { profile in
-                Button("Delete", role: .destructive) {
+                Button("Delete Account", role: .destructive) {
                     deleteProfile(profile)
                 }
 
@@ -282,7 +306,7 @@ struct SettingsView: View {
         )
     }
 
-    private var deleteAlertIsPresented: Binding<Bool> {
+    private var deleteConfirmationIsPresented: Binding<Bool> {
         Binding(
             get: { profilePendingDeletion != nil },
             set: { isPresented in
@@ -362,7 +386,7 @@ struct SettingsView: View {
     }
 
     private func copyKpub(_ profile: WalletProfile) {
-        UIPasteboard.general.string = profile.kpub
+        PrivatePasteboard.copy(profile.kpub)
         copyFeedbackCenter.showCopied(profile.kpub, label: "kpub")
     }
 
@@ -396,6 +420,46 @@ struct SettingsView: View {
             await refreshSelectedAccount()
         } catch {
             derivationError = error.localizedDescription
+        }
+    }
+}
+
+private struct AccountReorderView: View {
+    @EnvironmentObject private var walletStore: WalletStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Accounts") {
+                    ForEach(walletStore.profiles) { profile in
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(profile.name)
+                                Text("Watch-only account")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if profile.id == walletStore.selectedProfile?.id {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                    .onMove(perform: walletStore.moveProfiles)
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("Reorder Accounts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }
@@ -465,6 +529,13 @@ private struct OtherSettingsView: View {
                 } else {
                     Text("Use \(preferences.priceProvider.title) as the preferred API. Automatic fallback will remain available if it cannot be reached.")
                 }
+            }
+
+            Section {
+                Toggle(
+                    "Show Converter in Wallet",
+                    isOn: $preferences.showsCurrencyConverterInWallet
+                )
             }
         }
         .navigationTitle("Currency")

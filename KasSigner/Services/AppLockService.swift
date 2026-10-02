@@ -76,7 +76,9 @@ final class AppLockService: ObservableObject {
     }
 
     func enableAppLock() async -> Bool {
-        let succeeded = await authenticate(reason: "Use Face ID to enable App Lock.")
+        let succeeded = await authenticate(
+            reason: "Use \(biometricName) to enable App Lock."
+        )
         if succeeded {
             isEnabled = true
             isLocked = false
@@ -119,6 +121,13 @@ final class AppLockService: ObservableObject {
         await authenticate(reason: "Confirm creation of this Protected Vault")
     }
 
+    func authorizeTransactionBroadcast() async -> Bool {
+        await authenticate(
+            policy: .deviceOwnerAuthenticationWithBiometrics,
+            reason: "Authenticate to broadcast this transaction."
+        )
+    }
+
     func suspendPrivacyCoverForCurrentSession() {
         isPrivacyCoverSuspendedForSession = true
     }
@@ -142,7 +151,10 @@ final class AppLockService: ObservableObject {
         self.backgroundedAt = nil
     }
 
-    private func authenticate(reason: String) async -> Bool {
+    private func authenticate(
+        policy: LAPolicy = .deviceOwnerAuthentication,
+        reason: String
+    ) async -> Bool {
         guard !isAuthenticating else { return false }
         isAuthenticating = true
         authenticationError = nil
@@ -152,14 +164,18 @@ final class AppLockService: ObservableObject {
         context.localizedCancelTitle = "Cancel"
 
         var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
-            authenticationError = error?.localizedDescription ?? "Face ID or a device passcode is not available."
+        guard context.canEvaluatePolicy(policy, error: &error) else {
+            authenticationError = error?.localizedDescription ?? (
+                policy == .deviceOwnerAuthenticationWithBiometrics
+                    ? "Face ID or Touch ID is not available."
+                    : "\(biometricName) or a device passcode is not available."
+            )
             return false
         }
 
         do {
             return try await context.evaluatePolicy(
-                .deviceOwnerAuthentication,
+                policy,
                 localizedReason: reason
             )
         } catch {

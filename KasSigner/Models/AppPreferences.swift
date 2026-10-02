@@ -36,6 +36,16 @@ enum KasBalanceFormatter {
             .number.precision(.fractionLength(decimalPlaces.rawValue))
         )
     }
+
+    static func string(
+        fromSompi sompi: UInt64,
+        decimalPlaces: KasBalanceDecimalPlaces
+    ) -> String {
+        string(
+            from: Double(sompi) / 100_000_000,
+            decimalPlaces: decimalPlaces
+        )
+    }
 }
 
 enum ExplorerChoice: String, CaseIterable, Identifiable {
@@ -140,27 +150,57 @@ enum PriceProviderChoice: String, CaseIterable, Identifiable {
     }
 }
 
+enum UTXOCardDefault: String, CaseIterable, Identifiable {
+    case off
+    case kyc
+    case nonKYC
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .kyc: "KYC"
+        case .nonKYC: "Non-KYC"
+        }
+    }
+
+    var badgeStatus: UTXOKYCStatus? {
+        switch self {
+        case .off: nil
+        case .kyc: .kyc
+        case .nonKYC: .nonKYC
+        }
+    }
+}
+
 @MainActor
 final class AppPreferences: ObservableObject {
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
     @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
+    @Published var showsGraphColors: Bool { didSet { save() } }
+    @Published var utxoCardDefault: UTXOCardDefault { didSet { save() } }
     @Published var addressStatusDisplayMode: AddressStatusDisplayMode { didSet { save() } }
     @Published var nodeMode: NodeConnectionMode { didSet { save() } }
     @Published var customNodeURL: String { didSet { save() } }
     @Published var secondaryCurrency: SecondaryCurrency { didSet { save() } }
     @Published var priceProvider: PriceProviderChoice { didSet { save() } }
+    @Published var showsCurrencyConverterInWallet: Bool { didSet { save() } }
 
     private enum Key {
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
         static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
+        static let showsGraphColors = "kassigner.showsGraphColors.v1"
+        static let utxoCardDefault = "kassigner.utxoCardDefault.v1"
         static let addressStatusEnabled = "kassigner.addressStatusEnabled.v1"
         static let addressStatusDisplayMode = "kassigner.addressStatusDisplayMode.v2"
         static let nodeMode = "kassigner.nodeMode.v1"
         static let customNode = "kassigner.customNode.v1"
         static let secondaryCurrency = "kassigner.secondaryCurrency.v1"
         static let priceProvider = "kassigner.priceProvider.v1"
+        static let showsCurrencyConverterInWallet = "kassigner.showsCurrencyConverterInWallet.v1"
     }
 
     init() {
@@ -172,6 +212,10 @@ final class AppPreferences: ObservableObject {
             rawValue: defaults.object(forKey: Key.kasBalanceDecimalPlaces) as? Int ?? 4
         ) ?? .four
         explorer = ExplorerChoice(rawValue: defaults.string(forKey: Key.explorer) ?? "") ?? .kaspaStream
+        showsGraphColors = defaults.object(forKey: Key.showsGraphColors) as? Bool ?? true
+        utxoCardDefault = UTXOCardDefault(
+            rawValue: defaults.string(forKey: Key.utxoCardDefault) ?? ""
+        ) ?? .off
         if let storedMode = defaults.string(forKey: Key.addressStatusDisplayMode),
            let displayMode = AddressStatusDisplayMode(rawValue: storedMode) {
             addressStatusDisplayMode = displayMode
@@ -187,6 +231,9 @@ final class AppPreferences: ObservableObject {
         priceProvider = PriceProviderChoice(
             rawValue: defaults.string(forKey: Key.priceProvider) ?? ""
         ) ?? .automatic
+        showsCurrencyConverterInWallet = defaults.object(
+            forKey: Key.showsCurrencyConverterInWallet
+        ) as? Bool ?? false
     }
 
     var nodeConfiguration: [String: Any] {
@@ -201,10 +248,16 @@ final class AppPreferences: ObservableObject {
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
         defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)
+        defaults.set(showsGraphColors, forKey: Key.showsGraphColors)
+        defaults.set(utxoCardDefault.rawValue, forKey: Key.utxoCardDefault)
         defaults.set(addressStatusDisplayMode.rawValue, forKey: Key.addressStatusDisplayMode)
         defaults.set(nodeMode.rawValue, forKey: Key.nodeMode)
         defaults.set(customNodeURL, forKey: Key.customNode)
         defaults.set(secondaryCurrency.rawValue, forKey: Key.secondaryCurrency)
         defaults.set(priceProvider.rawValue, forKey: Key.priceProvider)
+        defaults.set(
+            showsCurrencyConverterInWallet,
+            forKey: Key.showsCurrencyConverterInWallet
+        )
     }
 }

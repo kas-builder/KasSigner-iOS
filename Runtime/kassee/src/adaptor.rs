@@ -194,13 +194,42 @@ pub fn bip340_verify(
     msg: &[u8; 32],
     sig: &[u8; 64],
 ) -> Result<bool, String> {
-    use k256::schnorr::{signature::hazmat::PrehashVerifier, Signature, VerifyingKey};
+    let rx: [u8; 32] = sig[0..32].try_into().unwrap();
+    let s_bytes: [u8; 32] = sig[32..64].try_into().unwrap();
 
-    let verifying_key = VerifyingKey::from_bytes(pubkey_xonly)
-        .map_err(|e| format!("invalid BIP340 public key: {}", e))?;
-    let signature = Signature::try_from(sig.as_slice())
-        .map_err(|e| format!("invalid BIP340 signature: {}", e))?;
-    Ok(verifying_key.verify_prehash(msg, &signature).is_ok())
+    let p = xonly_to_point(pubkey_xonly)?;
+    let s = scalar_from_hex(&hex::encode(s_bytes))?;
+    let e = bip340_challenge(&rx, pubkey_xonly, msg);
+
+    // s*G == R + e*P
+    let sg = ProjectivePoint::GENERATOR * s;
+    let r = xonly_to_point(&rx)?;
+    let rhs = r + p * e;
+
+    // BIP340 requires exact point equality. Comparing only x coordinates
+    // would also accept the negated point, which has the same x coordinate.
+    Ok(sg == rhs)
+}
+
+#[cfg(test)]
+mod bip340_verification_tests {
+    use super::*;
+
+    #[test]
+    fn verifies_official_bip340_vector_zero() {
+        let public_key: [u8; 32] =
+            hex::decode("f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let signature: [u8; 64] = hex::decode(
+            "e907831f80848d1069a5371b402410364bdf1c5f8307b0084c55f1ce2dca821525f66a4a85ea8b71e482a74f382d2ce5ebeee8fdb2172f477df4900d310536c0",
+        )
+        .unwrap()
+        .try_into()
+        .unwrap();
+        assert!(bip340_verify(&public_key, &[0u8; 32], &signature).unwrap());
+    }
 }
 
 // ─── Adaptor Signature Functions ───

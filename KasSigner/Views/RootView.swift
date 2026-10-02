@@ -44,6 +44,226 @@ struct KasSignerLoadingView: View {
     }
 }
 
+struct AccountDiscoveryLoadingView: View {
+    let progress: Double
+    let detail: String
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                Image(systemName: "wallet.pass.fill")
+                    .font(.system(size: 42, weight: .semibold))
+                    .foregroundStyle(teal)
+
+                Text("Running address discovery…")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                ProgressView(value: progress)
+                    .tint(teal)
+                    .frame(maxWidth: 300)
+                    .animation(.linear(duration: 0.12), value: progress)
+
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.68))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 340)
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+@MainActor
+final class AccountSwitchPresentationModel: ObservableObject {
+    @Published private(set) var isVisible = false
+    @Published private(set) var progress = 0.0
+    @Published private(set) var detail = "Preparing address discovery…"
+
+    private var startedAt: Date?
+    private var workCompleted = false
+    private var presentationTask: Task<Void, Never>?
+
+    func start() {
+        presentationTask?.cancel()
+        isVisible = true
+        progress = 0
+        detail = "Preparing address discovery…"
+        startedAt = Date()
+        workCompleted = false
+
+        presentationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled,
+                  let self,
+                  let startedAt = self.startedAt {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                self.progress = min(0.9, (elapsed / 3) * 0.9)
+
+                if self.workCompleted, elapsed >= 3 {
+                    withAnimation(.easeOut(duration: 0.25)) {
+                        self.progress = 1
+                    }
+                    try? await Task.sleep(for: .milliseconds(250))
+                    guard !Task.isCancelled else { return }
+                    self.finish()
+                    return
+                }
+
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    func update(_ discoveryProgress: WalletSyncService.DiscoveryProgress) {
+        guard isVisible else { return }
+        detail = discoveryProgress.detail
+    }
+
+    func complete() {
+        guard isVisible else { return }
+        detail = "Account ready"
+        workCompleted = true
+    }
+
+    func fail(_ message: String) {
+        guard isVisible else { return }
+        detail = message
+        workCompleted = true
+    }
+
+    private func finish() {
+        isVisible = false
+        progress = 1
+        startedAt = nil
+        workCompleted = false
+        presentationTask = nil
+    }
+}
+
+struct AccountSwitchLoadingView: View {
+    let progress: Double
+    let detail: String
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ProgressView(value: progress)
+                    .tint(teal)
+                    .frame(maxWidth: 260)
+
+                Text("Switching account")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.68))
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Switching account. \(detail)")
+    }
+}
+
+@MainActor
+final class AccountDiscoveryPresentationModel: ObservableObject {
+    @Published private(set) var isVisible = false
+    @Published private(set) var progress = 0.04
+    @Published private(set) var detail = "Preparing account discovery…"
+
+    private var startedAt: Date?
+    private var workCompletedAt: Date?
+    private var presentationTask: Task<Void, Never>?
+
+    func start() {
+        guard !isVisible else { return }
+
+        isVisible = true
+        progress = 0.04
+        detail = "Validating account…"
+        startedAt = Date()
+        workCompletedAt = nil
+
+        presentationTask?.cancel()
+        presentationTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled,
+                  let self,
+                  let startedAt = self.startedAt {
+                let currentTime = Date()
+                let elapsed = currentTime.timeIntervalSince(startedAt)
+
+                if let completedAt = self.workCompletedAt {
+                    let readyStart = max(
+                        startedAt.addingTimeInterval(9.25),
+                        completedAt
+                    )
+                    if currentTime >= readyStart {
+                        let readyElapsed = currentTime.timeIntervalSince(readyStart)
+                        self.detail = "Account ready"
+                        self.progress = min(
+                            1,
+                            0.92 + (readyElapsed / 0.75) * 0.08
+                        )
+
+                        let minimumEnd = startedAt.addingTimeInterval(10)
+                        let completionEnd = readyStart.addingTimeInterval(0.75)
+                        if currentTime >= max(minimumEnd, completionEnd) {
+                            self.finish()
+                            return
+                        }
+                    } else {
+                        self.progress = min(
+                            0.92,
+                            0.04 + (elapsed / 9.25) * 0.88
+                        )
+                    }
+                } else {
+                    self.progress = min(
+                        0.92,
+                        0.04 + (elapsed / 10) * 0.88
+                    )
+                }
+
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+
+    func updateDetail(_ detail: String) {
+        guard isVisible, workCompletedAt == nil else { return }
+        self.detail = detail
+    }
+
+    func complete() {
+        guard isVisible, workCompletedAt == nil else { return }
+        workCompletedAt = Date()
+    }
+
+    func cancel() {
+        presentationTask?.cancel()
+        finish()
+    }
+
+    private func finish() {
+        presentationTask = nil
+        isVisible = false
+        progress = 1
+        startedAt = nil
+        workCompletedAt = nil
+    }
+}
+
 struct RootView: View {
     private enum Tab: Hashable {
         case wallet
@@ -57,23 +277,40 @@ struct RootView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var discoveryPresentation =
+        AccountDiscoveryPresentationModel()
+    @StateObject private var accountSwitchPresentation =
+        AccountSwitchPresentationModel()
 
     @State private var selectedTab: Tab = .wallet
     @State private var showingAddWallet = false
     @State private var notificationRefreshTask: Task<Void, Never>?
+    @State private var notificationRefreshRequested = false
+    @State private var confirmationResolutionTask: Task<Void, Never>?
+    @State private var automaticallyRefreshedHistoryProfileID: UUID?
 
-    var body: some View {
+    private var tabs: some View {
         TabView(selection: $selectedTab) {
             WalletHomeView()
                 .tag(Tab.wallet)
                 .tabItem { Label("Wallet", systemImage: "wallet.pass") }
 
-            ActivityView()
+            ActivityView(onRetryInitialHistory: {
+                if let profile = walletStore.selectedProfile,
+                   await syncService.retryInitialHistoryPersistenceIfNeeded(
+                       profile: profile,
+                       walletStore: walletStore
+                   ) {
+                    return
+                }
+                await refreshAfterLaunchOrActivation()
+            })
                 .tag(Tab.activity)
-                .tabItem { Label("Activity", systemImage: "clock.arrow.circlepath") }
+                .tabItem { Label("Transactions", systemImage: "clock.arrow.circlepath") }
 
             PortfolioView()
                 .tag(Tab.portfolio)
@@ -83,12 +320,22 @@ struct RootView: View {
                 .tag(Tab.utxos)
                 .tabItem { Label("UTXOs", systemImage: "square.stack.3d.up") }
 
-            SettingsView {
-                selectedTab = .wallet
+            SettingsView { profile in
+                selectWallet(profile)
             }
                 .tag(Tab.settings)
                 .tabItem { Label("Settings", systemImage: "gearshape") }
         }
+    }
+
+    private var presentedTabs: some View {
+        tabs
+        .disabled(
+            isInitialDiscoveryBlocking
+                || discoveryPresentation.isVisible
+                || accountSwitchPresentation.isVisible
+        )
+        .environmentObject(discoveryPresentation)
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
         .background {
             WalletTabContextMenu(
@@ -103,6 +350,40 @@ struct RootView: View {
         }
         .sheet(isPresented: $showingAddWallet) {
             AddWalletView()
+                .environmentObject(discoveryPresentation)
+        }
+        .alert(
+            "Wallet Discovery Notice",
+            isPresented: Binding(
+                get: {
+                    syncService.discoveryNotice != nil
+                        && !isInitialDiscoveryBlocking
+                },
+                set: { isPresented in
+                    if !isPresented {
+                        syncService.clearDiscoveryNotice()
+                    }
+                }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                syncService.clearDiscoveryNotice()
+            }
+        } message: {
+            Text(syncService.discoveryNotice ?? "")
+        }
+        .alert(
+            "UTXO badge storage",
+            isPresented: Binding(
+                get: { coinControlStore.persistenceAlert != nil },
+                set: { if !$0 { coinControlStore.persistenceAlert = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                coinControlStore.persistenceAlert = nil
+            }
+        } message: {
+            Text(coinControlStore.persistenceAlert ?? "")
         }
         .overlay {
             GeometryReader { proxy in
@@ -129,15 +410,93 @@ struct RootView: View {
             }
             .allowsHitTesting(false)
         }
+        .overlay {
+            if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
+                initialDiscoveryOverlay
+            }
+        }
+        .overlay {
+            if accountSwitchPresentation.isVisible {
+                AccountSwitchLoadingView(
+                    progress: accountSwitchPresentation.progress,
+                    detail: accountSwitchPresentation.detail
+                )
+                .transition(.opacity)
+                .zIndex(10)
+            }
+        }
+    }
+
+    var body: some View {
+        presentedTabs
+        .onAppear {
+            coinControlStore.activate(profileID: walletStore.selectedProfileID)
+            applyDefaultKYCStatuses()
+            if isInitialDiscoveryBlocking {
+                discoveryPresentation.start()
+            }
+        }
+        .onChange(of: walletStore.selectedProfileID) { _, profileID in
+            coinControlStore.activate(profileID: profileID)
+            applyDefaultKYCStatuses()
+        }
+        .onChange(of: preferences.utxoCardDefault) { _, _ in
+            applyDefaultKYCStatuses()
+        }
+        .onChange(of: syncService.state) { _, state in
+            guard accountSwitchPresentation.isVisible else { return }
+            switch state {
+            case .connected:
+                accountSwitchPresentation.complete()
+            case .failed(let message):
+                accountSwitchPresentation.fail(message)
+            case .idle, .syncing:
+                break
+            }
+        }
+        .onChange(of: isInitialDiscoveryBlocking) { wasBlocking, isBlocking in
+            if isBlocking {
+                discoveryPresentation.start()
+            } else if wasBlocking {
+                discoveryPresentation.complete()
+            }
+        }
+        .onChange(of: syncService.initialDiscoveryProgress) { _, progress in
+            guard let progress else { return }
+            if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
+                discoveryPresentation.updateDetail(progress.detail)
+            } else {
+                accountSwitchPresentation.update(progress)
+            }
+        }
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
+        }
+        .task(id: "coverage-\(launchRefreshTaskID)") {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5 * 60))
+                guard !Task.isCancelled else { return }
+                guard scenePhase == .active,
+                      let profile = walletStore.selectedProfile else { continue }
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
+                )
+            }
         }
         .onChange(of: liveRPCService.notificationVersion) { _, _ in
             scheduleNotificationRefresh()
         }
+        .onChange(of: engine.rpcNotificationVersion) { _, _ in
+            scheduleNotificationRefresh()
+        }
         .onChange(of: syncService.snapshot) { _, snapshot in
             guard let snapshot,
-                  let profile = walletStore.selectedProfile else { return }
+                  let profile = walletStore.selectedProfile,
+                  !profile.requiresInitialDiscovery else { return }
+            applyDefaultKYCStatuses()
             Task {
                 await liveRPCService.configure(
                     profile: profile,
@@ -145,6 +504,11 @@ struct RootView: View {
                     engine: engine
                 )
             }
+        }
+        .onChange(of: syncService.transactionHistoryUpdatedAt) { _, updatedAt in
+            guard updatedAt != nil,
+                  let profileID = walletStore.selectedProfileID else { return }
+            automaticallyRefreshedHistoryProfileID = profileID
         }
         .onChange(of: syncService.isNetworkAvailable) { wasAvailable, isAvailable in
             Task {
@@ -157,25 +521,122 @@ struct RootView: View {
                       isAvailable,
                       scenePhase == .active,
                       let profile = walletStore.selectedProfile else { return }
+                // Initial import is owned by the launch/history coordinator.
+                // A connectivity bounce must not start a second discovery.
+                guard !profile.requiresInitialDiscovery,
+                      !profile.requiresInitialHistorySync else { return }
                 await syncService.refresh(
                     profile: profile,
                     walletStore: walletStore,
                     engine: engine,
                     preferences: preferences,
-                    force: true
+                    force: true,
+                    addressDiscoveryPolicy: .lightweight
+                )
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
                 )
             }
         }
         .onDisappear {
             notificationRefreshTask?.cancel()
             notificationRefreshTask = nil
+            confirmationResolutionTask?.cancel()
+            confirmationResolutionTask = nil
+        }
+    }
+
+    private var isInitialDiscoveryBlocking: Bool {
+        walletStore.selectedProfile?.requiresInitialDiscovery == true
+    }
+
+    private func applyDefaultKYCStatuses() {
+        guard walletStore.selectedProfileID != nil,
+              let snapshot = syncService.snapshot else { return }
+        coinControlStore.activate(profileID: walletStore.selectedProfileID)
+        coinControlStore.applyDefaultKYCStatus(
+            to: snapshot.utxos,
+            defaultStatus: preferences.utxoCardDefault.badgeStatus
+        )
+    }
+
+    @ViewBuilder
+    private var initialDiscoveryOverlay: some View {
+        if let error = syncService.initialDiscoveryError {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 18) {
+                    Image(systemName: "wallet.pass.fill")
+                        .font(.system(size: 42, weight: .semibold))
+                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                    Text("Wallet discovery paused")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text(error)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.68))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 340)
+                    Button("Retry Discovery") {
+                        retryInitialDiscovery()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+
+                    Button("Cancel Import", role: .destructive) {
+                        discoveryPresentation.cancel()
+                        syncService.reset()
+                        walletStore.discardPendingImport()
+                    }
+                }
+                .padding(28)
+            }
+            .accessibilityElement(children: .contain)
+        } else {
+            AccountDiscoveryLoadingView(
+                progress: discoveryPresentation.progress,
+                detail: discoveryPresentation.detail
+            )
+        }
+    }
+
+    private func retryInitialDiscovery() {
+        guard let profile = walletStore.selectedProfile else { return }
+        Task {
+            await syncService.refresh(
+                profile: profile,
+                walletStore: walletStore,
+                engine: engine,
+                preferences: preferences,
+                force: true,
+                includeTransactionHistory: false,
+                addressDiscoveryPolicy: .comprehensive
+            )
+            guard !Task.isCancelled,
+                  walletStore.selectedProfileID == profile.id,
+                  walletStore.selectedProfile?.requiresInitialDiscovery == false else { return }
+            await refreshAfterLaunchOrActivation()
         }
     }
 
     private func selectWallet(_ profile: WalletProfile) {
+        let isChangingAccount = walletStore.selectedProfileID != profile.id
+        notificationRefreshTask?.cancel()
+        notificationRefreshTask = nil
+        notificationRefreshRequested = false
+        confirmationResolutionTask?.cancel()
+        confirmationResolutionTask = nil
         walletStore.selectedProfileID = profile.id
+        walletStore.reloadCachedTransactions(profileID: profile.id)
         syncService.preload(profile: profile)
         selectedTab = .wallet
+        if isChangingAccount {
+            accountSwitchPresentation.start()
+        }
     }
 
     private var launchRefreshTaskID: String {
@@ -191,6 +652,21 @@ struct RootView: View {
 
         guard isActive,
               let profile = walletStore.selectedProfile else { return }
+        let isInitialImportedWalletSync = profile.requiresInitialDiscovery
+            || profile.requiresInitialHistorySync
+        let shouldAutomaticallyRefreshHistory =
+            profile.requiresInitialHistorySync
+                || automaticallyRefreshedHistoryProfileID != profile.id
+        let historyUpdatedAtBeforeRefresh = syncService.transactionHistoryUpdatedAt
+        var completedReconciliation = false
+
+        defer {
+            syncService.completeTransactionHistoryReconciliation(
+                profileID: profile.id,
+                walletStore: walletStore,
+                allowInitialReveal: completedReconciliation
+            )
+        }
 
         engine.startIfNeeded()
 
@@ -199,14 +675,101 @@ struct RootView: View {
         try? await Task.sleep(for: .milliseconds(0))
         guard !Task.isCancelled else { return }
 
+        let previousUTXOs = syncService.snapshot?.utxos ?? []
+        let previousOutpoints = Set(previousUTXOs.map(\.id))
         await syncService.refresh(
             profile: profile,
             walletStore: walletStore,
             engine: engine,
             preferences: preferences,
             force: false,
-            minimumInterval: 9
+            minimumInterval: 9,
+            includeTransactionHistory: shouldAutomaticallyRefreshHistory,
+            keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync,
+            addressDiscoveryPolicy: profile.requiresInitialDiscovery
+                ? .comprehensive : .lightweight,
+            onWalletReady: {
+                guard walletStore.selectedProfileID == profile.id else { return }
+                accountSwitchPresentation.complete()
+            }
         )
+        if walletStore.selectedProfileID == profile.id {
+            switch syncService.state {
+            case .connected:
+                accountSwitchPresentation.complete()
+            case .failed(let message):
+                accountSwitchPresentation.fail(message)
+            case .idle, .syncing:
+                break
+            }
+        }
+
+        if shouldAutomaticallyRefreshHistory,
+           syncService.transactionHistoryUpdatedAt != historyUpdatedAtBeforeRefresh {
+            automaticallyRefreshedHistoryProfileID = profile.id
+        }
+
+        if !isInitialImportedWalletSync,
+           walletStore.selectedProfileID == profile.id {
+            Task { @MainActor in
+                await syncService.checkHistoricalAddressesIfNeeded(
+                    profile: profile,
+                    walletStore: walletStore,
+                    engine: engine,
+                    preferences: preferences
+                )
+            }
+        }
+
+        guard !Task.isCancelled,
+              walletStore.selectedProfileID == profile.id else { return }
+
+        let currentUTXOs = syncService.snapshot?.utxos ?? []
+        let currentOutpoints = Set(currentUTXOs.map(\.id))
+        let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+        let addedUTXOs = currentUTXOs.filter {
+            !previousOutpoints.contains($0.id)
+        }
+        if removedOutpoints.isEmpty {
+            walletStore.recordObservedUTXOTransactions(
+                profileID: profile.id,
+                addedUTXOs: addedUTXOs
+            )
+        }
+        let currentProfile = walletStore.profiles.first(where: { $0.id == profile.id })
+            ?? profile
+        await syncService.reconcilePendingTransactions(
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionIDs(
+            addedUTXOs.map(\.txID),
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        if !removedOutpoints.isEmpty,
+           let spentAddresses = try? await engine.addressesOwningUTXOs(
+               previousUTXOs.filter { removedOutpoints.contains($0.id) },
+               profile: currentProfile
+           ) {
+            await syncService.reconcileRecentOutgoingTransactions(
+                removedOutpointIDs: removedOutpoints,
+                addresses: spentAddresses,
+                profile: currentProfile,
+                walletStore: walletStore
+            )
+        }
+        await syncService.reconcileRecentOutgoingTransactions(
+            addresses: [],
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionsObservedByOtherWallets(
+            profile: currentProfile,
+            walletStore: walletStore
+        )
+        walletStore.reloadCachedTransactions(profileID: profile.id)
+        await refreshConfirmationScoreIfNeeded(force: true)
 
         if let snapshot = syncService.snapshot,
            let currentProfile = walletStore.selectedProfile {
@@ -215,44 +778,167 @@ struct RootView: View {
                 nodeURL: snapshot.nodeURL,
                 engine: engine
             )
+            scheduleConfirmationResolution(profileID: currentProfile.id)
         }
+        completedReconciliation = !Task.isCancelled
+            && walletStore.selectedProfileID == profile.id
+    }
+
+    private func refreshConfirmationScoreIfNeeded(
+        force: Bool = false
+    ) async {
+        guard let profileID = walletStore.selectedProfileID else { return }
+        let needsUpdates = walletStore.transactions.contains {
+            $0.profileID == profileID
+                && $0.needsConfirmationUpdates(
+                    currentBlueScore: syncService.virtualBlueScore
+                )
+        }
+        guard force || needsUpdates else { return }
+        await syncService.refreshVirtualBlueScore(force: force)
     }
 
     private func scheduleNotificationRefresh() {
         guard scenePhase == .active,
-              let profileID = walletStore.selectedProfileID
+              let profileID = walletStore.selectedProfileID,
+              walletStore.selectedProfile?.requiresInitialHistorySync != true
         else {
             return
         }
 
-        notificationRefreshTask?.cancel()
+        notificationRefreshRequested = true
+        guard notificationRefreshTask == nil else { return }
+
         notificationRefreshTask = Task { @MainActor in
-            // Match Kaspium's UTXO notification debounce window so a burst
-            // of added/removed outputs produces one wallet reconciliation.
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
+            defer {
+                notificationRefreshTask = nil
+                notificationRefreshRequested = false
+            }
 
-            // If another refresh is already committing a snapshot, wait for
-            // it and then reconcile once more so no later notification is lost.
-            while syncService.state == .syncing {
-                try? await Task.sleep(for: .milliseconds(150))
+            while !Task.isCancelled {
+                // Coalesce the current burst, but never cancel reconciliation
+                // that has already started. Notifications arriving during a
+                // refresh request one guaranteed follow-up pass.
+                try? await Task.sleep(for: .milliseconds(500))
                 guard !Task.isCancelled else { return }
-            }
+                notificationRefreshRequested = false
 
-            guard scenePhase == .active,
-                  walletStore.selectedProfileID == profileID,
-                  let profile = walletStore.selectedProfile
-            else {
-                return
+                await performNotificationRefresh(profileID: profileID)
+                guard notificationRefreshRequested else { return }
             }
+        }
+    }
 
-            await syncService.refresh(
-                profile: profile,
-                walletStore: walletStore,
-                engine: engine,
-                preferences: preferences,
-                force: true
+    private func performNotificationRefresh(profileID: UUID) async {
+        // If another refresh is already committing a snapshot, wait for it
+        // and then reconcile once more so no notification is lost.
+        while syncService.state == .syncing {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+        }
+
+        guard scenePhase == .active,
+              walletStore.selectedProfileID == profileID,
+              let profile = walletStore.selectedProfile,
+              !profile.requiresInitialHistorySync
+        else {
+            return
+        }
+
+        let previousUTXOs = syncService.snapshot?.utxos ?? []
+        let previousOutpoints = Set(previousUTXOs.map(\.id))
+
+        await syncService.refresh(
+            profile: profile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true,
+            includeTransactionHistory: false
+        )
+        let currentUTXOs = syncService.snapshot?.utxos ?? []
+        let currentOutpoints = Set(currentUTXOs.map(\.id))
+        let removedOutpoints = previousOutpoints.subtracting(currentOutpoints)
+        let addedUTXOs = currentUTXOs.filter {
+            !previousOutpoints.contains($0.id)
+        }
+        if removedOutpoints.isEmpty {
+            walletStore.recordObservedUTXOTransactions(
+                profileID: profile.id,
+                addedUTXOs: addedUTXOs
             )
+        }
+        scheduleConfirmationResolution(profileID: profile.id)
+        await syncService.reconcilePendingTransactions(
+            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionIDs(
+            addedUTXOs.map(\.txID),
+            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
+            walletStore: walletStore
+        )
+        if !removedOutpoints.isEmpty,
+           let spentAddresses = try? await engine.addressesOwningUTXOs(
+               previousUTXOs.filter { removedOutpoints.contains($0.id) },
+               profile: profile
+           ) {
+            await syncService.reconcileRecentOutgoingTransactions(
+                removedOutpointIDs: removedOutpoints,
+                addresses: spentAddresses,
+                profile: profile,
+                walletStore: walletStore
+            )
+        }
+        await syncService.reconcileRecentOutgoingTransactions(
+            addresses: [],
+            profile: profile,
+            walletStore: walletStore
+        )
+        await syncService.reconcileTransactionsObservedByOtherWallets(
+            profile: profile,
+            walletStore: walletStore
+        )
+        await refreshConfirmationScoreIfNeeded()
+        walletStore.reloadCachedTransactions(profileID: profile.id)
+    }
+
+    private func scheduleConfirmationResolution(profileID: UUID) {
+        guard confirmationResolutionTask == nil else { return }
+
+        confirmationResolutionTask = Task { @MainActor in
+            defer { confirmationResolutionTask = nil }
+
+            for _ in 0..<30 {
+                guard !Task.isCancelled,
+                      scenePhase == .active,
+                      walletStore.selectedProfileID == profileID,
+                      let profile = walletStore.selectedProfile
+                else {
+                    return
+                }
+
+                let hasUnresolved = walletStore.pendingTransactions.contains {
+                    $0.profileID == profileID
+                        && $0.acceptingBlockBlueScore == nil
+                }
+                guard hasUnresolved else { return }
+
+                await syncService.reconcilePendingTransactions(
+                    profile: profile,
+                    walletStore: walletStore
+                )
+
+                guard walletStore.pendingTransactions.contains(where: {
+                    $0.profileID == profileID
+                        && $0.acceptingBlockBlueScore == nil
+                }) else {
+                    await refreshConfirmationScoreIfNeeded(force: true)
+                    return
+                }
+
+                try? await Task.sleep(for: .seconds(1))
+            }
         }
     }
 }
@@ -406,6 +1092,7 @@ struct UTXOsView: View {
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
+    @EnvironmentObject private var priceService: PriceService
     @Environment(\.openURL) private var openURL
 
     @State private var editingLabelUTXOID: String?
@@ -421,9 +1108,8 @@ struct UTXOsView: View {
             Group {
                 if walletStore.selectedProfile == nil {
                     ContentUnavailableView(
-                        "No Account",
-                        systemImage: "wallet.pass",
-                        description: Text("Add and select an account before viewing UTXOs.")
+                        "No UTXOs",
+                        systemImage: "square.stack.3d.up"
                     )
                 } else if syncService.snapshot == nil {
                     ContentUnavailableView(
@@ -434,8 +1120,7 @@ struct UTXOsView: View {
                 } else if utxos.isEmpty {
                     ContentUnavailableView(
                         "No UTXOs",
-                        systemImage: "square.stack.3d.up",
-                        description: Text("This account currently has no spendable outputs.")
+                        systemImage: "square.stack.3d.up"
                     )
                 } else {
                     VStack(spacing: 0) {
@@ -483,6 +1168,7 @@ struct UTXOsView: View {
             }
         }
     }
+
     private func refreshUTXOs() async {
         guard let profile = walletStore.selectedProfile else { return }
         await syncService.refresh(
@@ -490,7 +1176,8 @@ struct UTXOsView: View {
             walletStore: walletStore,
             engine: engine,
             preferences: preferences,
-            force: true
+            force: true,
+            includeTransactionHistory: !profile.requiresInitialHistorySync
         )
     }
 
@@ -510,23 +1197,36 @@ struct UTXOsView: View {
 
     private func utxoCard(_ utxo: WalletUTXO, isNew: Bool) -> some View {
         let label = coinControlStore.label(for: utxo)
+        let kycStatus = coinControlStore.kycStatus(for: utxo)
 
         return VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 9) {
                     HStack(alignment: .top, spacing: 12) {
-                        Text(formatKas(utxo.amountKas))
-                            .font(.body.weight(.regular).monospacedDigit())
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                            .allowsTightening(true)
-                            .foregroundStyle(.primary)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(formatKas(utxo.amountKas))
+                                .font(.body.weight(.regular).monospacedDigit())
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                                .allowsTightening(true)
+                                .foregroundStyle(.primary)
+
+                            if let usdValue = usdValueText(for: utxo) {
+                                Text(usdValue)
+                                    .font(.subheadline.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
                         Spacer()
 
                         VStack(alignment: .trailing, spacing: 3) {
-                            statusRow(for: utxo)
-                                .font(.body.weight(.semibold))
+                            kycStatusMenu(for: utxo, status: kycStatus)
 
+                            Text(utxoTypeLabel(for: utxo))
+                                .font(.subheadline.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                                .padding(.top, 3)
                         }
                     }
 
@@ -611,20 +1311,71 @@ struct UTXOsView: View {
         }
     }
 
-    @ViewBuilder
-    private func statusRow(for utxo: WalletUTXO) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Spacer(minLength: 14)
-
-            if utxo.blockDAAScore > 0 {
-                Text("Confirmed")
-                    .foregroundStyle(
-                        Color(red: 0.18, green: 0.68, blue: 0.62)
-                    )
-            } else {
-                Text("Not confirmed")
-                    .foregroundStyle(.orange)
+    private func kycStatusMenu(
+        for utxo: WalletUTXO,
+        status: UTXOKYCStatus?
+    ) -> some View {
+        Menu {
+            Button {
+                coinControlStore.setKYCStatus(.kyc, for: utxo)
+            } label: {
+                Label("KYC", systemImage: "exclamationmark.shield")
             }
+
+            Button {
+                coinControlStore.setKYCStatus(.nonKYC, for: utxo)
+            } label: {
+                Label("Non-KYC", systemImage: "checkmark.shield")
+            }
+
+            if status != nil {
+                Divider()
+                Button(role: .destructive) {
+                    coinControlStore.setKYCStatus(nil, for: utxo)
+                } label: {
+                    Label("Clear Status", systemImage: "xmark.circle")
+                }
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: status == .kyc
+                    ? "exclamationmark.shield.fill"
+                    : status == .nonKYC
+                        ? "checkmark.shield.fill"
+                        : "shield.lefthalf.filled")
+                Text(status?.title ?? "Set status")
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.bold))
+            }
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                (status == .kyc
+                    ? Color.red
+                    : status == .nonKYC ? Color.green : Color.secondary)
+                    .opacity(0.14),
+                in: Capsule()
+            )
+            .foregroundStyle(
+                status == .kyc
+                    ? Color.red
+                    : status == .nonKYC ? Color.green : Color.secondary
+            )
+        }
+        .fixedSize()
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            status.map { "KYC status: \($0.title)" } ?? "Set KYC status"
+        )
+        .accessibilityHint("Choose whether this UTXO is KYC or Non-KYC.")
+    }
+
+    private func utxoTypeLabel(for utxo: WalletUTXO) -> String {
+        switch utxo.derivationChain?.lowercased() {
+        case "receive": "Receive"
+        case "change": "Change"
+        default: "Unknown"
         }
     }
 
@@ -715,6 +1466,17 @@ struct UTXOsView: View {
 
     private func formatKas(_ amount: Double) -> String {
         amount.formatted(.number.precision(.fractionLength(0...8))) + "\u{00A0}KAS"
+    }
+
+    private func usdValueText(for utxo: WalletUTXO) -> String? {
+        guard let price = priceService.price(for: .usd),
+              price.isFinite,
+              price > 0 else { return nil }
+
+        return (utxo.amountKas * price).formatted(
+            .currency(code: "USD")
+                .precision(.fractionLength(2))
+        )
     }
 
     private func shortTransactionID(_ transactionID: String) -> String {
