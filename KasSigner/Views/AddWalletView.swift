@@ -113,6 +113,7 @@ struct AddWalletView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var discoveryPresentation:
         AccountDiscoveryPresentationModel
 
@@ -126,12 +127,36 @@ struct AddWalletView: View {
     @State private var scannerProgressText: String?
     @State private var lastScannedFrame = ""
     @State private var isProcessingScan = false
+    @State private var recoveryWords = ""
+    @State private var pendingTestnetWallet: TestnetHotWalletImportResult?
+    @State private var showingTestnetWords = false
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     var body: some View {
         NavigationStack {
             Form {
+                if preferences.network == .testnet10 {
+                    Section("Testnet 10 Account") {
+                        TextField("Account name", text: $walletName)
+                        Button("Generate 12-word wallet") {
+                            Task { await prepareTestnetWallet(restore: false) }
+                        }
+                        .disabled(walletName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isImporting)
+                    }
+                    Section("Restore from 12 words") {
+                        TextField("Enter 12 recovery words", text: $recoveryWords, axis: .vertical)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .lineLimit(3...6)
+                        Button("Restore Account") {
+                            Task { await prepareTestnetWallet(restore: true) }
+                        }
+                        .disabled(walletName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || recoveryWords.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                  || isImporting)
+                    }
+                } else {
                 Section("Account") {
                     TextField("Account name", text: $walletName)
 
@@ -151,6 +176,7 @@ struct AddWalletView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .listRowBackground(Color.clear)
+                }
 
                 if let errorMessage {
                     Section {
@@ -170,8 +196,10 @@ struct AddWalletView: View {
                         .foregroundStyle(teal)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Import") { importWallet() }
-                        .disabled(!canImport)
+                    if preferences.network == .mainnet {
+                        Button("Import") { importWallet() }
+                            .disabled(!canImport)
+                    }
                 }
             }
             .task {
@@ -212,11 +240,48 @@ struct AddWalletView: View {
                 Text("This KasSigner account is already on this iPhone.")
             }
             .overlay {
-                if isImporting {
+                if isImporting && preferences.network == .mainnet {
                     AccountDiscoveryLoadingView(
                         progress: discoveryPresentation.progress,
                         detail: discoveryPresentation.detail
                     )
+                }
+            }
+            .sheet(isPresented: $showingTestnetWords) {
+                NavigationStack {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            Text("Testnet 10 recovery words")
+                                .font(.title2.bold())
+                            Text("Keep these 12 words private. Anyone with them can spend this Testnet account's TKAS.")
+                                .foregroundStyle(.secondary)
+                            Text(pendingTestnetWallet?.mnemonic ?? "")
+                                .font(.body.monospaced())
+                                .textSelection(.enabled)
+                                .padding()
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                            Button("Copy all 12 words") {
+                                if let words = pendingTestnetWallet?.mnemonic { PrivatePasteboard.copy(words) }
+                            }
+                            .buttonStyle(.bordered)
+                            Button("Add Account") { finishTestnetWallet() }
+                                .buttonStyle(.borderedProminent)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding()
+                    }
+                    .navigationTitle("Recovery Words")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") {
+                                showingTestnetWords = false
+                                pendingTestnetWallet = nil
+                                recoveryWords = ""
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -228,6 +293,47 @@ struct AddWalletView: View {
         !kpub.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
         engine.isReady &&
         !isImporting
+    }
+
+    @MainActor
+    private func prepareTestnetWallet(restore: Bool) async {
+        isImporting = true
+        errorMessage = nil
+        defer { isImporting = false }
+        do {
+            let result = try await engine.testnetHotWallet(mnemonic: restore ? recoveryWords : nil)
+            if let existing = walletStore.profiles.first(where: {
+                $0.network == KaspaNetwork.testnet10.rawValue && $0.kpub == result.wallet.kpub
+            }) {
+                duplicateProfile = existing
+                return
+            }
+            pendingTestnetWallet = result
+            showingTestnetWords = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func finishTestnetWallet() {
+        guard let result = pendingTestnetWallet else { return }
+        let profile = WalletProfile(
+            name: walletName.trimmingCharacters(in: .whitespacesAndNewlines),
+            kpub: result.wallet.kpub,
+            network: KaspaNetwork.testnet10.rawValue,
+            receiveAddresses: result.wallet.receiveAddresses,
+            changeAddresses: result.wallet.changeAddresses
+        )
+        do {
+            try TestnetSeedStore.save(result.mnemonic, for: profile.id)
+            walletStore.add(profile)
+            pendingTestnetWallet = nil
+            recoveryWords = ""
+            showingTestnetWords = false
+            dismiss()
+        } catch {
+            errorMessage = "Could not securely store the recovery words: \(error.localizedDescription)"
+        }
     }
 
     @MainActor

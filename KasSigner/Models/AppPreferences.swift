@@ -1,5 +1,15 @@
 import Foundation
 
+enum KaspaNetwork: String, CaseIterable, Identifiable {
+    case mainnet
+    case testnet10 = "testnet-10"
+
+    var id: String { rawValue }
+    var title: String { self == .mainnet ? "Mainnet" : "Testnet 10" }
+    var addressPrefix: String { self == .mainnet ? "kaspa:" : "kaspatest:" }
+    var currencySymbol: String { self == .mainnet ? "KAS" : "TKAS" }
+}
+
 enum AppearanceTheme: String, CaseIterable, Identifiable {
     case system
     case light
@@ -68,16 +78,24 @@ enum ExplorerChoice: String, CaseIterable, Identifiable {
         }
     }
 
-    func addressURL(_ address: String) -> URL {
-        baseURL.appending(path: "addresses").appending(path: address)
+    func addressURL(_ address: String, network: KaspaNetwork = .mainnet) -> URL {
+        explorerURL(for: network).appending(path: "addresses").appending(path: address)
     }
 
-    func transactionURL(_ transactionID: String) -> URL {
+    func transactionURL(_ transactionID: String, network: KaspaNetwork = .mainnet) -> URL {
         switch self {
         case .kaspaStream:
-            return baseURL.appending(path: "transactions").appending(path: transactionID)
+            return explorerURL(for: network).appending(path: "transactions").appending(path: transactionID)
         case .kaspaExplorer:
-            return baseURL.appending(path: "txs").appending(path: transactionID)
+            return explorerURL(for: network).appending(path: "txs").appending(path: transactionID)
+        }
+    }
+
+    private func explorerURL(for network: KaspaNetwork) -> URL {
+        guard network == .testnet10 else { return baseURL }
+        switch self {
+        case .kaspaStream: return URL(string: "https://tn10.kaspa.stream")!
+        case .kaspaExplorer: return URL(string: "https://explorer-tn10.kaspa.org")!
         }
     }
 }
@@ -176,6 +194,7 @@ enum UTXOCardDefault: String, CaseIterable, Identifiable {
 
 @MainActor
 final class AppPreferences: ObservableObject {
+    @Published var network: KaspaNetwork { didSet { save() } }
     @Published var appearanceTheme: AppearanceTheme { didSet { save() } }
     @Published var kasBalanceDecimalPlaces: KasBalanceDecimalPlaces { didSet { save() } }
     @Published var explorer: ExplorerChoice { didSet { save() } }
@@ -189,6 +208,7 @@ final class AppPreferences: ObservableObject {
     @Published var showsCurrencyConverterInWallet: Bool { didSet { save() } }
 
     private enum Key {
+        static let network = "kassigner.network.v1"
         static let appearanceTheme = "kassigner.appearanceTheme.v1"
         static let kasBalanceDecimalPlaces = "kassigner.kasBalanceDecimalPlaces.v1"
         static let explorer = "kassigner.explorer.v1"
@@ -205,6 +225,7 @@ final class AppPreferences: ObservableObject {
 
     init() {
         let defaults = UserDefaults.standard
+        network = KaspaNetwork(rawValue: defaults.string(forKey: Key.network) ?? "") ?? .mainnet
         appearanceTheme = AppearanceTheme(
             rawValue: defaults.string(forKey: Key.appearanceTheme) ?? ""
         ) ?? .system
@@ -238,13 +259,24 @@ final class AppPreferences: ObservableObject {
 
     var nodeConfiguration: [String: Any] {
         [
-            "mode": nodeMode.rawValue,
-            "customURL": customNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            "network": network.rawValue,
+            "mode": activeNodeMode.rawValue,
+            "customURL": activeCustomNodeURL
         ]
+    }
+
+    // Mainnet's saved custom node must never be reused for Testnet 10.
+    var activeNodeMode: NodeConnectionMode {
+        network == .testnet10 ? .automatic : nodeMode
+    }
+
+    var activeCustomNodeURL: String {
+        network == .testnet10 ? "" : customNodeURL.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func save() {
         let defaults = UserDefaults.standard
+        defaults.set(network.rawValue, forKey: Key.network)
         defaults.set(appearanceTheme.rawValue, forKey: Key.appearanceTheme)
         defaults.set(kasBalanceDecimalPlaces.rawValue, forKey: Key.kasBalanceDecimalPlaces)
         defaults.set(explorer.rawValue, forKey: Key.explorer)

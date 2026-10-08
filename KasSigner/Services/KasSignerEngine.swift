@@ -566,11 +566,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return Array(Set(matched)).sorted()
     }
 
-    func importKpub(_ kpub: String) async throws -> WalletImportResult {
+    func importKpub(_ kpub: String, network: KaspaNetwork = .mainnet) async throws -> WalletImportResult {
         try await ensureReady()
 
         let payload = try JSONSerialization.data(
-            withJSONObject: ["kpub": kpub]
+            withJSONObject: ["kpub": kpub, "network": network.rawValue]
         )
 
         guard let json = String(data: payload, encoding: .utf8) else {
@@ -618,6 +618,19 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return wallet
     }
 
+    func testnetHotWallet(mnemonic: String? = nil) async throws -> TestnetHotWalletImportResult {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            "return mnemonic == null ? window.kaspi.generateTestnet10Wallet() : window.kaspi.restoreTestnet10Wallet(mnemonic);",
+            arguments: ["mnemonic": mnemonic as Any? ?? NSNull()],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let json = result as? [String: Any] else { throw EngineError.invalidResponse }
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return try JSONDecoder().decode(TestnetHotWalletImportResult.self, from: data)
+    }
+
 
     func validateAddress(
         _ address: String
@@ -651,18 +664,23 @@ final class KasSignerEngine: NSObject, ObservableObject {
     func deriveProtectedVault(
         profile: WalletProfile,
         receiveIndex: Int,
-        approvedAddress: String,
+        approvedAddresses: [String],
+        recoveryAddress: String,
+        emergencyAnytime: Bool,
         delayDAA: UInt64
     ) async throws -> ProtectedVaultDescriptor {
         try await ensureReady()
 
         let result = try await webView.callAsyncJavaScript(
-            "return window.kaspi.deriveProtectedVault(kpub, receiveIndex, approvedAddress, delayDAA);",
+            "return window.kaspi.deriveProtectedVault(kpub, receiveIndex, approvedAddresses, recoveryAddress, delayDAA, emergencyAnytime, network);",
             arguments: [
                 "kpub": profile.kpub,
                 "receiveIndex": receiveIndex,
-                "approvedAddress": approvedAddress,
-                "delayDAA": String(delayDAA)
+                "approvedAddresses": approvedAddresses,
+                "recoveryAddress": recoveryAddress,
+                "emergencyAnytime": emergencyAnytime,
+                "delayDAA": String(delayDAA),
+                "network": profile.network
             ],
             in: nil,
             contentWorld: .page
@@ -976,6 +994,112 @@ final class KasSignerEngine: NSObject, ObservableObject {
         return normalized
     }
 
+    func buildProtectedVaultV2SpendPSKB(
+        utxo: WalletUTXO,
+        vault: ProtectedVault,
+        destination: String,
+        path: String,
+        feeSompi: UInt64
+    ) async throws -> String {
+        try await ensureReady()
+        guard let owner = vault.ownerPublicKey,
+              let recovery = vault.recoveryAddress,
+              let recoveryPath = vault.recoveryPath else {
+            throw EngineError.javascript("Vault recovery rules are missing.")
+        }
+        let utxoJSON = String(decoding: try JSONEncoder().encode(utxo), as: UTF8.self)
+        let delayDAA = try protectedVaultDelayDAA(vault)
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.buildProtectedVaultV2SpendPSKB(utxoJSON, owner, approved, recovery, destination, delayDAA, emergency, path, fee);",
+            arguments: [
+                "utxoJSON": utxoJSON, "owner": owner,
+                "approved": vault.approvedAddresses, "recovery": recovery,
+                "destination": destination, "delayDAA": String(delayDAA),
+                "emergency": recoveryPath == .emergencyAnytime,
+                "path": path, "fee": String(feeSompi)
+            ], in: nil, contentWorld: .page
+        )
+        guard let signed = result as? String, !signed.isEmpty else { throw EngineError.invalidResponse }
+        return signed
+    }
+
+    func buildProtectedVaultV2PendingSpendPSKB(
+        utxo: WalletUTXO,
+        vault: ProtectedVault,
+        committedDestination: String,
+        path: String,
+        feeSompi: UInt64
+    ) async throws -> String {
+        try await ensureReady()
+        guard let owner = vault.ownerPublicKey, let recovery = vault.recoveryAddress else {
+            throw EngineError.javascript("Vault recovery rules are missing.")
+        }
+        let utxoJSON = String(decoding: try JSONEncoder().encode(utxo), as: UTF8.self)
+        let delayDAA = try protectedVaultDelayDAA(vault)
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.buildProtectedVaultV2PendingSpendPSKB(utxoJSON, owner, recovery, destination, delayDAA, path, fee);",
+            arguments: [
+                "utxoJSON": utxoJSON, "owner": owner, "recovery": recovery,
+                "destination": committedDestination, "delayDAA": String(delayDAA),
+                "path": path, "fee": String(feeSompi)
+            ], in: nil, contentWorld: .page
+        )
+        guard let signed = result as? String, !signed.isEmpty else { throw EngineError.invalidResponse }
+        return signed
+    }
+
+    func deriveProtectedVaultPendingWithRecovery(
+        vault: ProtectedVault,
+        destination: String
+    ) async throws -> ProtectedVaultPendingDescriptor {
+        try await ensureReady()
+        guard let owner = vault.ownerPublicKey, let recovery = vault.recoveryAddress else {
+            throw EngineError.javascript("Vault recovery rules are missing.")
+        }
+        let delayDAA = try protectedVaultDelayDAA(vault)
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.deriveProtectedVaultPendingWithRecovery(owner, destination, recovery, delayDAA);",
+            arguments: ["owner": owner, "destination": destination,
+                        "recovery": recovery, "delayDAA": String(delayDAA)],
+            in: nil, contentWorld: .page
+        )
+        guard let json = result as? [String: Any] else { throw EngineError.invalidResponse }
+        return try JSONDecoder().decode(
+            ProtectedVaultPendingDescriptor.self,
+            from: JSONSerialization.data(withJSONObject: json)
+        )
+    }
+
+    private func protectedVaultDelayDAA(_ vault: ProtectedVault) throws -> UInt64 {
+        guard (0...365).contains(vault.delayDays),
+              (0...23).contains(vault.delayHours),
+              (0...59).contains(vault.delayMinutes) else {
+            throw EngineError.javascript("The saved vault delay is outside the supported range.")
+        }
+        let minutes = vault.delayDays * 1440 + vault.delayHours * 60 + vault.delayMinutes
+        guard minutes > 0 else {
+            throw EngineError.javascript("The vault security delay must be greater than zero.")
+        }
+        return UInt64(minutes) * 600
+    }
+
+    func signTestnet10VaultV2PSKB(
+        _ wireHex: String,
+        mnemonic: String,
+        chain: Int,
+        index: Int
+    ) async throws -> String {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.signTestnet10VaultV2PSKB(wireHex, mnemonic, chain, index);",
+            arguments: ["wireHex": wireHex, "mnemonic": mnemonic,
+                        "chain": chain, "index": index],
+            in: nil, contentWorld: .page
+        )
+        guard let signed = result as? String, !signed.isEmpty else { throw EngineError.invalidResponse }
+        return signed
+    }
+
     func verifyProtectedVaultApprovedSignature(_ wireHex: String) async throws {
         try await ensureReady()
         let result = try await webView.callAsyncJavaScript(
@@ -1261,13 +1385,14 @@ final class KasSignerEngine: NSObject, ObservableObject {
     }
 
 
-    func summarizePSKB(_ wireHex: String) async throws -> PSKTSummary {
+    func summarizePSKB(_ wireHex: String, network: KaspaNetwork = .mainnet) async throws -> PSKTSummary {
         try await ensureReady()
 
         let result = try await webView.callAsyncJavaScript(
-            "return window.kaspi.summarizePSKB(wireHex);",
+            "return window.kaspi.summarizePSKB(wireHex, network);",
             arguments: [
-                "wireHex": wireHex
+                "wireHex": wireHex,
+                "network": network.rawValue
             ],
             in: nil,
             contentWorld: .page
@@ -1326,6 +1451,20 @@ final class KasSignerEngine: NSObject, ObservableObject {
         guard response["value"] as? Bool == true else {
             throw EngineError.javascript("The returned M5 signatures are invalid.")
         }
+    }
+
+    func signTestnet10FundingPSKB(_ wireHex: String, mnemonic: String) async throws -> String {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.signTestnet10FundingPSKB(wireHex, mnemonic);",
+            arguments: ["wireHex": wireHex, "mnemonic": mnemonic],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let signed = result as? String, !signed.isEmpty else {
+            throw EngineError.invalidResponse
+        }
+        return signed
     }
 
     func finalizeSignedPSKB(_ wireHex: String) async throws -> String {
@@ -1676,6 +1815,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
         receiveCount: Int,
         changeCount: Int
     ) throws {
+        let expectedPrefix = original.network == KaspaNetwork.testnet10.rawValue
+            ? "kaspatest:" : "kaspa:"
         guard derived.kpub == original.kpub else {
             throw EngineError.javascript("Derived wallet kpub did not match the selected account.")
         }
@@ -1692,10 +1833,10 @@ final class KasSignerEngine: NSObject, ObservableObject {
         guard Set(derived.receiveAddresses).count == derived.receiveAddresses.count,
               Set(derived.changeAddresses).count == derived.changeAddresses.count,
               Set(derived.receiveAddresses).isDisjoint(with: Set(derived.changeAddresses)),
-              derived.receiveAddresses.allSatisfy({ $0.hasPrefix("kaspa:") }),
-              derived.changeAddresses.allSatisfy({ $0.hasPrefix("kaspa:") })
+              derived.receiveAddresses.allSatisfy({ $0.hasPrefix(expectedPrefix) }),
+              derived.changeAddresses.allSatisfy({ $0.hasPrefix(expectedPrefix) })
         else {
-            throw EngineError.javascript("Derived addresses failed uniqueness or mainnet validation.")
+            throw EngineError.javascript("Derived addresses failed uniqueness or network validation.")
         }
     }
 

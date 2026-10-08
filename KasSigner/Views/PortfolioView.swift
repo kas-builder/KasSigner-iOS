@@ -277,7 +277,7 @@ struct PortfolioView: View {
         ContentUnavailableView {
             Label("No Portfolio", systemImage: "briefcase.fill")
         } description: {
-            Text("Create an account to start tracking KAS buys, sells, and transfers.")
+            Text("Create an account to start tracking \(preferences.network.currencySymbol) buys, sells, and transfers.")
         } actions: {
             Button("New Portfolio") {
                 beginAddingAccount()
@@ -623,7 +623,7 @@ struct PortfolioView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Kaspa")
                             .font(.subheadline.weight(.semibold))
-                        Text("KAS")
+                        Text(preferences.network.currencySymbol)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -802,7 +802,7 @@ struct PortfolioView: View {
                 Spacer(minLength: 8)
 
                 VStack(alignment: .trailing, spacing: 3) {
-                    Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS")
+                    Text(transaction.kasAmount.formatted(.number.grouping(.automatic)) + " \(preferences.network.currencySymbol)")
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text((transaction.kasAmount * transaction.kasPriceUSD).formatted(
@@ -865,7 +865,7 @@ struct PortfolioView: View {
     private func holdingAmountText(summary: PortfolioHoldingSummary) -> String {
         summary.holdings.formatted(
             .number.grouping(.automatic).precision(.fractionLength(0...8))
-        ) + " KAS"
+        ) + " \(preferences.network.currencySymbol)"
     }
 
     private func holdingValueText(summary: PortfolioHoldingSummary) -> String {
@@ -907,7 +907,7 @@ struct PortfolioView: View {
     private func kasAmount(_ value: Double) -> String {
         value.formatted(
             .number.grouping(.automatic).precision(.fractionLength(0...8))
-        ) + " KAS"
+        ) + " \(preferences.network.currencySymbol)"
     }
 
     private func currency(_ value: Double) -> String {
@@ -1647,7 +1647,7 @@ struct KaspaPriceDetail: View {
 
     private func converterField(title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title == "USD" ? "USD Value" : title)
+            Text(title == "USD" ? "USD Value" : (title == "KAS" ? preferences.network.currencySymbol : title))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 0) {
@@ -1673,7 +1673,7 @@ struct KaspaPriceDetail: View {
 
     private func converterRateField(title: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title == "USD" ? "USD Price" : title)
+            Text(title == "USD" ? "USD Price" : (title == "KAS" ? preferences.network.currencySymbol : title))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 0) {
@@ -1695,7 +1695,7 @@ struct KaspaPriceDetail: View {
 
     private func converterStaticRateField(title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title)
+            Text(title == "KAS" ? preferences.network.currencySymbol : title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(value)
@@ -2064,6 +2064,7 @@ private struct PortfolioTransactionDraft {
 private struct PortfolioTransactionDetail: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var priceService: PriceService
+    @EnvironmentObject private var preferences: AppPreferences
     @State private var showingDeleteConfirmation = false
 
     let transaction: PortfolioTransaction
@@ -2147,7 +2148,7 @@ private struct PortfolioTransactionDetail: View {
     }
 
     private var kasAmountText: String {
-        transaction.kasAmount.formatted(.number.grouping(.automatic)) + " KAS"
+        transaction.kasAmount.formatted(.number.grouping(.automatic)) + " \(preferences.network.currencySymbol)"
     }
 
     private var kasPriceText: String {

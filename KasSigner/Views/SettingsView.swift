@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import LocalAuthentication
 
 struct SettingsView: View {
     let onWalletSelected: ((WalletProfile) -> Void)?
@@ -17,6 +18,8 @@ struct SettingsView: View {
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
     @State private var showingAccountReorder = false
+    @State private var revealedTestnetWords: String?
+    @State private var seedRevealError: String?
 
     init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
@@ -24,10 +27,15 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !walletStore.profiles.isEmpty {
+            settingsList
+        }
+    }
+
+    private var settingsList: some View {
+        List {
+                if !walletStore.activeProfiles.isEmpty {
                     Section("Accounts") {
-                        ForEach(walletStore.profiles) { profile in
+                        ForEach(walletStore.activeProfiles) { profile in
                             Button {
                                 if let onWalletSelected {
                                     onWalletSelected(profile)
@@ -39,7 +47,8 @@ struct SettingsView: View {
                                 HStack {
                                     VStack(alignment: .leading) {
                                         Text(profile.name)
-                                        Text("Watch-only account")
+                                        Text(profile.network == KaspaNetwork.testnet10.rawValue
+                                             ? "Testnet 10 account" : "Watch-only account")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -138,37 +147,45 @@ struct SettingsView: View {
                 } header: {
                     Text("Preferences")
                 } footer: {
-                    Text("Checks each displayed receive address using the public Kaspa API to determine whether it is fresh or has been used.")
+                    Text("Checks each displayed receive address using the selected network's public API to determine whether it is fresh or has been used.")
                 }
 
                 Section {
-                    LabeledContent("Kaspa Network", value: "Mainnet")
-
-                    Menu {
-                        ForEach(NodeConnectionMode.allCases) { mode in
-                            Button {
-                                preferences.nodeMode = mode
-                            } label: {
-                                if preferences.nodeMode == mode {
-                                    Label(mode.title, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.title)
-                                }
-                            }
+                    Picker("Kaspa Network", selection: $preferences.network) {
+                        ForEach(KaspaNetwork.allCases) { network in
+                            Text(network.title).tag(network)
                         }
-                    } label: {
-                        HStack {
-                            Text(preferences.nodeMode.title)
-                                .foregroundStyle(.tint)
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tint)
-                        }
-                        .contentShape(Rectangle())
                     }
 
-                    if preferences.nodeMode == .custom {
+                    if preferences.network == .mainnet {
+                        Menu {
+                            ForEach(NodeConnectionMode.allCases) { mode in
+                                Button {
+                                    preferences.nodeMode = mode
+                                } label: {
+                                    if preferences.nodeMode == mode {
+                                        Label(mode.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(mode.title)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Text(preferences.nodeMode.title)
+                                    .foregroundStyle(.tint)
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                    } else {
+                        LabeledContent("Node", value: "Automatic Testnet 10")
+                    }
+
+                    if preferences.activeNodeMode == .custom {
                         TextField("wss://your-node.example", text: $preferences.customNodeURL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -179,9 +196,22 @@ struct SettingsView: View {
                 } header: {
                     Text("Network & Node")
                 } footer: {
-                    if preferences.nodeMode == .automatic {
+                    if preferences.activeNodeMode == .automatic {
                     } else {
                         Text("Connect directly to your own Kaspa node. Wallet access requires a public ws:// or wss:// wRPC endpoint with UTXO indexing enabled.")
+                    }
+                }
+
+                if preferences.network == .testnet10,
+                   let profile = walletStore.selectedProfile {
+                    Section {
+                        Button("Show Recovery Words") {
+                            Task { await revealTestnetWords(for: profile) }
+                        }
+                    } header: {
+                        Text("Testnet 10 Wallet")
+                    } footer: {
+                        Text("This account signs Testnet 10 transactions on this iPhone. Keep its recovery words private.")
                     }
                 }
 
@@ -236,6 +266,22 @@ struct SettingsView: View {
                         Text("Donate")
                     }
                 }
+            }
+            .sheet(isPresented: Binding(
+                get: { revealedTestnetWords != nil },
+                set: { if !$0 { revealedTestnetWords = nil } }
+            )) {
+                TestnetRecoveryWordsView(words: revealedTestnetWords ?? "") {
+                    revealedTestnetWords = nil
+                }
+            }
+            .alert("Recovery Words Unavailable", isPresented: Binding(
+                get: { seedRevealError != nil },
+                set: { if !$0 { seedRevealError = nil } }
+            )) {
+                Button("OK", role: .cancel) { seedRevealError = nil }
+            } message: {
+                Text(seedRevealError ?? "")
             }
             .alert("Rename Account", isPresented: renameAlertIsPresented) {
                 TextField("Account name", text: $renameDraft)
@@ -292,7 +338,6 @@ struct SettingsView: View {
             } message: {
                 Text(derivationError ?? "Unknown error")
             }
-        }
     }
 
     private var renameAlertIsPresented: Binding<Bool> {
@@ -395,6 +440,16 @@ struct SettingsView: View {
             return
         }
 
+        if profile.network == KaspaNetwork.testnet10.rawValue {
+            do {
+                try TestnetSeedStore.remove(for: profile.id)
+            } catch {
+                seedRevealError = "Could not remove this Testnet account's recovery words: \(error.localizedDescription)"
+                profilePendingDeletion = nil
+                return
+            }
+        }
+
         let wasSelected = walletStore.selectedProfile?.id == profile.id
         WalletSnapshotCache.shared.remove(profileID: profile.id)
         coinControlStore.removeData(profileID: profile.id)
@@ -420,6 +475,69 @@ struct SettingsView: View {
             await refreshSelectedAccount()
         } catch {
             derivationError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func revealTestnetWords(for profile: WalletProfile) async {
+        guard profile.network == KaspaNetwork.testnet10.rawValue else { return }
+        let context = LAContext()
+        var policyError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            seedRevealError = policyError?.localizedDescription ?? "Face ID or device passcode is unavailable."
+            return
+        }
+        do {
+            let authorized = try await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Show Testnet 10 recovery words"
+            )
+            guard authorized else { return }
+            revealedTestnetWords = try TestnetSeedStore.load(for: profile.id)
+        } catch {
+            seedRevealError = error.localizedDescription
+        }
+    }
+}
+
+private struct TestnetRecoveryWordsView: View {
+    let words: String
+    let onDismiss: () -> Void
+    @State private var didCopy = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Testnet 10 recovery words")
+                        .font(.title2.bold())
+                    Text(words)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    Button {
+                        PrivatePasteboard.copy(words)
+                        didCopy = true
+                    } label: {
+                        Label(didCopy ? "Copied to clipboard" : "Copy all 12 words", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    .sensoryFeedback(.success, trigger: didCopy)
+                }
+                .padding()
+            }
+            .navigationTitle("Recovery Words")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onDismiss)
+                }
+            }
         }
     }
 }
@@ -479,7 +597,7 @@ private struct OtherSettingsView: View {
             } header: {
                 Text("Secondary Currency")
             } footer: {
-                Text("Price the displayed KAS balance in USD or BTC.")
+                Text("Price the displayed \(preferences.network.currencySymbol) balance in USD or BTC.")
             }
 
             Section {

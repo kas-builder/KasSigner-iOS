@@ -115,7 +115,7 @@ struct SendDestinationView: View {
             } else if let amount = parseKasTextToSompi(normalizedText) {
                 otherAmounts.append(amount)
             } else {
-                return "Available balance: — KAS"
+                return "Available balance: — \(preferences.network.currencySymbol)"
             }
         }
 
@@ -123,35 +123,35 @@ struct SendDestinationView: View {
         for amount in otherAmounts {
             let sum = allocatedSompi.addingReportingOverflow(amount)
             guard !sum.overflow else {
-                return "Available balance: — KAS"
+                return "Available balance: — \(preferences.network.currencySymbol)"
             }
             allocatedSompi = sum.partialValue
         }
 
         let remaining = selectedTotalSompi.subtractingReportingOverflow(allocatedSompi)
         guard !remaining.overflow else {
-            return "Available balance: 0 KAS"
+            return "Available balance: 0 \(preferences.network.currencySymbol)"
         }
         return "Available balance: \(formatKas(sompi: remaining.partialValue))"
     }
 
     private var destinationLooksValid: Bool {
-        addressValidation?.valid == true
+        addressValidation?.valid == true && addressValidation?.network == preferences.network.rawValue
     }
 
     private var addressValidationMessage: String? {
         guard !destinationAddress.isEmpty else { return nil }
 
         if isValidatingAddress {
-            return "Validating mainnet address..."
+            return "Validating \(preferences.network.title) address..."
         }
 
         if destinationLooksValid {
-            return "Valid Kaspa address."
+            return "Valid \(preferences.network.title) address."
         }
 
         return addressValidation?.reason
-            ?? "Invalid Kaspa address."
+            ?? "Invalid \(preferences.network.title) address."
     }
 
     private var selectedTotalSompi: UInt64? {
@@ -203,7 +203,7 @@ struct SendDestinationView: View {
 
     private var liveFeeDescription: String {
         if selectedFee == .custom {
-            return "Enter an exact fee in KAS."
+            return "Enter an exact fee in \(preferences.network.currencySymbol)."
         }
 
         guard let fee = syncService.feeEstimate,
@@ -790,7 +790,7 @@ struct SendDestinationView: View {
         do {
             guard let activeProfile = walletStore.profiles.first(
                 where: { $0.id == profile.id }
-            ) else {
+            ), activeProfile.network == preferences.network.rawValue else {
                 throw SendVerificationError.walletStateChanged
             }
 
@@ -859,6 +859,11 @@ struct SendDestinationView: View {
             guard let recipients = sendRecipients else {
                 throw SendDraftError.emptyDestination
             }
+            guard recipients.allSatisfy({
+                $0.address.lowercased().hasPrefix(preferences.network.addressPrefix)
+            }) else {
+                throw SendVerificationError.destinationMismatch
+            }
             let draft = try SendDraft(
                 profile: activeProfile,
                 transactionType: transactionType,
@@ -873,7 +878,7 @@ struct SendDestinationView: View {
 
             let pskb = try await engine.buildUnsignedPSKB(from: draft)
 
-            let summary = try await engine.summarizePSKB(pskb)
+            let summary = try await engine.summarizePSKB(pskb, network: preferences.network)
 
             guard let builtInputs = summary.inputs,
                   builtInputs.count == draft.selectedInputs.count
@@ -1271,7 +1276,7 @@ struct SendDestinationView: View {
             }
 
             TextField(
-                "kaspa:...",
+                "\(preferences.network.addressPrefix)...",
                 text: $destinationAddress,
                 axis: .vertical
             )
@@ -1379,7 +1384,7 @@ struct SendDestinationView: View {
             TextField("0", text: text)
                 .keyboardType(.decimalPad)
                 .font(.title3.weight(.semibold).monospacedDigit())
-            Text("KAS")
+            Text(preferences.network.currencySymbol)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
         }
@@ -1413,7 +1418,7 @@ struct SendDestinationView: View {
                     toggleAmountEntryCurrency()
                 } label: {
                     HStack(spacing: 7) {
-                        Text(amountEntryUsesUSD ? "USD" : "KAS")
+                        Text(amountEntryUsesUSD ? "USD" : preferences.network.currencySymbol)
                             .font(.subheadline.weight(.semibold))
 
                         VStack(spacing: -3) {
@@ -1433,9 +1438,9 @@ struct SendDestinationView: View {
                 .accessibilityLabel(
                     amountEntryUsesUSD
                         ? "Amount entered in US dollars"
-                        : "Amount entered in KAS"
+                        : "Amount entered in \(preferences.network.currencySymbol)"
                 )
-                .accessibilityHint("Double tap to switch between KAS and US dollars.")
+                .accessibilityHint("Double tap to switch between \(preferences.network.currencySymbol) and US dollars.")
             }
             .padding(12)
             .background(
@@ -1623,7 +1628,7 @@ struct SendDestinationView: View {
                                 .monospacedDigit()
                         )
 
-                    Text("KAS")
+                    Text(preferences.network.currencySymbol)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
                 }
@@ -1677,12 +1682,12 @@ struct SendDestinationView: View {
                     addressValidation = result
                     isValidatingAddress = false
 
-                    if result.valid,
+                    if result.valid && result.network == preferences.network.rawValue,
                        let normalized = result.normalized,
                        normalized != destinationAddress {
                         destinationAddress = normalized
                     }
-                    if result.valid {
+                    if result.valid && result.network == preferences.network.rawValue {
                         scheduleLivePlanResolution()
                     }
                 }
@@ -1785,7 +1790,7 @@ struct SendDestinationView: View {
     }
 
     private func formatKas(sompi: UInt64) -> String {
-        formatPlainKas(sompi: sompi) + " KAS"
+        formatPlainKas(sompi: sompi) + " \(preferences.network.currencySymbol)"
     }
 
     private func formatFeeRate(_ rate: Double) -> String {
@@ -1826,6 +1831,7 @@ private struct AdditionalRecipientCard: View {
     let onValidationChange: (Bool) -> Void
 
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
     @State private var validation: AddressValidationResult?
     @State private var isValidating = false
     @State private var validationTask: Task<Void, Never>?
@@ -1841,8 +1847,10 @@ private struct AdditionalRecipientCard: View {
                 if isValidating {
                     ProgressView().controlSize(.small)
                 } else if !recipient.address.isEmpty {
-                    Image(systemName: validation?.valid == true ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(validation?.valid == true ? accentColor : .red)
+                    Image(systemName: validation?.valid == true && validation?.network == preferences.network.rawValue
+                        ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(validation?.valid == true && validation?.network == preferences.network.rawValue
+                            ? accentColor : .red)
                 }
                 Button(role: .destructive, action: onRemove) {
                     Image(systemName: "minus.circle.fill")
@@ -1850,7 +1858,7 @@ private struct AdditionalRecipientCard: View {
                 .accessibilityLabel("Remove destination")
             }
 
-            TextField("kaspa:...", text: $recipient.address, axis: .vertical)
+            TextField("\(preferences.network.addressPrefix)...", text: $recipient.address, axis: .vertical)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(.subheadline, design: .monospaced))
@@ -1905,7 +1913,7 @@ private struct AdditionalRecipientCard: View {
                 TextField("0", text: $recipient.amountText)
                     .keyboardType(.decimalPad)
                     .font(.title3.weight(.semibold).monospacedDigit())
-                Text("KAS")
+                Text(preferences.network.currencySymbol)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
@@ -1931,9 +1939,12 @@ private struct AdditionalRecipientCard: View {
             }
 
             if let validation, !recipient.address.isEmpty {
-                Text(validation.valid ? "Valid Kaspa address." : (validation.reason ?? "Invalid Kaspa address."))
+                Text(validation.valid && validation.network == preferences.network.rawValue
+                    ? "Valid \(preferences.network.title) address."
+                    : (validation.reason ?? "Address must be on \(preferences.network.title)."))
                     .font(.caption)
-                    .foregroundStyle(validation.valid ? accentColor : .red)
+                    .foregroundStyle(validation.valid && validation.network == preferences.network.rawValue
+                        ? accentColor : .red)
             }
         }
         .padding(14)
@@ -1971,8 +1982,9 @@ private struct AdditionalRecipientCard: View {
                 await MainActor.run {
                     validation = result
                     isValidating = false
-                    onValidationChange(result.valid)
-                    if result.valid, let normalized = result.normalized {
+                    onValidationChange(result.valid && result.network == preferences.network.rawValue)
+                    if result.valid && result.network == preferences.network.rawValue,
+                       let normalized = result.normalized {
                         recipient.address = normalized
                     }
                 }
@@ -2074,8 +2086,18 @@ extension VerifiedTransactionReview {
 private struct VerifiedTransactionReviewView: View {
     let review: VerifiedTransactionReview
     let onComplete: () -> Void
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+    @EnvironmentObject private var appLockService: AppLockService
 
     @State private var showingSigning = false
+    @State private var isBroadcastingTestnet = false
+    @State private var testnetErrorMessage: String?
+    @State private var testnetTransactionID: String?
+    @State private var showingBroadcastSuccess = false
 
     private let accentColor = Color(
         red: 0.20,
@@ -2090,7 +2112,9 @@ private struct VerifiedTransactionReviewView: View {
                     review: review
                 )
                 securityChecksCard
-                continueButton
+                if preferences.network != .testnet10 {
+                    continueButton
+                }
             }
             .padding(.horizontal)
             .padding(.top, 12)
@@ -2100,6 +2124,11 @@ private struct VerifiedTransactionReviewView: View {
         .navigationTitle("Review Transaction")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom) {
+            if preferences.network == .testnet10 {
+                testnetBroadcastButton
+            }
+        }
         .navigationDestination(isPresented: $showingSigning) {
             VerifiedSigningPreparationView(
                 review: review,
@@ -2108,6 +2137,14 @@ private struct VerifiedTransactionReviewView: View {
                     onComplete()
                 }
             )
+        }
+        .fullScreenCover(isPresented: $showingBroadcastSuccess) {
+            if let testnetTransactionID {
+                BroadcastSuccessView(transactionID: testnetTransactionID) {
+                    showingBroadcastSuccess = false
+                    onComplete()
+                }
+            }
         }
     }
 
@@ -2180,6 +2217,37 @@ private struct VerifiedTransactionReviewView: View {
         )
     }
 
+    private var testnetBroadcastButton: some View {
+        VStack(spacing: 10) {
+            if let testnetErrorMessage {
+                Text(testnetErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            Button {
+                Task { await signAndBroadcastTestnet() }
+            } label: {
+                Group {
+                    if isBroadcastingTestnet {
+                        ProgressView()
+                    } else {
+                        Text("Broadcast Transaction").font(.headline)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isBroadcastingTestnet || testnetTransactionID != nil
+                || !review.selectedInputsVerified || !review.destinationVerified
+                || !review.changeVerified || !review.feeVerified)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial)
+    }
+
     private func securityRow(
         _ title: String,
         passed: Bool
@@ -2218,7 +2286,7 @@ private struct VerifiedTransactionReviewView: View {
         let fractional = sompi % 100_000_000
 
         guard fractional != 0 else {
-            return "\(whole) KAS"
+            return "\(whole) \(preferences.network.currencySymbol)"
         }
 
         let fractionalText = String(format: "%08llu", fractional)
@@ -2228,13 +2296,71 @@ private struct VerifiedTransactionReviewView: View {
                 options: .regularExpression
             )
 
-        return "\(whole).\(fractionalText) KAS"
+        return "\(whole).\(fractionalText) \(preferences.network.currencySymbol)"
+    }
+
+    @MainActor
+    private func signAndBroadcastTestnet() async {
+        guard !isBroadcastingTestnet, preferences.network == .testnet10,
+              let profile = walletStore.profiles.first(where: {
+                  $0.id == review.profileID && $0.network == KaspaNetwork.testnet10.rawValue
+              }) else { return }
+        isBroadcastingTestnet = true
+        testnetErrorMessage = nil
+        defer { isBroadcastingTestnet = false }
+        do {
+            let digest = SHA256.hash(data: Data(review.unsignedPSKB.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+            guard digest == review.verifiedDigest,
+                  review.selectedInputsVerified, review.destinationVerified,
+                  review.changeVerified, review.feeVerified else {
+                throw SendVerificationError.integrityCheckFailed
+            }
+            await syncService.refresh(profile: profile, walletStore: walletStore,
+                engine: engine, preferences: preferences, force: true,
+                includeTransactionHistory: false)
+            guard syncService.state == .connected else {
+                throw SendVerificationError.walletStateChanged
+            }
+            let current = Set((syncService.snapshot?.utxos ?? []).map { $0.id.lowercased() })
+            guard review.selectedOutpoints.allSatisfy({ current.contains($0.lowercased()) }) else {
+                throw SendVerificationError.walletStateChanged
+            }
+            let mnemonic = try TestnetSeedStore.load(for: profile.id)
+            let unsigned = try await engine.summarizePSKB(review.unsignedPSKB, network: .testnet10)
+            let signed = try await engine.signTestnet10FundingPSKB(review.unsignedPSKB, mnemonic: mnemonic)
+            let signedSummary = try await engine.summarizePSKB(signed, network: .testnet10)
+            try SignedProtectedVaultFundingVerifier.verify(unsigned: unsigned, signed: signedSummary)
+            try await engine.verifyStandardPSKBSignatures(signed)
+            _ = try await engine.finalizeSignedPSKB(signed)
+            let txid = try await engine.broadcastSignedPSKB(signed,
+                nodeConfiguration: preferences.nodeConfiguration)
+            testnetTransactionID = txid
+            let recorded = walletStore.recordBroadcastedTransaction(
+                profileID: review.profileID, transactionID: txid,
+                destination: review.recipients.count == 1
+                    ? review.destination : "\(review.recipients.count) Destinations",
+                amountSompi: review.recipientTotalSompi, feeSompi: review.feeSompi,
+                committedChangeIndices: review.changeOutputs.map(\.addressIndex)
+            )
+            guard recorded else {
+                testnetErrorMessage = "Broadcast succeeded, but the local change-address state was not saved. Refresh before sending again."
+                return
+            }
+            showingBroadcastSuccess = true
+            await syncService.refresh(profile: profile, walletStore: walletStore,
+                engine: engine, preferences: preferences, force: true,
+                includeTransactionHistory: false)
+        } catch {
+            testnetErrorMessage = error.localizedDescription
+        }
     }
 }
 
 private struct VerifiedTransactionSummaryCards: View {
     let review: VerifiedTransactionReview
 
+    @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @EnvironmentObject private var priceService: PriceService
 
@@ -2389,7 +2515,7 @@ private struct VerifiedTransactionSummaryCards: View {
         let fractional = sompi % 100_000_000
 
         guard fractional != 0 else {
-            return "\(whole) KAS"
+            return "\(whole) \(preferences.network.currencySymbol)"
         }
 
         let fractionalText = String(format: "%08llu", fractional)
@@ -2399,7 +2525,7 @@ private struct VerifiedTransactionSummaryCards: View {
                 options: .regularExpression
             )
 
-        return "\(whole).\(fractionalText) KAS"
+        return "\(whole).\(fractionalText) \(preferences.network.currencySymbol)"
     }
 
     private func formatUSD(_ sompi: UInt64) -> String? {
@@ -2413,6 +2539,8 @@ private struct VerifiedTransactionSummaryCards: View {
                 .precision(.fractionLength(2))
         )
     }
+
+
 }
 
 
@@ -2436,6 +2564,7 @@ struct VerifiedSigningPreparationView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var appLockService: AppLockService
 
@@ -2539,7 +2668,6 @@ struct VerifiedSigningPreparationView: View {
                     transactionID: transactionID,
                     onDone: {
                         showingBroadcastSuccess = false
-                        onBroadcastComplete?(transactionID)
                         onComplete()
                     }
                 )
@@ -2690,7 +2818,7 @@ struct VerifiedSigningPreparationView: View {
                         .padding(.vertical, 12)
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: protectedVaultMode))
                 .disabled(isStartingScanner)
 
                 if decoderProgressTotal > 0 {
@@ -2825,7 +2953,7 @@ struct VerifiedSigningPreparationView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
             }
-            .buttonStyle(.borderedProminent)
+            .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: protectedVaultMode))
             .disabled(isAuthorizingBroadcast || isBroadcastingSignedTransaction)
         }
     }
@@ -2842,23 +2970,12 @@ struct VerifiedSigningPreparationView: View {
 
     @MainActor
     private func refreshWalletAfterBroadcast() async {
-        guard let profile = walletStore.selectedProfile else {
-            return
-        }
-
-        try? await Task.sleep(for: .milliseconds(900))
-
-        await syncService.refresh(
-            profile: profile,
+        await syncService.refreshAfterBroadcast(
+            profileID: review.profileID,
             walletStore: walletStore,
+            protectedVaultStore: protectedVaultStore,
             engine: engine,
-            preferences: preferences,
-            force: true,
-            includeTransactionHistory: false
-        )
-        await syncService.reconcilePendingTransactions(
-            profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
-            walletStore: walletStore
+            preferences: preferences
         )
     }
 
@@ -2871,16 +2988,18 @@ struct VerifiedSigningPreparationView: View {
             return
         }
 
-        isAuthorizingBroadcast = true
         scanErrorMessage = nil
-        let isAuthorized = await appLockService.authorizeTransactionBroadcast()
-        isAuthorizingBroadcast = false
+        if preferences.network != .testnet10 {
+            isAuthorizingBroadcast = true
+            let isAuthorized = await appLockService.authorizeTransactionBroadcast()
+            isAuthorizingBroadcast = false
 
-        guard isAuthorized else {
-            if let authenticationError = appLockService.authenticationError {
-                scanErrorMessage = "Authentication failed: \(authenticationError)"
+            guard isAuthorized else {
+                if let authenticationError = appLockService.authenticationError {
+                    scanErrorMessage = "Authentication failed: \(authenticationError)"
+                }
+                return
             }
-            return
         }
 
         guard let snapshot = syncService.snapshot else {
@@ -2937,6 +3056,7 @@ struct VerifiedSigningPreparationView: View {
                 return
             }
             broadcastTransactionID = transactionID
+            onBroadcastComplete?(transactionID)
             showingBroadcastSuccess = true
 
             Task {
@@ -3209,7 +3329,7 @@ private struct BroadcastSuccessView: View {
 
                     Link(
                         destination: preferences.explorer.transactionURL(
-                            transactionID
+                            transactionID, network: preferences.network
                         )
                     ) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -3798,6 +3918,7 @@ private struct ChangeAllocationView: View {
     let complete: ([PlannedChangeOutput], ChangeFeePlan) -> Void
 
     @EnvironmentObject private var priceService: PriceService
+    @EnvironmentObject private var preferences: AppPreferences
 
     @State private var availableChangeSompi: UInt64
     @State private var resolvedFeeSompi: UInt64?
@@ -3941,7 +4062,7 @@ private struct ChangeAllocationView: View {
                                 )
                         }
 
-                        Text("KAS")
+                        Text(preferences.network.currencySymbol)
                             .font(.subheadline.weight(.semibold).monospacedDigit())
                     }
 
@@ -4163,7 +4284,7 @@ private struct ChangeAllocationView: View {
     }
 
     private func formatKas(_ sompi: UInt64) -> String {
-        "\(formatPlainKas(sompi)) KAS"
+        "\(formatPlainKas(sompi)) \(preferences.network.currencySymbol)"
     }
 
     private func formatUSD(_ sompi: UInt64) -> String? {
@@ -4273,7 +4394,7 @@ private enum SendFeeChoice: String, CaseIterable, Identifiable {
         case .normal:
             return "Balanced network fee for typical transactions."
         case .custom:
-            return "Enter a custom fee in KAS."
+            return "Enter a custom fee."
         }
     }
 }

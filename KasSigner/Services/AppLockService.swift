@@ -121,11 +121,12 @@ final class AppLockService: ObservableObject {
         await authenticate(reason: "Confirm creation of this Protected Vault")
     }
 
+    func authorizeProtectedVaultFunding() async -> Bool {
+        await authenticate(reason: "Confirm funding this Protected Vault")
+    }
+
     func authorizeTransactionBroadcast() async -> Bool {
-        await authenticate(
-            policy: .deviceOwnerAuthenticationWithBiometrics,
-            reason: "Authenticate to broadcast this transaction."
-        )
+        await authenticate(reason: "Authenticate to broadcast this transaction.")
     }
 
     func suspendPrivacyCoverForCurrentSession() {

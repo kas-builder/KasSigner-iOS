@@ -277,6 +277,7 @@ struct RootView: View {
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
     @EnvironmentObject private var liveRPCService: KaspaLiveRPCService
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
@@ -339,7 +340,7 @@ struct RootView: View {
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
         .background {
             WalletTabContextMenu(
-                profiles: walletStore.profiles,
+                profiles: walletStore.activeProfiles,
                 selectedProfileID: walletStore.selectedProfileID,
                 onSelect: selectWallet,
                 onAddWallet: {
@@ -430,6 +431,8 @@ struct RootView: View {
     var body: some View {
         presentedTabs
         .onAppear {
+            walletStore.activateNetwork(preferences.network)
+            syncService.preload(profile: walletStore.selectedProfile)
             coinControlStore.activate(profileID: walletStore.selectedProfileID)
             applyDefaultKYCStatuses()
             if isInitialDiscoveryBlocking {
@@ -439,6 +442,12 @@ struct RootView: View {
         .onChange(of: walletStore.selectedProfileID) { _, profileID in
             coinControlStore.activate(profileID: profileID)
             applyDefaultKYCStatuses()
+        }
+        .onChange(of: preferences.network) { _, network in
+            liveRPCService.reset()
+            walletStore.activateNetwork(network)
+            syncService.preload(profile: walletStore.selectedProfile)
+            selectedTab = .wallet
         }
         .onChange(of: preferences.utxoCardDefault) { _, _ in
             applyDefaultKYCStatuses()
@@ -472,12 +481,16 @@ struct RootView: View {
         .task(id: launchRefreshTaskID) {
             await refreshAfterLaunchOrActivation()
         }
+        .task(id: "testnet-balance-\(launchRefreshTaskID)") {
+            await periodicallyRefreshTestnetBalance()
+        }
         .task(id: "coverage-\(launchRefreshTaskID)") {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5 * 60))
                 guard !Task.isCancelled else { return }
                 guard scenePhase == .active,
-                      let profile = walletStore.selectedProfile else { continue }
+                      let profile = walletStore.selectedProfile,
+                      profile.network == KaspaNetwork.mainnet.rawValue else { continue }
                 await syncService.checkHistoricalAddressesIfNeeded(
                     profile: profile,
                     walletStore: walletStore,
@@ -501,7 +514,26 @@ struct RootView: View {
                 await liveRPCService.configure(
                     profile: profile,
                     nodeURL: snapshot.nodeURL,
-                    engine: engine
+                    engine: engine,
+                    additionalAddresses: protectedVaultStore.watchedAddresses(for: profile.id)
+                )
+            }
+        }
+        .onChange(of: protectedVaultStore.watchedAddresses(for: walletStore.selectedProfileID)) { _, _ in
+            guard let profile = walletStore.selectedProfile,
+                  let snapshot = syncService.snapshot,
+                  !profile.requiresInitialDiscovery else { return }
+            Task {
+                await liveRPCService.configure(
+                    profile: profile,
+                    nodeURL: snapshot.nodeURL,
+                    engine: engine,
+                    additionalAddresses: protectedVaultStore.watchedAddresses(for: profile.id)
+                )
+                await protectedVaultStore.refreshAllOnChain(
+                    profileID: profile.id,
+                    engine: engine,
+                    preferences: preferences
                 )
             }
         }
@@ -642,7 +674,7 @@ struct RootView: View {
     private var launchRefreshTaskID: String {
         let profileID = walletStore.selectedProfileID?.uuidString ?? "no-profile"
         let phase = scenePhase == .active ? "active" : "inactive"
-        return "\(profileID)-\(phase)"
+        return "\(walletStore.activeNetwork.rawValue)-\(profileID)-\(phase)"
     }
 
     private func refreshAfterLaunchOrActivation() async {
@@ -684,7 +716,8 @@ struct RootView: View {
             preferences: preferences,
             force: false,
             minimumInterval: 9,
-            includeTransactionHistory: shouldAutomaticallyRefreshHistory,
+            includeTransactionHistory: shouldAutomaticallyRefreshHistory
+                && profile.network == KaspaNetwork.mainnet.rawValue,
             keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync,
             addressDiscoveryPolicy: profile.requiresInitialDiscovery
                 ? .comprehensive : .lightweight,
@@ -709,7 +742,8 @@ struct RootView: View {
             automaticallyRefreshedHistoryProfileID = profile.id
         }
 
-        if !isInitialImportedWalletSync,
+        if profile.network == KaspaNetwork.mainnet.rawValue,
+           !isInitialImportedWalletSync,
            walletStore.selectedProfileID == profile.id {
             Task { @MainActor in
                 await syncService.checkHistoricalAddressesIfNeeded(
@@ -769,6 +803,11 @@ struct RootView: View {
             walletStore: walletStore
         )
         walletStore.reloadCachedTransactions(profileID: profile.id)
+        await protectedVaultStore.refreshAllOnChain(
+            profileID: profile.id,
+            engine: engine,
+            preferences: preferences
+        )
         await refreshConfirmationScoreIfNeeded(force: true)
 
         if let snapshot = syncService.snapshot,
@@ -776,7 +815,8 @@ struct RootView: View {
             await liveRPCService.configure(
                 profile: currentProfile,
                 nodeURL: snapshot.nodeURL,
-                engine: engine
+                engine: engine,
+                additionalAddresses: protectedVaultStore.watchedAddresses(for: currentProfile.id)
             )
             scheduleConfirmationResolution(profileID: currentProfile.id)
         }
@@ -796,6 +836,22 @@ struct RootView: View {
         }
         guard force || needsUpdates else { return }
         await syncService.refreshVirtualBlueScore(force: force)
+    }
+
+    private func periodicallyRefreshTestnetBalance() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            guard scenePhase == .active,
+                  let profile = walletStore.selectedProfile,
+                  profile.network == KaspaNetwork.testnet10.rawValue,
+                  syncService.isNetworkAvailable else { continue }
+            if let syncedAt = syncService.snapshot?.syncedAt,
+               Date().timeIntervalSince1970 - syncedAt < 30 {
+                continue
+            }
+            scheduleNotificationRefresh()
+        }
     }
 
     private func scheduleNotificationRefresh() {
@@ -872,6 +928,11 @@ struct RootView: View {
         await syncService.reconcilePendingTransactions(
             profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
             walletStore: walletStore
+        )
+        await protectedVaultStore.refreshAllOnChain(
+            profileID: profile.id,
+            engine: engine,
+            preferences: preferences
         )
         await syncService.reconcileTransactionIDs(
             addedUTXOs.map(\.txID),
@@ -1244,7 +1305,7 @@ struct UTXOsView: View {
                 }
 
                 Button {
-                    openURL(preferences.explorer.transactionURL(utxo.txID))
+                    openURL(preferences.explorer.transactionURL(utxo.txID, network: preferences.network))
                 } label: {
                     HStack(alignment: .top, spacing: 8) {
                         Text(utxo.txID)
@@ -1465,7 +1526,8 @@ struct UTXOsView: View {
     }
 
     private func formatKas(_ amount: Double) -> String {
-        amount.formatted(.number.precision(.fractionLength(0...8))) + "\u{00A0}KAS"
+        amount.formatted(.number.precision(.fractionLength(0...8)))
+            + "\u{00A0}" + preferences.network.currencySymbol
     }
 
     private func usdValueText(for utxo: WalletUTXO) -> String? {

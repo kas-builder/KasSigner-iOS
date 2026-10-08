@@ -54,6 +54,10 @@ for REQUIRED_EXPORT in \
     create_send_pskb_with_utxos \
     create_protected_vault_funding_pskb_with_utxos \
     create_protected_vault_approved_spend_pskb \
+    create_protected_vault_v2_spend_pskb \
+    create_protected_vault_v2_pending_spend_pskb \
+    derive_protected_vault_pending_with_recovery \
+    sign_testnet10_vault_v2_pskb \
     pskt_summary \
     pskt_relay_to_kspt_v2 \
     pskt_merge_signed_kspt_v2 \

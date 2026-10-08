@@ -22,7 +22,12 @@ use kaspa_txscript::{
     EngineCtx, EngineFlags, TxScriptEngine,
 };
 use kaspa_txscript_errors::TxScriptError;
-use kassee_web::{build_protected_vault_pending_script, build_protected_vault_script};
+use kassee_web::{
+    build_protected_vault_pending_script, build_protected_vault_script,
+    build_protected_vault_script_with_destinations,
+    build_protected_vault_pending_script_with_recovery,
+    build_protected_vault_script_with_recovery,
+};
 use secp256k1::{Keypair, Message, SecretKey};
 
 const INPUT_VALUE: u64 = 500_000_000;
@@ -147,6 +152,58 @@ fn approved_destination_executes_immediately() {
         None,
     );
     assert!(run_vm(&tx, &fixture.vault_entry).is_ok());
+}
+
+#[test]
+fn each_committed_destination_is_immediate_and_an_unlisted_one_is_rejected() {
+    let fixture = Fixture::new();
+    let second = p2pk_spk(13);
+    let vault_script = build_protected_vault_script_with_destinations(
+        &fixture.owner_pubkey,
+        &[versioned(&fixture.approved_spk), versioned(&second)],
+        DELAY_DAA,
+        MAX_FEE,
+    )
+    .unwrap();
+    let vault_entry = UtxoEntry::new(
+        INPUT_VALUE,
+        pay_to_script_hash_script(&vault_script),
+        1_000,
+        false,
+        Some(fixture.covenant_id),
+    );
+    for destination in [&fixture.approved_spk, &second] {
+        let mut tx = fixture.vault_tx(destination.clone(), INPUT_VALUE - FEE);
+        sign_vault_branch(&mut tx, &vault_entry, &fixture.owner, &vault_script, true, None);
+        assert!(run_vm(&tx, &vault_entry).is_ok());
+    }
+    let mut unlisted = fixture.vault_tx(fixture.other_spk.clone(), INPUT_VALUE - FEE);
+    sign_vault_branch(&mut unlisted, &vault_entry, &fixture.owner, &vault_script, true, None);
+    assert!(run_vm(&unlisted, &vault_entry).is_err());
+}
+
+#[test]
+fn five_committed_destinations_all_remain_spendable() {
+    let fixture = Fixture::new();
+    let destinations: Vec<_> = (20..25).map(p2pk_spk).collect();
+    let approved_spks: Vec<_> = destinations.iter().map(versioned).collect();
+    let vault_script = build_protected_vault_script_with_destinations(
+        &fixture.owner_pubkey, &approved_spks, DELAY_DAA, MAX_FEE,
+    )
+    .unwrap();
+    assert!(vault_script.len() <= 520);
+    let vault_entry = UtxoEntry::new(
+        INPUT_VALUE,
+        pay_to_script_hash_script(&vault_script),
+        1_000,
+        false,
+        Some(fixture.covenant_id),
+    );
+    for destination in destinations {
+        let mut tx = fixture.vault_tx(destination, INPUT_VALUE - FEE);
+        sign_vault_branch(&mut tx, &vault_entry, &fixture.owner, &vault_script, true, None);
+        assert!(run_vm(&tx, &vault_entry).is_ok());
+    }
 }
 
 #[test]
@@ -365,6 +422,301 @@ fn spend_without_authorized_covenant_binding_is_rejected() {
         None,
     );
     assert!(run_vm(&tx, &fixture.vault_entry).is_err());
+}
+
+#[test]
+fn recovery_paths_execute_and_keep_the_delay_for_the_owner() {
+    let fixture = Fixture::new();
+    let recovery_secret = SecretKey::from_slice(&[31u8; 32]).unwrap();
+    let recovery = Keypair::from_secret_key(secp256k1::SECP256K1, &recovery_secret);
+    let recovery_pubkey = recovery.x_only_public_key().0.serialize();
+    let recovery_spk = ScriptPublicKey::from_vec(0, {
+        let mut script = vec![0x20];
+        script.extend_from_slice(&recovery_pubkey);
+        script.push(0xac);
+        script
+    });
+    let destination = versioned(&fixture.other_spk);
+    let pending_script = build_protected_vault_pending_script_with_recovery(
+        &fixture.owner_pubkey, &destination, &versioned(&recovery_spk),
+        DELAY_DAA, MAX_FEE,
+    ).unwrap();
+    let pending_spk = pay_to_script_hash_script(&pending_script);
+
+    for emergency in [false, true] {
+        let vault_script = build_protected_vault_script_with_recovery(
+            &fixture.owner_pubkey, &[versioned(&fixture.approved_spk)],
+            &versioned(&recovery_spk), DELAY_DAA, MAX_FEE, emergency,
+        ).unwrap();
+        let vault_entry = UtxoEntry::new(
+            INPUT_VALUE, pay_to_script_hash_script(&vault_script),
+            1_000, false, Some(fixture.covenant_id),
+        );
+        let mut approved = fixture.vault_tx(fixture.approved_spk.clone(), INPUT_VALUE - FEE);
+        sign_v2_vault(
+            &mut approved, &vault_entry, &fixture.owner, &vault_script,
+            Some(true), None, emergency,
+        );
+        assert!(run_vm(&approved, &vault_entry).is_ok());
+
+        let mut delayed = fixture.vault_tx(pending_spk.clone(), INPUT_VALUE - FEE);
+        sign_v2_vault(
+            &mut delayed, &vault_entry, &fixture.owner, &vault_script,
+            Some(false), Some(&destination), emergency,
+        );
+        assert!(run_vm(&delayed, &vault_entry).is_ok());
+
+        let mut recovery_spend = fixture.vault_tx(recovery_spk.clone(), INPUT_VALUE - FEE);
+        sign_v2_vault(
+            &mut recovery_spend, &vault_entry, &recovery, &vault_script,
+            None, None, true,
+        );
+        let recovery_result = run_vm(&recovery_spend, &vault_entry);
+        assert_eq!(recovery_result.is_ok(), emergency, "{recovery_result:?}");
+
+        let mut recovery_to_other = fixture.vault_tx(fixture.other_spk.clone(), INPUT_VALUE - FEE);
+        sign_v2_vault(
+            &mut recovery_to_other, &vault_entry, &recovery, &vault_script,
+            None, None, true,
+        );
+        assert!(run_vm(&recovery_to_other, &vault_entry).is_err());
+    }
+
+    let pending_entry = UtxoEntry::new(
+        INPUT_VALUE - FEE, pending_spk, 2_000, false, Some(fixture.covenant_id),
+    );
+    let mut early = transaction(
+        fixture.other_spk.clone(), INPUT_VALUE - 2 * FEE, DELAY_DAA - 1,
+        fixture.covenant_id,
+    );
+    sign_v2_pending(&mut early, &pending_entry, &fixture.owner, &pending_script, false);
+    assert!(run_vm(&early, &pending_entry).is_err());
+
+    let mut mature = transaction(
+        fixture.other_spk.clone(), INPUT_VALUE - 2 * FEE, DELAY_DAA,
+        fixture.covenant_id,
+    );
+    sign_v2_pending(&mut mature, &pending_entry, &fixture.owner, &pending_script, false);
+    assert!(run_vm(&mature, &pending_entry).is_ok());
+
+    let mut cancel = transaction(
+        recovery_spk.clone(), INPUT_VALUE - 2 * FEE, 0, fixture.covenant_id,
+    );
+    sign_v2_pending(&mut cancel, &pending_entry, &recovery, &pending_script, true);
+    assert!(run_vm(&cancel, &pending_entry).is_ok());
+
+    let mut cancel_elsewhere = transaction(
+        fixture.other_spk.clone(), INPUT_VALUE - 2 * FEE, 0, fixture.covenant_id,
+    );
+    sign_v2_pending(
+        &mut cancel_elsewhere, &pending_entry, &recovery, &pending_script, true,
+    );
+    assert!(run_vm(&cancel_elsewhere, &pending_entry).is_err());
+}
+
+#[test]
+fn every_approved_destination_executes_with_five_address_recovery_vault() {
+    let fixture = Fixture::new();
+    let recovery_spk = p2pk_spk(50);
+    let approved = (60..65).map(p2pk_spk).collect::<Vec<_>>();
+    let approved_versioned = approved.iter().map(versioned).collect::<Vec<_>>();
+    for emergency in [false, true] {
+        let script = build_protected_vault_script_with_recovery(
+            &fixture.owner_pubkey, &approved_versioned,
+            &versioned(&recovery_spk), DELAY_DAA, MAX_FEE, emergency,
+        ).unwrap();
+        let entry = UtxoEntry::new(
+            INPUT_VALUE, pay_to_script_hash_script(&script),
+            1_000, false, Some(fixture.covenant_id),
+        );
+        for destination in &approved {
+            let mut tx = fixture.vault_tx(destination.clone(), INPUT_VALUE - FEE);
+            sign_v2_vault(&mut tx, &entry, &fixture.owner, &script, Some(true), None, emergency);
+            assert!(run_vm(&tx, &entry).is_ok());
+        }
+        let mut unapproved = fixture.vault_tx(fixture.other_spk.clone(), INPUT_VALUE - FEE);
+        sign_v2_vault(&mut unapproved, &entry, &fixture.owner, &script, Some(true), None, emergency);
+        assert!(run_vm(&unapproved, &entry).is_err());
+    }
+}
+
+#[test]
+fn testnet_hot_owner_can_sign_and_spend_the_built_v2_pskb() {
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let recovery_mnemonic = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
+    let owner_secret = kassee_web::testnet_test_vector_private_key(mnemonic, 0, 0).unwrap();
+    let owner_keypair = Keypair::from_secret_key(
+        secp256k1::SECP256K1, &SecretKey::from_slice(&owner_secret).unwrap()
+    );
+    let owner = owner_keypair.x_only_public_key().0.serialize();
+    let approved_spk = p2pk_spk(11);
+    let approved_address = kassee_web::encode_p2pk_address(
+        &hex::encode(&versioned(&approved_spk)[3..35]), Some("testnet-10".into())
+    ).unwrap();
+    let recovery_secret_bytes = kassee_web::testnet_test_vector_private_key(
+        recovery_mnemonic, 0, 0
+    ).unwrap();
+    let recovery_secret = SecretKey::from_slice(&recovery_secret_bytes).unwrap();
+    let recovery_key = Keypair::from_secret_key(secp256k1::SECP256K1, &recovery_secret);
+    let recovery_pubkey = recovery_key.x_only_public_key().0.serialize();
+    let recovery_spk = p2pk_spk_from_key(&recovery_pubkey);
+    let recovery_address = kassee_web::encode_p2pk_address(
+        &hex::encode(recovery_pubkey), Some("testnet-10".into())
+    ).unwrap();
+    let vault_script = build_protected_vault_script_with_recovery(
+        &owner, &[versioned(&approved_spk)], &versioned(&recovery_spk),
+        DELAY_DAA, 10_000_000, true,
+    ).unwrap();
+    let covenant_id = Hash::from_u64_word(42);
+    let vault_entry = UtxoEntry::new(INPUT_VALUE,
+        pay_to_script_hash_script(&vault_script), 1_000, false,
+        Some(covenant_id));
+    let vault_utxo = serde_json::json!({
+        "tx_id": Hash::from_u64_word(1).to_string(), "index": 0,
+        "amount": INPUT_VALUE,
+        "script_public_key": vault_entry.script_public_key.script(),
+        "block_daa_score": 1000,
+        "covenant_id": covenant_id.to_string(),
+    });
+    let pskb = kassee_web::create_protected_vault_v2_spend_pskb(
+        &vault_utxo.to_string(), &hex::encode(owner),
+        &serde_json::json!([approved_address]).to_string(),
+        &recovery_address, &approved_address, DELAY_DAA, true,
+        "approved", FEE,
+    ).unwrap();
+    let signed = kassee_web::sign_testnet10_vault_v2_pskb(
+        &pskb, mnemonic, 0, 0,
+    ).unwrap();
+    assert!(!kassee_web::finalize_protected_vault_test_pskb(&signed).unwrap().is_empty());
+    let mut tx = transaction(approved_spk, INPUT_VALUE - FEE, 0, covenant_id);
+    tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&signed).unwrap();
+    tx.finalize();
+    assert!(run_vm(&tx, &vault_entry).is_ok());
+
+    let other_spk = p2pk_spk(12);
+    let other_address = kassee_web::encode_p2pk_address(
+        &hex::encode(&versioned(&other_spk)[3..35]), Some("testnet-10".into())
+    ).unwrap();
+    let pending_script = build_protected_vault_pending_script_with_recovery(
+        &owner, &versioned(&other_spk), &versioned(&recovery_spk),
+        DELAY_DAA, 10_000_000,
+    ).unwrap();
+    let pending_spk = pay_to_script_hash_script(&pending_script);
+    let begin = kassee_web::create_protected_vault_v2_spend_pskb(
+        &vault_utxo.to_string(), &hex::encode(owner),
+        &serde_json::json!([approved_address]).to_string(),
+        &recovery_address, &other_address, DELAY_DAA, true,
+        "beginDelay", FEE,
+    ).unwrap();
+    let begin_signed = kassee_web::sign_testnet10_vault_v2_pskb(
+        &begin, mnemonic, 0, 0,
+    ).unwrap();
+    assert!(!kassee_web::finalize_protected_vault_test_pskb(&begin_signed).unwrap().is_empty());
+    let mut begin_tx = transaction(pending_spk.clone(), INPUT_VALUE - FEE, 0, covenant_id);
+    begin_tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&begin_signed).unwrap();
+    begin_tx.finalize();
+    assert!(run_vm(&begin_tx, &vault_entry).is_ok());
+
+    let pending_entry = UtxoEntry::new(INPUT_VALUE - FEE, pending_spk.clone(),
+        2_000, false, Some(covenant_id));
+    let pending_utxo = serde_json::json!({
+        "tx_id": Hash::from_u64_word(1).to_string(), "index": 0,
+        "amount": INPUT_VALUE - FEE,
+        "script_public_key": pending_spk.script(),
+        "block_daa_score": 2000,
+        "covenant_id": covenant_id.to_string(),
+    });
+    let mature = kassee_web::create_protected_vault_v2_pending_spend_pskb(
+        &pending_utxo.to_string(), &hex::encode(owner), &recovery_address,
+        &other_address, DELAY_DAA, "mature", FEE,
+    ).unwrap();
+    let mature_signed = kassee_web::sign_testnet10_vault_v2_pskb(
+        &mature, mnemonic, 0, 0,
+    ).unwrap();
+    assert!(!kassee_web::finalize_protected_vault_test_pskb(&mature_signed).unwrap().is_empty());
+    let mut mature_tx = transaction(other_spk, INPUT_VALUE - 2 * FEE,
+        DELAY_DAA, covenant_id);
+    mature_tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&mature_signed).unwrap();
+    mature_tx.finalize();
+    assert!(run_vm(&mature_tx, &pending_entry).is_ok());
+
+    let cancel = kassee_web::create_protected_vault_v2_pending_spend_pskb(
+        &pending_utxo.to_string(), &hex::encode(owner), &recovery_address,
+        &other_address, DELAY_DAA, "cancel", FEE,
+    ).unwrap();
+    let cancel_signed = kassee_web::sign_testnet10_vault_v2_pskb(
+        &cancel, recovery_mnemonic, 0, 0,
+    ).unwrap();
+    assert!(!kassee_web::finalize_protected_vault_test_pskb(&cancel_signed).unwrap().is_empty());
+    let mut cancel_tx = transaction(recovery_spk.clone(), INPUT_VALUE - 2 * FEE,
+        0, covenant_id);
+    cancel_tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&cancel_signed).unwrap();
+    cancel_tx.finalize();
+    assert!(run_vm(&cancel_tx, &pending_entry).is_ok());
+
+    let emergency = kassee_web::create_protected_vault_v2_spend_pskb(
+        &vault_utxo.to_string(), &hex::encode(owner),
+        &serde_json::json!([approved_address]).to_string(),
+        &recovery_address, &recovery_address, DELAY_DAA, true,
+        "emergency", FEE,
+    ).unwrap();
+    let emergency_signed = kassee_web::sign_testnet10_vault_v2_pskb(
+        &emergency, recovery_mnemonic, 0, 0,
+    ).unwrap();
+    assert!(!kassee_web::finalize_protected_vault_test_pskb(&emergency_signed).unwrap().is_empty());
+    let mut emergency_tx = transaction(recovery_spk, INPUT_VALUE - FEE, 0, covenant_id);
+    emergency_tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&emergency_signed).unwrap();
+    emergency_tx.finalize();
+    assert!(run_vm(&emergency_tx, &vault_entry).is_ok());
+}
+
+fn p2pk_spk_from_key(key: &[u8; 32]) -> ScriptPublicKey {
+    let mut script = vec![0x20];
+    script.extend_from_slice(key);
+    script.push(0xac);
+    ScriptPublicKey::from_vec(0, script)
+}
+
+fn sign_v2_vault(
+    tx: &mut Transaction,
+    entry: &UtxoEntry,
+    signer: &Keypair,
+    redeem_script: &[u8],
+    approved: Option<bool>,
+    destination: Option<&[u8]>,
+    emergency: bool,
+) {
+    let signature = signature(tx, entry, signer);
+    let mut builder = ScriptBuilder::new();
+    if let Some(destination) = destination {
+        builder.add_data(destination).unwrap();
+    }
+    if let Some(approved) = approved {
+        builder.add_op(if approved { OpTrue } else { OpFalse }).unwrap();
+    }
+    builder.add_data(&signature).unwrap();
+    if emergency {
+        builder.add_op(if approved.is_none() { OpTrue } else { OpFalse }).unwrap();
+    }
+    builder.add_data(redeem_script).unwrap();
+    tx.inputs[0].signature_script = builder.drain();
+    tx.finalize();
+}
+
+fn sign_v2_pending(
+    tx: &mut Transaction,
+    entry: &UtxoEntry,
+    signer: &Keypair,
+    redeem_script: &[u8],
+    recovery: bool,
+) {
+    let signature = signature(tx, entry, signer);
+    tx.inputs[0].signature_script = ScriptBuilder::new()
+        .add_data(&signature).unwrap()
+        .add_op(if recovery { OpTrue } else { OpFalse }).unwrap()
+        .add_data(redeem_script).unwrap()
+        .drain();
+    tx.finalize();
 }
 
 fn transaction(

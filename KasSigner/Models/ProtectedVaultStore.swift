@@ -1,19 +1,120 @@
 import Foundation
 
+struct ProtectedVaultSetupDraft: Codable, Equatable, Identifiable {
+    enum Step: String, Codable {
+        case rules
+        case review
+        case destinations
+        case reviewDetails
+    }
+
+    let id: UUID
+    let profileID: UUID
+    let createdAt: Date
+    var approvedAddressCount: Int
+    var approvedAddresses: [String]
+    var recoveryAddress: String
+    var recoveryPath: ProtectedVault.RecoveryPath
+    var delayDays: Int
+    var delayHours: Int
+    var delayMinutes: Int
+    var selectedUTXOIDs: [String]
+    var feeChoiceRawValue: String
+    var customFeeText: String
+    var step: Step
+
+    init(
+        id: UUID = UUID(),
+        profileID: UUID,
+        createdAt: Date = .now,
+        approvedAddressCount: Int,
+        approvedAddresses: [String],
+        recoveryAddress: String,
+        recoveryPath: ProtectedVault.RecoveryPath,
+        delayDays: Int,
+        delayHours: Int,
+        delayMinutes: Int,
+        selectedUTXOIDs: [String],
+        feeChoiceRawValue: String = "normal",
+        customFeeText: String = "",
+        step: Step = .review
+    ) {
+        self.id = id
+        self.profileID = profileID
+        self.createdAt = createdAt
+        self.approvedAddressCount = approvedAddressCount
+        self.approvedAddresses = approvedAddresses
+        self.recoveryAddress = recoveryAddress
+        self.recoveryPath = recoveryPath
+        self.delayDays = delayDays
+        self.delayHours = delayHours
+        self.delayMinutes = delayMinutes
+        self.selectedUTXOIDs = selectedUTXOIDs
+        self.feeChoiceRawValue = feeChoiceRawValue
+        self.customFeeText = customFeeText
+        self.step = step
+    }
+}
+
 struct ProtectedVault: Identifiable, Codable, Equatable {
+    struct PendingWithdrawal: Codable, Equatable, Identifiable {
+        enum CompletionOutcome: String, Codable {
+            case recovery
+            case delayCompleted
+        }
+
+        let id: UUID
+        let destinationAddress: String
+        let pendingAddress: String
+        let transactionID: String
+        let completionTransactionID: String?
+        let completionOutcome: CompletionOutcome?
+        let createdAt: Date
+        let pendingBlockDAAScore: UInt64?
+        let completionReviewRequested: Bool?
+        let completedAt: Date?
+
+        init(id: UUID = UUID(), destinationAddress: String, pendingAddress: String,
+             transactionID: String, createdAt: Date = .now,
+             completionTransactionID: String? = nil,
+             completionOutcome: CompletionOutcome? = nil,
+             pendingBlockDAAScore: UInt64? = nil,
+             completionReviewRequested: Bool? = nil, completedAt: Date? = nil) {
+            self.id = id
+            self.destinationAddress = destinationAddress
+            self.pendingAddress = pendingAddress
+            self.transactionID = transactionID
+            self.completionTransactionID = completionTransactionID
+            self.completionOutcome = completionOutcome
+            self.createdAt = createdAt
+            self.pendingBlockDAAScore = pendingBlockDAAScore
+            self.completionReviewRequested = completionReviewRequested
+            self.completedAt = completedAt
+        }
+    }
+
+    enum RecoveryPath: String, Codable, CaseIterable, Identifiable {
+        case cancelPendingWithdrawal = "Cancel pending withdrawal only"
+        case emergencyAnytime = "Emergency recovery at any time"
+
+        var id: Self { self }
+    }
+
     enum Status: String, Codable {
         case localDraft
         case fundingBroadcast
         case active
+        case pendingWithdrawal
         case incompatibleFunding
         case spent
 
         var title: String {
             switch self {
-            case .localDraft: "Local Draft"
-            case .fundingBroadcast: "Funding Broadcast"
-            case .active: "Active Vault"
-            case .incompatibleFunding: "Untagged Funding"
+            case .localDraft: "Awaiting Funding"
+            case .fundingBroadcast: "Transaction Being Broadcasted"
+            case .active: "Funded"
+            case .pendingWithdrawal: "Security Delay in Progress"
+            case .incompatibleFunding: "Needs Attention"
             case .spent: "Spent"
             }
         }
@@ -21,8 +122,13 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
 
     let id: UUID
     let profileID: UUID
+    var name: String?
     let amount: Decimal
+    let usesSendMaxFunding: Bool
     let approvedAddress: String
+    let approvedAddresses: [String]
+    let recoveryAddress: String?
+    let recoveryPath: RecoveryPath?
     let delayDays: Int
     let delayHours: Int
     let delayMinutes: Int
@@ -33,16 +139,22 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
     let createdAt: Date
     let status: Status
     let fundingTransactionID: String?
+    let approvedWithdrawalTransactionID: String?
     let fundedAt: Date?
     let lockedSompi: UInt64?
     let fundingOutpoints: [String]
     let covenantIDs: [String]
+    let pendingWithdrawals: [PendingWithdrawal]
 
     init(
         id: UUID = UUID(),
         profileID: UUID,
+        name: String? = nil,
         amount: Decimal,
-        approvedAddress: String,
+        usesSendMaxFunding: Bool = false,
+        approvedAddresses: [String],
+        recoveryAddress: String? = nil,
+        recoveryPath: RecoveryPath? = nil,
         delayDays: Int,
         delayHours: Int,
         delayMinutes: Int,
@@ -53,15 +165,23 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         createdAt: Date = .now,
         status: Status = .localDraft,
         fundingTransactionID: String? = nil,
+        approvedWithdrawalTransactionID: String? = nil,
         fundedAt: Date? = nil,
         lockedSompi: UInt64? = nil,
         fundingOutpoints: [String] = [],
-        covenantIDs: [String] = []
+        covenantIDs: [String] = [],
+        pendingWithdrawals: [PendingWithdrawal] = []
     ) {
         self.id = id
         self.profileID = profileID
+        self.name = name
         self.amount = amount
-        self.approvedAddress = approvedAddress
+        self.usesSendMaxFunding = usesSendMaxFunding
+        precondition(!approvedAddresses.isEmpty)
+        self.approvedAddress = approvedAddresses[0]
+        self.approvedAddresses = approvedAddresses
+        self.recoveryAddress = recoveryAddress
+        self.recoveryPath = recoveryPath
         self.delayDays = delayDays
         self.delayHours = delayHours
         self.delayMinutes = delayMinutes
@@ -72,10 +192,12 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         self.createdAt = createdAt
         self.status = status
         self.fundingTransactionID = fundingTransactionID
+        self.approvedWithdrawalTransactionID = approvedWithdrawalTransactionID
         self.fundedAt = fundedAt
         self.lockedSompi = lockedSompi
         self.fundingOutpoints = fundingOutpoints
         self.covenantIDs = covenantIDs
+        self.pendingWithdrawals = pendingWithdrawals
     }
 
     var delaySummary: String {
@@ -96,19 +218,30 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         lockedSompi.map { Decimal($0) / Decimal(100_000_000) }
     }
 
+    var displayName: String {
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedName.isEmpty ? "Protected Vault" : trimmedName
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case id, profileID, amount, approvedAddress, delayDays, delayHours
+        case id, profileID, name, amount, usesSendMaxFunding, approvedAddress, approvedAddresses, recoveryAddress, recoveryPath, delayDays, delayHours
         case delayMinutes, ownerDerivationIndex, ownerPublicKey, redeemScriptHex
-        case vaultAddress, createdAt, status, fundingTransactionID, fundedAt
-        case lockedSompi, fundingOutpoints, covenantIDs
+        case vaultAddress, createdAt, status, fundingTransactionID, approvedWithdrawalTransactionID, fundedAt
+        case lockedSompi, fundingOutpoints, covenantIDs, pendingWithdrawals
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = try values.decode(UUID.self, forKey: .id)
         profileID = try values.decode(UUID.self, forKey: .profileID)
+        name = try values.decodeIfPresent(String.self, forKey: .name)
         amount = try values.decode(Decimal.self, forKey: .amount)
+        usesSendMaxFunding = try values.decodeIfPresent(Bool.self, forKey: .usesSendMaxFunding) ?? false
         approvedAddress = try values.decode(String.self, forKey: .approvedAddress)
+        approvedAddresses = try values.decodeIfPresent([String].self, forKey: .approvedAddresses)
+            ?? [approvedAddress]
+        recoveryAddress = try values.decodeIfPresent(String.self, forKey: .recoveryAddress)
+        recoveryPath = try values.decodeIfPresent(RecoveryPath.self, forKey: .recoveryPath)
         delayDays = try values.decode(Int.self, forKey: .delayDays)
         delayHours = try values.decode(Int.self, forKey: .delayHours)
         delayMinutes = try values.decode(Int.self, forKey: .delayMinutes)
@@ -119,10 +252,12 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         createdAt = try values.decode(Date.self, forKey: .createdAt)
         status = try values.decodeIfPresent(Status.self, forKey: .status) ?? .localDraft
         fundingTransactionID = try values.decodeIfPresent(String.self, forKey: .fundingTransactionID)
+        approvedWithdrawalTransactionID = try values.decodeIfPresent(String.self, forKey: .approvedWithdrawalTransactionID)
         fundedAt = try values.decodeIfPresent(Date.self, forKey: .fundedAt)
         lockedSompi = try values.decodeIfPresent(UInt64.self, forKey: .lockedSompi)
         fundingOutpoints = try values.decodeIfPresent([String].self, forKey: .fundingOutpoints) ?? []
         covenantIDs = try values.decodeIfPresent([String].self, forKey: .covenantIDs) ?? []
+        pendingWithdrawals = try values.decodeIfPresent([PendingWithdrawal].self, forKey: .pendingWithdrawals) ?? []
     }
 }
 
@@ -134,6 +269,9 @@ struct ProtectedVaultDescriptor: Decodable, Equatable {
     let scriptHashHex: String
     let vaultAddress: String
     let delayDAA: UInt64
+    let scriptVersion: Int?
+    let recoveryAddress: String?
+    let recoveryPath: String?
 
     enum CodingKeys: String, CodingKey {
         case ownerDerivationIndex = "owner_derivation_index"
@@ -142,6 +280,25 @@ struct ProtectedVaultDescriptor: Decodable, Equatable {
         case redeemScriptHex = "redeem_script_hex"
         case scriptHashHex = "script_hash_hex"
         case vaultAddress = "vault_address"
+        case delayDAA = "delay_daa"
+        case scriptVersion = "script_version"
+        case recoveryAddress = "recovery_address"
+        case recoveryPath = "recovery_path"
+    }
+}
+
+struct ProtectedVaultPendingDescriptor: Decodable, Equatable {
+    let pendingAddress: String
+    let redeemScriptHex: String
+    let destinationAddress: String
+    let recoveryAddress: String
+    let delayDAA: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case pendingAddress = "pending_address"
+        case redeemScriptHex = "redeem_script_hex"
+        case destinationAddress = "destination_address"
+        case recoveryAddress = "recovery_address"
         case delayDAA = "delay_daa"
     }
 }
@@ -167,20 +324,6 @@ struct ProtectedVaultFundingPlan: Equatable {
             throw ProtectedVaultFundingPlanError.invalidFee
         }
 
-        var sourceAmount = vault.amount
-        var scaledAmount = Decimal()
-        var roundedAmount = Decimal()
-        NSDecimalMultiplyByPowerOf10(&scaledAmount, &sourceAmount, 8, .plain)
-        NSDecimalRound(&roundedAmount, &scaledAmount, 0, .plain)
-
-        guard scaledAmount == roundedAmount,
-              roundedAmount > 0,
-              roundedAmount <= Decimal(UInt64.max)
-        else {
-            throw ProtectedVaultFundingPlanError.invalidDepositAmount
-        }
-
-        let depositSompi = NSDecimalNumber(decimal: roundedAmount).uint64Value
         var inputTotalSompi: UInt64 = 0
         for input in inputs {
             let addition = inputTotalSompi.addingReportingOverflow(input.amount)
@@ -188,6 +331,29 @@ struct ProtectedVaultFundingPlan: Equatable {
                 throw ProtectedVaultFundingPlanError.inputTotalOverflow
             }
             inputTotalSompi = addition.partialValue
+        }
+
+        let depositSompi: UInt64
+        if vault.usesSendMaxFunding {
+            guard inputTotalSompi > feeSompi else {
+                throw ProtectedVaultFundingPlanError.insufficientInput
+            }
+            depositSompi = inputTotalSompi - feeSompi
+        } else {
+            var sourceAmount = vault.amount
+            var scaledAmount = Decimal()
+            var roundedAmount = Decimal()
+            NSDecimalMultiplyByPowerOf10(&scaledAmount, &sourceAmount, 8, .plain)
+            NSDecimalRound(&roundedAmount, &scaledAmount, 0, .plain)
+
+            guard scaledAmount == roundedAmount,
+                  roundedAmount > 0,
+                  roundedAmount <= Decimal(UInt64.max)
+            else {
+                throw ProtectedVaultFundingPlanError.invalidDepositAmount
+            }
+
+            depositSompi = NSDecimalNumber(decimal: roundedAmount).uint64Value
         }
 
         let required = depositSompi.addingReportingOverflow(feeSompi)
@@ -248,6 +414,10 @@ struct VerifiedProtectedVaultFunding: Equatable {
     let changeSompi: UInt64
     let inputCount: Int
     let selectedOutpoints: [String]
+    let selectedInputsMatchDecodedPSKB: Bool
+    let vaultDepositMatches: Bool
+    let changeOutputsMatchWallet: Bool
+    let feeMatchesInputOutputTotals: Bool
 }
 
 enum ProtectedVaultFundingVerificationError: LocalizedError, Equatable {
@@ -410,7 +580,11 @@ enum ProtectedVaultFundingVerifier {
             feeSompi: fee,
             changeSompi: change.partialValue,
             inputCount: inputs.count,
-            selectedOutpoints: plan.inputs.map { "\($0.txID):\($0.index)" }
+            selectedOutpoints: plan.inputs.map { "\($0.txID):\($0.index)" },
+            selectedInputsMatchDecodedPSKB: true,
+            vaultDepositMatches: true,
+            changeOutputsMatchWallet: true,
+            feeMatchesInputOutputTotals: true
         )
     }
 
@@ -484,9 +658,13 @@ enum SignedProtectedVaultFundingVerifier {
 @MainActor
 final class ProtectedVaultStore: ObservableObject {
     @Published private(set) var vaults: [ProtectedVault] = []
+    @Published private(set) var setupDrafts: [ProtectedVaultSetupDraft] = []
 
     private let storageKey = "kassigner.protectedVaults.v1"
+    private let setupDraftStorageKey = "kassigner.protectedVaultSetupDrafts.v1"
+    private let lastOpenedStorageKey = "kassigner.protectedVaultLastOpened.v1"
     private let defaults: UserDefaults
+    private var lastOpenedAtByItemKey: [String: Date] = [:]
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -497,6 +675,49 @@ final class ProtectedVaultStore: ObservableObject {
         vaults
             .filter { $0.profileID == profileID }
             .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func watchedAddresses(for profileID: UUID?) -> [String] {
+        guard let profileID else { return [] }
+        return Array(Set(vaults(for: profileID).flatMap { vault in
+            [vault.vaultAddress].compactMap { $0 }
+                + vault.pendingWithdrawals
+                    .filter { $0.completedAt == nil }
+                    .map(\.pendingAddress)
+        })).sorted()
+    }
+
+    func setupDrafts(for profileID: UUID) -> [ProtectedVaultSetupDraft] {
+        setupDrafts
+            .filter { $0.profileID == profileID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func setupDraft(id: UUID) -> ProtectedVaultSetupDraft? {
+        setupDrafts.first { $0.id == id }
+    }
+
+    func lastOpenedAt(id: UUID, profileID: UUID) -> Date? {
+        lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)]
+    }
+
+    func recordOpened(id: UUID, profileID: UUID, at date: Date = .now) {
+        lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
+        saveLastOpenedDates()
+    }
+
+    func saveSetupDraft(_ draft: ProtectedVaultSetupDraft) {
+        if let index = setupDrafts.firstIndex(where: { $0.id == draft.id }) {
+            setupDrafts[index] = draft
+        } else {
+            setupDrafts.append(draft)
+        }
+        saveSetupDrafts()
+    }
+
+    func removeSetupDraft(id: UUID) {
+        setupDrafts.removeAll { $0.id == id }
+        saveSetupDrafts()
     }
 
     func add(_ vault: ProtectedVault) {
@@ -510,6 +731,14 @@ final class ProtectedVaultStore: ObservableObject {
         save()
     }
 
+    func rename(id: UUID, to name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let index = vaults.firstIndex(where: { $0.id == id }) else { return }
+        vaults[index].name = trimmedName
+        save()
+    }
+
     func recordFundingBroadcast(id: UUID, transactionID: String) {
         update(id: id) { vault in
             replacing(vault, status: .fundingBroadcast,
@@ -519,12 +748,116 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
-    func recordApprovedSpend(id: UUID) {
+    func recordApprovedSpend(id: UUID, transactionID: String) {
         update(id: id) { vault in
             replacing(
                 vault, status: .spent,
                 fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                approvedWithdrawalTransactionID: transactionID,
                 lockedSompi: 0, fundingOutpoints: [], covenantIDs: []
+            )
+        }
+    }
+
+    func recordPendingWithdrawal(id: UUID, destination: String,
+                                 pendingAddress: String, transactionID: String,
+                                 pendingBalanceSompi: UInt64? = nil,
+                                 pendingBlockDAAScore: UInt64? = nil) {
+        update(id: id) { vault in
+            let prior = vault.pendingWithdrawals.first {
+                $0.pendingAddress == pendingAddress && $0.completedAt == nil
+            }
+            let pending = ProtectedVault.PendingWithdrawal(
+                id: prior?.id ?? UUID(),
+                destinationAddress: destination, pendingAddress: pendingAddress,
+                transactionID: transactionID,
+                createdAt: prior?.createdAt ?? .now,
+                completionTransactionID: nil,
+                pendingBlockDAAScore: pendingBlockDAAScore ?? prior?.pendingBlockDAAScore,
+                completionReviewRequested: prior?.completionReviewRequested
+            )
+            let existing = vault.pendingWithdrawals.filter { item in
+                !(item.pendingAddress == pendingAddress && item.completedAt == nil)
+            }
+            return replacing(vault, status: .pendingWithdrawal,
+                fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                lockedSompi: pendingBalanceSompi ?? vault.lockedSompi,
+                fundingOutpoints: [], covenantIDs: [],
+                pendingWithdrawals: existing + [pending])
+        }
+    }
+
+    func rememberPendingDestination(id: UUID, destination: String, pendingAddress: String) {
+        update(id: id) { vault in
+            guard !vault.pendingWithdrawals.contains(where: {
+                $0.pendingAddress == pendingAddress && $0.completedAt == nil
+            }) else { return vault }
+            let pending = ProtectedVault.PendingWithdrawal(
+                destinationAddress: destination, pendingAddress: pendingAddress,
+                transactionID: ""
+            )
+            return replacing(vault, status: vault.status,
+                fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                lockedSompi: vault.lockedSompi, fundingOutpoints: vault.fundingOutpoints,
+                covenantIDs: vault.covenantIDs,
+                pendingWithdrawals: vault.pendingWithdrawals + [pending])
+        }
+    }
+
+    func completePendingWithdrawal(
+        id: UUID,
+        pendingID: UUID,
+        transactionID: String,
+        outcome: ProtectedVault.PendingWithdrawal.CompletionOutcome
+    ) {
+        update(id: id) { vault in
+            let pending = vault.pendingWithdrawals.map { item in
+                item.id == pendingID
+                    ? ProtectedVault.PendingWithdrawal(id: item.id,
+                        destinationAddress: item.destinationAddress,
+                        pendingAddress: item.pendingAddress,
+                        transactionID: item.transactionID,
+                        createdAt: item.createdAt,
+                        completionTransactionID: transactionID,
+                        completionOutcome: outcome,
+                        pendingBlockDAAScore: item.pendingBlockDAAScore,
+                        completionReviewRequested: nil,
+                        completedAt: .now)
+                    : item
+            }
+            return replacing(vault, status: .spent,
+                fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
+                lockedSompi: 0, fundingOutpoints: [], covenantIDs: [],
+                pendingWithdrawals: pending)
+        }
+    }
+
+    func setCompletionReviewRequested(id: UUID, pendingID: UUID, requested: Bool) {
+        update(id: id) { vault in
+            let pending = vault.pendingWithdrawals.map { item in
+                guard item.id == pendingID, item.completedAt == nil else { return item }
+                return ProtectedVault.PendingWithdrawal(
+                    id: item.id,
+                    destinationAddress: item.destinationAddress,
+                    pendingAddress: item.pendingAddress,
+                    transactionID: item.transactionID,
+                    createdAt: item.createdAt,
+                    completionTransactionID: item.completionTransactionID,
+                    completionOutcome: item.completionOutcome,
+                    pendingBlockDAAScore: item.pendingBlockDAAScore,
+                    completionReviewRequested: requested ? true : nil,
+                    completedAt: item.completedAt
+                )
+            }
+            return replacing(
+                vault,
+                status: vault.status,
+                fundingTransactionID: vault.fundingTransactionID,
+                fundedAt: vault.fundedAt,
+                lockedSompi: vault.lockedSompi,
+                fundingOutpoints: vault.fundingOutpoints,
+                covenantIDs: vault.covenantIDs,
+                pendingWithdrawals: pending
             )
         }
     }
@@ -539,20 +872,99 @@ final class ProtectedVaultStore: ObservableObject {
         update(id: id) { vault in
             let covenantIDs = utxos.compactMap(\.covenantID).sorted()
             let onChainStatus: ProtectedVault.Status
-            if utxos.isEmpty {
-                onChainStatus = vault.status == .spent
-                    ? .spent
+            let onChainBalance: UInt64
+            let onChainOutpoints: [String]
+            let onChainCovenantIDs: [String]
+            // An approved withdrawal is terminal for this vault record. A
+            // concurrent address refresh can return a stale funding UTXO,
+            // and a later empty refresh must not regress the status to
+            // Funding Broadcast after that withdrawal has been recorded.
+            if vault.status == .spent || vault.approvedWithdrawalTransactionID != nil {
+                onChainStatus = .spent
+                onChainBalance = 0
+                onChainOutpoints = []
+                onChainCovenantIDs = []
+            } else if utxos.isEmpty {
+                onChainStatus = vault.status == .pendingWithdrawal
+                    ? .pendingWithdrawal
                     : (vault.fundingTransactionID == nil ? .localDraft : .fundingBroadcast)
+                onChainOutpoints = []
+                onChainCovenantIDs = []
+                // While a delayed withdrawal is in progress, the original vault
+                // address is expected to be empty. Preserve its last known value.
+                onChainBalance = vault.status == .pendingWithdrawal ? (vault.lockedSompi ?? 0) : 0
             } else if covenantIDs.count == utxos.count {
                 onChainStatus = .active
+                onChainBalance = total
+                onChainOutpoints = utxos.map(\.id).sorted()
+                onChainCovenantIDs = covenantIDs
             } else {
                 onChainStatus = .incompatibleFunding
+                onChainBalance = total
+                onChainOutpoints = utxos.map(\.id).sorted()
+                onChainCovenantIDs = covenantIDs
             }
             return replacing(vault,
                 status: onChainStatus,
                 fundingTransactionID: vault.fundingTransactionID, fundedAt: vault.fundedAt,
-                lockedSompi: total, fundingOutpoints: utxos.map(\.id).sorted(),
-                covenantIDs: covenantIDs)
+                lockedSompi: onChainBalance, fundingOutpoints: onChainOutpoints,
+                covenantIDs: onChainCovenantIDs)
+        }
+    }
+
+    @discardableResult
+    func refreshOnChain(
+        id: UUID,
+        engine: KasSignerEngine,
+        preferences: AppPreferences
+    ) async throws -> [WalletUTXO] {
+        guard let vault = vaults.first(where: { $0.id == id }),
+              let address = vault.vaultAddress else { return [] }
+
+        let result = try await engine.syncAddress(
+            address,
+            nodeConfiguration: preferences.nodeConfiguration
+        )
+        updateOnChainFunding(id: id, utxos: result.utxos)
+
+        if preferences.network == .testnet10 {
+            for pending in vault.pendingWithdrawals where pending.completedAt == nil {
+                let pendingResult = try await engine.syncAddress(
+                    pending.pendingAddress,
+                    nodeConfiguration: preferences.nodeConfiguration
+                )
+                if pendingResult.utxos.count == 1,
+                   let pendingUTXO = pendingResult.utxos.first,
+                   pendingUTXO.covenantID?.count == 64 {
+                    recordPendingWithdrawal(
+                        id: vault.id,
+                        destination: pending.destinationAddress,
+                        pendingAddress: pending.pendingAddress,
+                        transactionID: pending.transactionID,
+                        pendingBalanceSompi: pendingUTXO.amount,
+                        pendingBlockDAAScore: pendingUTXO.blockDAAScore
+                    )
+                }
+            }
+        }
+        return result.utxos
+    }
+
+    func refreshAllOnChain(
+        profileID: UUID,
+        engine: KasSignerEngine,
+        preferences: AppPreferences
+    ) async {
+        for vault in vaults(for: profileID) {
+            do {
+                _ = try await refreshOnChain(
+                    id: vault.id,
+                    engine: engine,
+                    preferences: preferences
+                )
+            } catch {
+                // A failed lookup is retried on the next node event or activation.
+            }
         }
     }
 
@@ -564,28 +976,58 @@ final class ProtectedVaultStore: ObservableObject {
 
     private func replacing(_ vault: ProtectedVault, status: ProtectedVault.Status,
                            fundingTransactionID: String?, fundedAt: Date?,
+                           approvedWithdrawalTransactionID: String? = nil,
                            lockedSompi: UInt64?, fundingOutpoints: [String],
-                           covenantIDs: [String]) -> ProtectedVault {
-        ProtectedVault(id: vault.id, profileID: vault.profileID, amount: vault.amount,
-            approvedAddress: vault.approvedAddress, delayDays: vault.delayDays,
+                           covenantIDs: [String],
+                           pendingWithdrawals: [ProtectedVault.PendingWithdrawal]? = nil) -> ProtectedVault {
+        ProtectedVault(id: vault.id, profileID: vault.profileID, name: vault.name, amount: vault.amount,
+            usesSendMaxFunding: vault.usesSendMaxFunding,
+            approvedAddresses: vault.approvedAddresses,
+            recoveryAddress: vault.recoveryAddress, recoveryPath: vault.recoveryPath,
+            delayDays: vault.delayDays,
             delayHours: vault.delayHours, delayMinutes: vault.delayMinutes,
             ownerDerivationIndex: vault.ownerDerivationIndex, ownerPublicKey: vault.ownerPublicKey,
             redeemScriptHex: vault.redeemScriptHex, vaultAddress: vault.vaultAddress,
             createdAt: vault.createdAt, status: status,
-            fundingTransactionID: fundingTransactionID, fundedAt: fundedAt,
+            fundingTransactionID: fundingTransactionID,
+            approvedWithdrawalTransactionID: approvedWithdrawalTransactionID ?? vault.approvedWithdrawalTransactionID,
+            fundedAt: fundedAt,
             lockedSompi: lockedSompi, fundingOutpoints: fundingOutpoints,
-            covenantIDs: covenantIDs)
+            covenantIDs: covenantIDs,
+            pendingWithdrawals: pendingWithdrawals ?? vault.pendingWithdrawals)
     }
 
     private func load() {
-        guard let data = defaults.data(forKey: storageKey),
-              let decoded = try? JSONDecoder().decode([ProtectedVault].self, from: data)
-        else { return }
-        vaults = decoded
+        if let data = defaults.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([ProtectedVault].self, from: data) {
+            vaults = decoded
+        }
+        if let draftData = defaults.data(forKey: setupDraftStorageKey),
+           let decodedDrafts = try? JSONDecoder().decode([ProtectedVaultSetupDraft].self, from: draftData) {
+            setupDrafts = decodedDrafts
+        }
+        if let data = defaults.data(forKey: lastOpenedStorageKey),
+           let decodedDates = try? JSONDecoder().decode([String: Date].self, from: data) {
+            lastOpenedAtByItemKey = decodedDates
+        }
     }
 
     private func save() {
         guard let data = try? JSONEncoder().encode(vaults) else { return }
         defaults.set(data, forKey: storageKey)
+    }
+
+    private func saveSetupDrafts() {
+        guard let data = try? JSONEncoder().encode(setupDrafts) else { return }
+        defaults.set(data, forKey: setupDraftStorageKey)
+    }
+
+    private func saveLastOpenedDates() {
+        guard let data = try? JSONEncoder().encode(lastOpenedAtByItemKey) else { return }
+        defaults.set(data, forKey: lastOpenedStorageKey)
+    }
+
+    private func lastOpenedItemKey(id: UUID, profileID: UUID) -> String {
+        "\(profileID.uuidString):\(id.uuidString)"
     }
 }

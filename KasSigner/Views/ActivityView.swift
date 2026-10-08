@@ -79,6 +79,10 @@ struct ActivityView: View {
                 guard let profileID = walletStore.selectedProfileID else { return }
                 walletStore.reloadCachedTransactions(profileID: profileID)
                 await syncService.refreshVirtualBlueScore(force: false)
+                if let profile = walletStore.selectedProfile,
+                   profile.network == KaspaNetwork.testnet10.rawValue {
+                    await syncService.reconcilePendingTransactions(profile: profile, walletStore: walletStore)
+                }
             }
             .task {
                 await priceService.refresh(preferences: preferences)
@@ -375,6 +379,12 @@ struct ActivityView: View {
             )
         }
 
+        if profile.network == KaspaNetwork.testnet10.rawValue {
+            await syncService.refreshVirtualBlueScore(force: force)
+            walletStore.reloadCachedTransactions(profileID: profileID)
+            return
+        }
+
         await syncService.refreshTransactionHistory(
             profile: profile,
             walletStore: walletStore,
@@ -542,7 +552,7 @@ struct ActivityView: View {
                 }
 
                 Button {
-                    openURL(preferences.explorer.transactionURL(transaction.transactionID))
+                    openURL(preferences.explorer.transactionURL(transaction.transactionID, network: preferences.network))
                 } label: {
                     HStack(alignment: .top, spacing: 8) {
                         Text(transaction.transactionID)
@@ -643,7 +653,7 @@ struct ActivityView: View {
 
         if isExplorerAddress(transaction.destination) {
             Button {
-                openURL(preferences.explorer.addressURL(transaction.destination))
+                openURL(preferences.explorer.addressURL(transaction.destination, network: preferences.network))
             } label: {
                 recipientText(text)
                     .contentShape(Rectangle())
@@ -857,7 +867,7 @@ struct ActivityView: View {
         KasBalanceFormatter.string(
             fromSompi: sompi,
             decimalPlaces: preferences.kasBalanceDecimalPlaces
-        ) + " KAS"
+        ) + " \(preferences.network.currencySymbol)"
     }
 }
 
@@ -1233,7 +1243,7 @@ private struct TransactionFlowGraphView: View {
                     Divider()
 
                     Button {
-                        openURL(preferences.explorer.transactionURL(graph.transactionID))
+                        openURL(preferences.explorer.transactionURL(graph.transactionID, network: preferences.network))
                     } label: {
                         HStack(alignment: .center, spacing: 8) {
                             VStack(alignment: .leading, spacing: 2) {
@@ -1322,7 +1332,7 @@ private struct TransactionFlowGraphView: View {
         let color = graphColor(for: address)
         if let address, TransactionGraphAddress.hasPlausibleFormat(address) {
             Button {
-                openURL(preferences.explorer.addressURL(address))
+                openURL(preferences.explorer.addressURL(address, network: preferences.network))
             } label: {
                 graphLabel(
                     title: title,
@@ -1571,10 +1581,10 @@ private struct TransactionFlowGraphView: View {
             }
             groupedWhole.append(digit)
         }
-        guard fractional != 0 else { return "\(groupedWhole) KAS" }
+        guard fractional != 0 else { return "\(groupedWhole) \(preferences.network.currencySymbol)" }
         let fractionalText = String(format: "%08llu", fractional)
             .replacingOccurrences(of: "0+$", with: "", options: .regularExpression)
-        return "\(groupedWhole).\(fractionalText) KAS"
+        return "\(groupedWhole).\(fractionalText) \(preferences.network.currencySymbol)"
     }
 
     private var hasExpandableRows: Bool {

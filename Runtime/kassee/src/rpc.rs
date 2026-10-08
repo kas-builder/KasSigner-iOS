@@ -468,10 +468,7 @@ pub async fn fetch_all_utxos(ws_url: &str, wallet: &WalletData) -> Result<Vec<Ut
 
 /// Resolve each UTXO's script against the watch-only wallet address lists.
 /// A duplicate script at two derivation paths is rejected rather than guessed.
-fn resolve_utxo_derivations(
-    utxos: &mut [UtxoEntry],
-    wallet: &WalletData,
-) -> Result<(), String> {
+fn resolve_utxo_derivations(utxos: &mut [UtxoEntry], wallet: &WalletData) -> Result<(), String> {
     let mut scripts = std::collections::HashMap::<Vec<u8>, (String, u32)>::new();
 
     for (chain, addresses) in [

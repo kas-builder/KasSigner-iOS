@@ -5,6 +5,26 @@ import XCTest
 final class ProtectedVaultFundingPlanTests: XCTestCase {
     private let profileID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
 
+    func testApprovedAddressListPersistsAndLegacyDraftsRemainReadable() throws {
+        let original = ProtectedVault(
+            profileID: profileID,
+            amount: 1,
+            approvedAddresses: ["kaspa:first", "kaspa:second"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0
+        )
+        let encoded = try JSONEncoder().encode(original)
+        XCTAssertEqual(try JSONDecoder().decode(ProtectedVault.self, from: encoded).approvedAddresses,
+                       ["kaspa:first", "kaspa:second"])
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "approvedAddresses")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+        XCTAssertEqual(try JSONDecoder().decode(ProtectedVault.self, from: legacyData).approvedAddresses,
+                       ["kaspa:first"])
+    }
+
     func testFundingSelectionSessionClearsOnlyOnceForSameProfile() {
         var session = ProtectedVaultFundingSelectionSession()
 
@@ -234,7 +254,7 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
         ProtectedVault(
             profileID: profileID,
             amount: amount,
-            approvedAddress: "kaspa:test",
+            approvedAddresses: ["kaspa:test"],
             delayDays: 1,
             delayHours: 0,
             delayMinutes: 0,
@@ -704,7 +724,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testBroadcastTransactionPublishesImmediately() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let transactionID = String(repeating: "a", count: 64)
 
@@ -939,7 +971,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testKnownWalletBroadcastPreservesInternalTransferAmountWhenConfirmed() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let internalAddress = "kaspa:internal"
         let transactionID = String(repeating: "b", count: 64)
@@ -1035,7 +1079,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testAddedUTXOTransactionPublishesImmediately() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let transactionID = String(repeating: "b", count: 64)
 

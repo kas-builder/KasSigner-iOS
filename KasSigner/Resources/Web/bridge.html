@@ -42,9 +42,9 @@
     return trimmed;
   }
 
-  async function queryResolver(baseURL) {
+  async function queryResolver(baseURL, network = "mainnet") {
     const response = await fetch(
-      `${baseURL}/v2/kaspa/mainnet/any/wrpc/borsh`,
+      `${baseURL}/v2/kaspa/${network}/any/wrpc/borsh`,
       { signal: AbortSignal.timeout(5000) }
     );
     if (!response.ok) throw new Error(`Public node service returned ${response.status}.`);
@@ -58,7 +58,7 @@
 
   function invalidateAutomaticNode(nodeURL = "") {
     if (
-      retainedNodeKey === "automatic" &&
+      retainedNodeKey?.startsWith("automatic:") &&
       (!nodeURL || retainedNode?.nodeURL === nodeURL)
     ) {
       retainedNode = null;
@@ -71,8 +71,8 @@
     { forceFresh = false, excludeNodeURL = "" } = {}
   ) {
     const nodeKey = config.mode === "custom"
-      ? `custom:${normalizeCustomNode(config.customURL)}`
-      : "automatic";
+      ? `custom:${config.network ?? "mainnet"}:${normalizeCustomNode(config.customURL)}`
+      : `automatic:${config.network ?? "mainnet"}`;
 
     if (!forceFresh && retainedNode && retainedNodeKey === nodeKey) {
       return retainedNode;
@@ -91,7 +91,7 @@
     let lastError = null;
     for (const url of shuffled) {
       try {
-        const candidate = await queryResolver(url);
+        const candidate = await queryResolver(url, config.network ?? "mainnet");
         if (
           excludeNodeURL &&
           String(candidate.nodeURL) === String(excludeNodeURL)
@@ -119,7 +119,7 @@
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
     const runtimeVersion = "db218007d8f955c5";
-    const transactionRuntimeVersion = "2cb3c1daefbc8d8e";
+    const transactionRuntimeVersion = "a935bf6dff1882db";
     const module = await import(
       `./pkg/kassee_web.js?runtime=${runtimeVersion}`
     );
@@ -346,33 +346,28 @@
 
     async function runWithNodeFailover(nodeConfig, operation) {
       const config = nodeConfig ?? {};
-      const initial = await resolveNode(config);
-
-      try {
-        const value = await operation(initial);
-        return { resolved: initial, value };
-      } catch (initialError) {
-        if (
-          !isAutomaticNode(config) ||
-          !isNodeConnectionError(initialError)
-        ) {
-          throw initialError;
-        }
-
-        invalidateAutomaticNode(initial.nodeURL);
-        const replacement = await resolveNode(config, {
-          forceFresh: true,
-          excludeNodeURL: initial.nodeURL
+      const maxAttempts = isAutomaticNode(config) && config.network === "testnet-10"
+        ? 4 : 2;
+      let lastError;
+      let excludedNodeURL = "";
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const resolved = await resolveNode(config, {
+          forceFresh: attempt > 0,
+          excludeNodeURL: excludedNodeURL
         });
-
         try {
-          const value = await operation(replacement);
-          return { resolved: replacement, value };
-        } catch (replacementError) {
-          invalidateAutomaticNode(replacement.nodeURL);
-          throw replacementError;
+          const value = await operation(resolved);
+          return { resolved, value };
+        } catch (error) {
+          if (!isAutomaticNode(config) || !isNodeConnectionError(error)) {
+            throw error;
+          }
+          lastError = error;
+          excludedNodeURL = resolved.nodeURL;
+          invalidateAutomaticNode(resolved.nodeURL);
         }
       }
+      throw lastError;
     }
 
     async function ensureLiveSubscription() {
@@ -502,33 +497,62 @@
         if (!payload || typeof payload.kpub !== "string") {
           throw new Error("A KasSigner kpub is required.");
         }
-        return module.import_kpub(payload.kpub.trim(), "mainnet");
+        const network = payload.network ?? "mainnet";
+        const runtime = network === "testnet-10" ? transactionModule : module;
+        return runtime.import_kpub(payload.kpub.trim(), network);
+      },
+
+      generateTestnet10Wallet() {
+        return JSON.parse(transactionModule.generate_testnet10_wallet());
+      },
+
+      restoreTestnet10Wallet(mnemonic) {
+        return JSON.parse(transactionModule.restore_testnet10_wallet(String(mnemonic)));
       },
 
       extendAddresses(wallet, receiveCount, changeCount) {
-        return module.extend_addresses(
+        const network = String(wallet?.receive_addresses?.[0] ?? "").startsWith("kaspatest:")
+          ? "testnet-10" : "mainnet";
+        const runtime = network === "testnet-10" ? transactionModule : module;
+        return runtime.extend_addresses(
           JSON.stringify(wallet),
           Number(receiveCount),
           Number(changeCount),
-          "mainnet"
+          network
         );
       },
 
       validateAddress(address) {
+        const runtime = String(address).trim().toLowerCase().startsWith("kaspatest:")
+          ? transactionModule : module;
         return JSON.parse(
-          module.validate_kaspa_address(
+          runtime.validate_kaspa_address(
             String(address).trim()
           )
         );
       },
 
-      deriveProtectedVault(kpub, receiveIndex, approvedAddress, delayDAA) {
+      deriveProtectedVault(kpub, receiveIndex, approvedAddresses, recoveryAddress, delayDAA, emergencyAnytime, network = "mainnet") {
+        if (network !== "testnet-10") {
+          return JSON.parse(
+            transactionModule.derive_protected_vault_with_destinations(
+              String(kpub).trim(),
+              Number(receiveIndex),
+              JSON.stringify(approvedAddresses.map(address => String(address).trim())),
+              BigInt(String(delayDAA)),
+              String(network)
+            )
+          );
+        }
         return JSON.parse(
-          transactionModule.derive_protected_vault_v1(
+          transactionModule.derive_protected_vault_with_recovery(
             String(kpub).trim(),
             Number(receiveIndex),
-            String(approvedAddress).trim(),
-            BigInt(String(delayDAA))
+            JSON.stringify(approvedAddresses.map(address => String(address).trim())),
+            String(recoveryAddress).trim(),
+            BigInt(String(delayDAA)),
+            Boolean(emergencyAnytime),
+            String(network)
           )
         );
       },
@@ -596,10 +620,38 @@
         );
       },
 
-      summarizePSKB(wireHex) {
+      buildProtectedVaultV2SpendPSKB(utxoJSON, ownerPubkey, approvedAddresses, recoveryAddress, destinationAddress, delayDAA, emergencyAnytime, path, feeSompi) {
+        return transactionModule.create_protected_vault_v2_spend_pskb(
+          String(utxoJSON), String(ownerPubkey), JSON.stringify(approvedAddresses),
+          String(recoveryAddress), String(destinationAddress), BigInt(String(delayDAA)),
+          Boolean(emergencyAnytime), String(path), BigInt(String(feeSompi))
+        );
+      },
+
+      buildProtectedVaultV2PendingSpendPSKB(utxoJSON, ownerPubkey, recoveryAddress, destinationAddress, delayDAA, path, feeSompi) {
+        return transactionModule.create_protected_vault_v2_pending_spend_pskb(
+          String(utxoJSON), String(ownerPubkey), String(recoveryAddress),
+          String(destinationAddress), BigInt(String(delayDAA)), String(path), BigInt(String(feeSompi))
+        );
+      },
+
+      deriveProtectedVaultPendingWithRecovery(ownerPubkey, destinationAddress, recoveryAddress, delayDAA) {
+        return JSON.parse(transactionModule.derive_protected_vault_pending_with_recovery(
+          String(ownerPubkey), String(destinationAddress), String(recoveryAddress),
+          BigInt(String(delayDAA))
+        ));
+      },
+
+      signTestnet10VaultV2PSKB(wireHex, mnemonic, chain, index) {
+        return transactionModule.sign_testnet10_vault_v2_pskb(
+          String(wireHex), String(mnemonic), Number(chain), Number(index)
+        );
+      },
+
+      summarizePSKB(wireHex, network = "mainnet") {
         const summaryJSON = transactionModule.pskt_summary(
           String(wireHex),
-          "mainnet"
+          String(network)
         );
 
         return String(summaryJSON);
@@ -608,6 +660,12 @@
       verifyStandardPSKBSignatures(wireHex) {
         return transactionModule.pskt_verify_standard_signatures(
           String(wireHex)
+        );
+      },
+
+      signTestnet10FundingPSKB(wireHex, mnemonic) {
+        return transactionModule.sign_testnet10_funding_pskb(
+          String(wireHex), String(mnemonic)
         );
       },
 

@@ -343,8 +343,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner uses the camera to scan watch-only wallet data and signed transaction QR codes from KasSigner.";
-				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner uses Face ID to protect access to your watch-only wallet information.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner-iOS uses the camera to scan watch-only wallet data and signed transaction QR codes from M5Stack Cores3.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner-iOS uses Face ID to protect access to your watch-only wallet information.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -354,7 +354,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.1;
+				MARKETING_VERSION = 5.2;
 				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSigner.dev;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -415,8 +415,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
-				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner uses the camera to scan watch-only wallet data and signed transaction QR codes from KasSigner.";
-				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner uses Face ID to protect access to your watch-only wallet information.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner-iOS uses the camera to scan watch-only wallet data and signed transaction QR codes from M5Stack Cores3.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "KasSigner-iOS uses Face ID to protect access to your watch-only wallet information.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -426,7 +426,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 5.1;
+				MARKETING_VERSION = 5.2;
 				PRODUCT_BUNDLE_IDENTIFIER = org.kassigner.KasSigner;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;

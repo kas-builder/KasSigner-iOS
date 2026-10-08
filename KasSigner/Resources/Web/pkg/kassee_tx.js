@@ -1,5 +1,7 @@
 /* @ts-self-types="./kassee_web.d.ts" */
 
+//#region exports
+
 /**
  * BIP340 Schnorr sign (PoC, both sides in browser).
  * Returns 128 hex (64-byte sig).
@@ -70,6 +72,7 @@ export function adaptor_broadcast_claim(covenant_addr, dest_addr, sig_script_hex
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(sig_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.adaptor_broadcast_claim(ptr0, len0, ptr1, len1, ptr2, len2, fee, ptr3, len3);
@@ -299,6 +302,7 @@ export function adaptor_swap_address(claimer_pubkey_hex, owner_pubkey_hex, claim
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(claimer_dest_addr, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ret = wasm.adaptor_swap_address(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3);
@@ -333,6 +337,8 @@ export function adaptor_swap_commitment(alice_utxo_id, bob_utxo_id, alice_amount
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(bob_utxo_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(alice_amount);
+        _assertBigInt(bob_amount);
         const ret = wasm.adaptor_swap_commitment(ptr0, len0, ptr1, len1, alice_amount, bob_amount);
         deferred3_0 = ret[0];
         deferred3_1 = ret[1];
@@ -420,6 +426,7 @@ export function build_covenant_payload(covenant_type, params_hex) {
     let deferred3_0;
     let deferred3_1;
     try {
+        _assertNum(covenant_type);
         const ptr0 = passStringToWasm0(params_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.build_covenant_payload(covenant_type, ptr0, len0);
@@ -446,6 +453,7 @@ export function build_covenant_payload(covenant_type, params_hex) {
 export function build_utxo_subscribe_request(covenant_address, request_id) {
     const ptr0 = passStringToWasm0(covenant_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
+    _assertBigInt(request_id);
     const ret = wasm.build_utxo_subscribe_request(ptr0, len0, request_id);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
@@ -461,6 +469,7 @@ export function build_utxo_subscribe_request(covenant_address, request_id) {
  * @returns {Uint8Array}
  */
 export function build_vcc_subscribe_request(request_id) {
+    _assertBigInt(request_id);
     const ret = wasm.build_vcc_subscribe_request(request_id);
     if (ret[3]) {
         throw takeFromExternrefTable0(ret[2]);
@@ -533,6 +542,8 @@ export function covenant_additive_address(owner_pubkey_hex, threshold_sompi, dea
     try {
         const ptr0 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
+        _assertBigInt(threshold_sompi);
+        _assertBigInt(deadline_daa);
         const ptr1 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_additive_address(ptr0, len0, threshold_sompi, deadline_daa, ptr1, len1);
@@ -571,6 +582,9 @@ export function covenant_allowance(owner_pubkey_hex, beneficiary_pubkey_hex, max
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(beneficiary_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(max_withdraw_sompi);
+        _assertBigInt(min_sequence);
+        _assertBigInt(start_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_allowance(ptr0, len0, ptr1, len1, max_withdraw_sompi, min_sequence, start_daa, ptr2, len2);
@@ -613,6 +627,7 @@ export function covenant_atomic_swap(owner_pubkey_hex, counterparty_pubkey_hex, 
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(expected_hash_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(hash_algo, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -654,6 +669,7 @@ export function covenant_commit_reveal(owner_pubkey_hex, committed_hash_hex, loc
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(committed_hash_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_commit_reveal(ptr0, len0, ptr1, len1, locktime_daa, ptr2, len2);
@@ -696,6 +712,7 @@ export function covenant_crowdfund(contributor_pubkey_hex, organizer_pubkey_hex,
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(vk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_crowdfund(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3);
@@ -732,6 +749,7 @@ export function covenant_dms(owner_pubkey_hex, heir_pubkey_hex, inactivity_daa, 
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(heir_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(inactivity_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_dms(ptr0, len0, ptr1, len1, inactivity_daa, ptr2, len2);
@@ -821,6 +839,9 @@ export function covenant_global_allowance(owner_pubkey_hex, beneficiary_pubkey_h
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(beneficiary_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(max_withdraw_sompi);
+        _assertBigInt(cooldown_daa);
+        _assertBigInt(start_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_global_allowance(ptr0, len0, ptr1, len1, max_withdraw_sompi, cooldown_daa, start_daa, ptr2, len2);
@@ -861,6 +882,8 @@ export function covenant_global_spending_limit(owner_pubkey_hex, max_withdraw_so
     try {
         const ptr0 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
+        _assertBigInt(max_withdraw_sompi);
+        _assertBigInt(cooldown_daa);
         const ptr1 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_global_spending_limit(ptr0, len0, max_withdraw_sompi, cooldown_daa, ptr1, len1);
@@ -895,6 +918,8 @@ export function covenant_merkle_whitelist(owner_pubkey_hex, merkle_root_hex, dep
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(merkle_root_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertNum(depth);
+        _assertBigInt(locktime_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_merkle_whitelist(ptr0, len0, ptr1, len1, depth, locktime_daa, ptr2, len2);
@@ -937,6 +962,7 @@ export function covenant_oracle(owner_pubkey_hex, beneficiary_pubkey_hex, oracle
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(oracle_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_oracle(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3);
@@ -983,6 +1009,8 @@ export function covenant_oracle_mb(genesis_price, genesis_t, image_id_hex, contr
     let deferred8_0;
     let deferred8_1;
     try {
+        _assertBigInt(genesis_price);
+        _assertBigInt(genesis_t);
         const ptr0 = passStringToWasm0(image_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(control_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1104,6 +1132,9 @@ export function covenant_payjoin(owner_pubkey_hex, beneficiary_pubkey_hex, lockt
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(beneficiary_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
+        _assertBigInt(min_inputs);
+        _assertBigInt(min_outputs);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_payjoin(ptr0, len0, ptr1, len1, locktime_daa, min_inputs, min_outputs, ptr2, len2);
@@ -1160,6 +1191,10 @@ export function covenant_ship_escrow(seller_pubkey_hex, deliverer_pubkey_hex, bu
         const len2 = WASM_VECTOR_LEN;
         const ptr3 = passStringToWasm0(arbiter_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(product_sompi);
+        _assertBigInt(fee_sompi);
+        _assertBigInt(cltv1_deadline);
+        _assertBigInt(cltv2_deadline);
         const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len4 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_ship_escrow(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, product_sompi, fee_sompi, cltv1_deadline, cltv2_deadline, ptr4, len4);
@@ -1267,6 +1302,7 @@ export function covenant_timelocked_escrow(alice_pubkey_hex, bob_pubkey_hex, ali
         const len2 = WASM_VECTOR_LEN;
         const ptr3 = passStringToWasm0(bob_addr, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len4 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_timelocked_escrow(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, locktime_daa, ptr4, len4);
@@ -1306,6 +1342,7 @@ export function covenant_timelocked_savings(wallet1_pubkey_hex, wallet2_pubkey_h
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(wallet2_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.covenant_timelocked_savings(ptr0, len0, ptr1, len1, locktime_daa, ptr2, len2);
@@ -1386,6 +1423,7 @@ export function create_commit_reveal_spend(covenant_address, dest_address, redee
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(payload_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr6 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len6 = WASM_VECTOR_LEN;
     const ret = wasm.create_commit_reveal_spend(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, fee, ptr6, len6);
@@ -1406,6 +1444,7 @@ export function create_compound_kspt(wallet_json, recipients_json, fee_sompi, ws
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.create_compound_kspt(ptr0, len0, ptr1, len1, fee_sompi, ptr2, len2);
@@ -1425,6 +1464,7 @@ export function create_compound_pskb(wallet_json, recipients_json, fee_sompi, ws
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.create_compound_pskb(ptr0, len0, ptr1, len1, fee_sompi, ptr2, len2);
@@ -1441,6 +1481,7 @@ export function create_compound_pskb(wallet_json, recipients_json, fee_sompi, ws
 export function create_consolidate_kspt(wallet_json, fee_sompi, ws_url) {
     const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
+    _assertBigInt(fee_sompi);
     const ptr1 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.create_consolidate_kspt(ptr0, len0, fee_sompi, ptr1, len1);
@@ -1457,6 +1498,7 @@ export function create_consolidate_kspt(wallet_json, fee_sompi, ws_url) {
 export function create_consolidate_pskb(wallet_json, fee_sompi, ws_url) {
     const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
+    _assertBigInt(fee_sompi);
     const ptr1 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
     const ret = wasm.create_consolidate_pskb(ptr0, len0, fee_sompi, ptr1, len1);
@@ -1482,6 +1524,8 @@ export function create_covenant_allowance_withdraw(covenant_address, dest_addres
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(withdraw_sompi);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_allowance_withdraw(ptr0, len0, ptr1, len1, ptr2, len2, withdraw_sompi, fee, ptr3, len3);
@@ -1509,6 +1553,7 @@ export function create_covenant_atomic_claim(covenant_address, dest_address, red
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(preimage_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_atomic_claim(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, fee, ptr4, len4);
@@ -1535,6 +1580,8 @@ export function create_covenant_beneficiary_spend(covenant_address, dest_address
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(locktime_daa);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_beneficiary_spend(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, fee, ptr3, len3);
@@ -1564,8 +1611,10 @@ export function create_covenant_beneficiary_spend_selected(covenant_address, des
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(fee);
         const ret = wasm.create_covenant_beneficiary_spend_selected(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3, fee);
         var ptr5 = ret[0];
         var len5 = ret[1];
@@ -1607,6 +1656,8 @@ export function create_covenant_borrower_spend(borrower_wallet_json, covenant_ad
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(add_amount_sompi);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_borrower_spend(ptr0, len0, ptr1, len1, ptr2, len2, add_amount_sompi, fee, ptr3, len3);
@@ -1634,6 +1685,8 @@ export function create_covenant_borrower_withdraw(borrower_wallet_json, covenant
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(withdraw_sompi);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_borrower_withdraw(ptr0, len0, ptr1, len1, ptr2, len2, withdraw_sompi, fee, ptr3, len3);
@@ -1667,6 +1720,7 @@ export function create_covenant_oracle_claim(covenant_address, dest_address, red
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(msg_hash_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr5 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_oracle_claim(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, fee, ptr5, len5);
@@ -1694,6 +1748,7 @@ export function create_covenant_owner_spend(covenant_address, dest_address, rede
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(covenant_branch, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1726,6 +1781,7 @@ export function create_covenant_owner_spend_selected(covenant_address, dest_addr
         const len2 = WASM_VECTOR_LEN;
         const ptr3 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(fee);
         const ptr4 = passStringToWasm0(covenant_branch, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len4 = WASM_VECTOR_LEN;
         const ret = wasm.create_covenant_owner_spend_selected(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, fee, ptr4, len4);
@@ -1768,6 +1824,7 @@ export function create_covenant_payjoin_claim(covenant_address, dest_address, re
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(extra_utxo_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_payjoin_claim(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, fee, ptr4, len4);
@@ -1797,6 +1854,8 @@ export function create_covenant_pskb(wallet_json, covenant_address, send_amount,
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(covenant_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(send_amount);
+    _assertBigInt(fee);
     const ptr2 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(_covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1828,6 +1887,8 @@ export function create_covenant_pskb_with_payload(wallet_json, covenant_address,
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(covenant_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(send_amount);
+    _assertBigInt(fee);
     const ptr2 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(payload_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1836,6 +1897,7 @@ export function create_covenant_pskb_with_payload(wallet_json, covenant_address,
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
+    _assertBoolean(tag_genesis);
     const ret = wasm.create_covenant_pskb_with_payload(ptr0, len0, ptr1, len1, send_amount, fee, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, tag_genesis);
     return ret;
 }
@@ -1870,6 +1932,8 @@ export function create_covenant_timelocked_savings_claim(covenant_address, dest_
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(locktime_daa);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_timelocked_savings_claim(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, fee, ptr3, len3);
@@ -1900,8 +1964,10 @@ export function create_covenant_timelocked_savings_claim_selected(covenant_addre
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(locktime_daa);
         const ptr3 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(fee);
         const ret = wasm.create_covenant_timelocked_savings_claim_selected(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3, fee);
         var ptr5 = ret[0];
         var len5 = ret[1];
@@ -1936,6 +2002,8 @@ export function create_covenant_timeout_refund(covenant_address, dest_address, r
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(locktime_daa);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_covenant_timeout_refund(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, fee, ptr3, len3);
@@ -1979,6 +2047,7 @@ export function create_crowdfund_sweep(contributor_address, dest_address, redeem
     const len6 = WASM_VECTOR_LEN;
     const ptr7 = passStringToWasm0(commitment_msg_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len7 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr8 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len8 = WASM_VECTOR_LEN;
     const ret = wasm.create_crowdfund_sweep(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, fee, ptr8, len8);
@@ -2019,6 +2088,7 @@ export function create_global_allowance_topup(wallet_json, covenant_address, red
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(thread_utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr5 = passStringToWasm0(utxo_indices_csv, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
     const ptr6 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2059,6 +2129,8 @@ export function create_global_allowance_withdraw(covenant_address, dest_address,
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(withdraw_sompi);
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(selected_utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ret = wasm.create_global_allowance_withdraw(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, withdraw_sompi, fee, ptr4, len4);
@@ -2102,6 +2174,7 @@ export function create_global_spending_limit_topup(wallet_json, covenant_address
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(thread_utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr5 = passStringToWasm0(utxo_indices_csv, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
     const ptr6 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2147,6 +2220,8 @@ export function create_global_spending_limit_withdraw(covenant_address, dest_add
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(withdraw_sompi);
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(selected_utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ret = wasm.create_global_spending_limit_withdraw(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, withdraw_sompi, fee, ptr4, len4);
@@ -2173,6 +2248,8 @@ export function create_merkle_whitelist_spend(covenant_address, dest_address, re
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(proof_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(send_amount);
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ret = wasm.create_merkle_whitelist_spend(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, send_amount, fee, ptr4, len4);
@@ -2202,10 +2279,13 @@ export function create_multisig_kspt(descriptor, source_address, dest_address, a
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr3 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertNum(addr_index);
     const ret = wasm.create_multisig_kspt(ptr0, len0, ptr1, len1, ptr2, len2, amount_sompi, fee_sompi, ptr3, len3, ptr4, len4, addr_index);
     return ret;
 }
@@ -2235,10 +2315,13 @@ export function create_multisig_pskb(descriptor, source_address, dest_address, a
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr3 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertNum(addr_index);
     const ret = wasm.create_multisig_pskb(ptr0, len0, ptr1, len1, ptr2, len2, amount_sompi, fee_sompi, ptr3, len3, ptr4, len4, addr_index);
     return ret;
 }
@@ -2264,10 +2347,13 @@ export function create_multisig_pskb_selected(descriptor, source_address, dest_a
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr3 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertNum(addr_index);
     const ptr5 = passStringToWasm0(utxo_csv, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
     const ret = wasm.create_multisig_pskb_selected(ptr0, len0, ptr1, len1, ptr2, len2, amount_sompi, fee_sompi, ptr3, len3, ptr4, len4, addr_index, ptr5, len5);
@@ -2311,6 +2397,7 @@ export function create_oracle_heartbeat(covenant_address, redeem_script_hex, ora
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(attest_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr5 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
     const ret = wasm.create_oracle_heartbeat(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, fee, ptr5, len5);
@@ -2345,6 +2432,7 @@ export function create_oracle_mb_consume(consumer_address, consumer_redeem_hex, 
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr6 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len6 = WASM_VECTOR_LEN;
     const ret = wasm.create_oracle_mb_consume(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, fee, ptr6, len6);
@@ -2371,6 +2459,7 @@ export function create_oracle_mb_heartbeat_roll(heartbeat_address, redeem_script
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ret = wasm.create_oracle_mb_heartbeat_roll(ptr0, len0, ptr1, len1, ptr2, len2, fee, ptr3, len3);
@@ -2439,12 +2528,14 @@ export function create_oracle_mb_publish(wallet_json, oracle_address, redeem_scr
     const len12 = WASM_VECTOR_LEN;
     const ptr13 = passStringToWasm0(journal_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len13 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr14 = passStringToWasm0(change_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len14 = WASM_VECTOR_LEN;
     const ptr15 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len15 = WASM_VECTOR_LEN;
     const ptr16 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len16 = WASM_VECTOR_LEN;
+    _assertBoolean(omit_heartbeat);
     const ret = wasm.create_oracle_mb_publish(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, fee, ptr14, len14, ptr15, len15, ptr16, len16, omit_heartbeat);
     return ret;
 }
@@ -2469,6 +2560,7 @@ export function create_protected_vault_approved_spend_pskb(utxo_json, redeem_scr
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(approved_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(fee_sompi);
         const ret = wasm.create_protected_vault_approved_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, fee_sompi);
         var ptr4 = ret[0];
         var len4 = ret[1];
@@ -2499,10 +2591,104 @@ export function create_protected_vault_funding_pskb_with_utxos(wallet_json, vaul
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(vault_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.create_protected_vault_funding_pskb_with_utxos(ptr0, len0, ptr1, len1, amount_sompi, fee_sompi, ptr2, len2);
     return ret;
+}
+
+/**
+ * Spend a destination-committed pending output after CSV, or cancel it with
+ * the independent recovery key immediately.
+ * @param {string} utxo_json
+ * @param {string} owner_pubkey_hex
+ * @param {string} recovery_address
+ * @param {string} committed_destination_address
+ * @param {bigint} delay_daa
+ * @param {string} path
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_protected_vault_v2_pending_spend_pskb(utxo_json, owner_pubkey_hex, recovery_address, committed_destination_address, delay_daa, path, fee_sompi) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(committed_destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
+        const ptr4 = passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        _assertBigInt(fee_sompi);
+        const ret = wasm.create_protected_vault_v2_pending_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, delay_daa, ptr4, len4, fee_sompi);
+        var ptr6 = ret[0];
+        var len6 = ret[1];
+        if (ret[3]) {
+            ptr6 = 0; len6 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred7_0 = ptr6;
+        deferred7_1 = len6;
+        return getStringFromWasm0(ptr6, len6);
+    } finally {
+        wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
+ * Construct one Testnet-10 V2 vault transition. Rebuild the committed script
+ * from the complete rule set before accepting the UTXO; the caller cannot
+ * substitute a redeem script or an output that bypasses those rules.
+ * @param {string} utxo_json
+ * @param {string} owner_pubkey_hex
+ * @param {string} approved_addresses_json
+ * @param {string} recovery_address
+ * @param {string} destination_address
+ * @param {bigint} delay_daa
+ * @param {boolean} emergency_anytime
+ * @param {string} path
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_protected_vault_v2_spend_pskb(utxo_json, owner_pubkey_hex, approved_addresses_json, recovery_address, destination_address, delay_daa, emergency_anytime, path, fee_sompi) {
+    let deferred8_0;
+    let deferred8_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
+        _assertBoolean(emergency_anytime);
+        const ptr5 = passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        _assertBigInt(fee_sompi);
+        const ret = wasm.create_protected_vault_v2_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, delay_daa, emergency_anytime, ptr5, len5, fee_sompi);
+        var ptr7 = ret[0];
+        var len7 = ret[1];
+        if (ret[3]) {
+            ptr7 = 0; len7 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred8_0 = ptr7;
+        deferred8_1 = len7;
+        return getStringFromWasm0(ptr7, len7);
+    } finally {
+        wasm.__wbindgen_free(deferred8_0, deferred8_1, 1);
+    }
 }
 
 /**
@@ -2519,6 +2705,8 @@ export function create_send_kspt(wallet_json, dest_address, amount_sompi, fee_so
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.create_send_kspt(ptr0, len0, ptr1, len1, amount_sompi, fee_sompi, ptr2, len2);
@@ -2540,6 +2728,8 @@ export function create_send_kspt_selected(wallet_json, dest_address, amount_somp
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(utxo_indices_csv, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2564,6 +2754,8 @@ export function create_send_pskb(wallet_json, dest_address, amount_sompi, fee_so
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ret = wasm.create_send_pskb(ptr0, len0, ptr1, len1, amount_sompi, fee_sompi, ptr2, len2);
@@ -2585,6 +2777,8 @@ export function create_send_pskb_selected(wallet_json, dest_address, amount_somp
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(utxo_csv, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2611,6 +2805,8 @@ export function create_send_pskb_with_utxos(wallet_json, transaction_mode, recip
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(exact_fee_sompi);
+    _assertBoolean(send_max);
     const ptr3 = passStringToWasm0(change_outputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2638,6 +2834,7 @@ export function create_stealth_spend(one_time_pubkey_hex, tweak_hex, dest_addres
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(dest_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -2746,6 +2943,39 @@ export function derive_covenant_payload_key(kpub_str) {
 }
 
 /**
+ * @param {string} owner_pubkey_hex
+ * @param {string} destination_address
+ * @param {string} recovery_address
+ * @param {bigint} delay_daa
+ * @returns {string}
+ */
+export function derive_protected_vault_pending_with_recovery(owner_pubkey_hex, destination_address, recovery_address, delay_daa) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
+        const ret = wasm.derive_protected_vault_pending_with_recovery(ptr0, len0, ptr1, len1, ptr2, len2, delay_daa);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
  * Derive the deterministic Protected Vault V1 descriptor for an M5-signable
  * receive key at account path /0/index. This is derivation only: no transaction
  * is created, signed, or broadcast.
@@ -2761,8 +2991,10 @@ export function derive_protected_vault_v1(kpub_str, receive_index, approved_addr
     try {
         const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
+        _assertNum(receive_index);
         const ptr1 = passStringToWasm0(approved_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
         const ret = wasm.derive_protected_vault_v1(ptr0, len0, receive_index, ptr1, len1, delay_daa);
         var ptr3 = ret[0];
         var len3 = ret[1];
@@ -2775,6 +3007,85 @@ export function derive_protected_vault_v1(kpub_str, receive_index, approved_addr
         return getStringFromWasm0(ptr3, len3);
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Derive a vault whose immediate path accepts any one of the committed
+ * mainnet P2PK destinations. The address list is fixed in the redeem script.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} approved_addresses_json
+ * @param {bigint} delay_daa
+ * @param {string} network
+ * @returns {string}
+ */
+export function derive_protected_vault_with_destinations(kpub_str, receive_index, approved_addresses_json, delay_daa, network) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        _assertNum(receive_index);
+        const ptr1 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
+        const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_with_destinations(ptr0, len0, receive_index, ptr1, len1, delay_daa, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Derive the recovery-aware V2 vault. All destination scripts, the recovery
+ * key, and the selected recovery mode are committed into the P2SH address.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} approved_addresses_json
+ * @param {string} recovery_address
+ * @param {bigint} delay_daa
+ * @param {boolean} emergency_anytime
+ * @param {string} network
+ * @returns {string}
+ */
+export function derive_protected_vault_with_recovery(kpub_str, receive_index, approved_addresses_json, recovery_address, delay_daa, emergency_anytime, network) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        _assertNum(receive_index);
+        const ptr1 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(delay_daa);
+        _assertBoolean(emergency_anytime);
+        const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_with_recovery(ptr0, len0, receive_index, ptr1, len1, ptr2, len2, delay_daa, emergency_anytime, ptr3, len3);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
     }
 }
 
@@ -2851,6 +3162,8 @@ export function extend_addresses(wallet_json, extra_receive, extra_change, netwo
     try {
         const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
+        _assertNum(extra_receive);
+        _assertNum(extra_change);
         const ptr1 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.extend_addresses(ptr0, len0, extra_receive, extra_change, ptr1, len1);
@@ -3003,6 +3316,28 @@ export function generate_qr_svg_text(text) {
         return getStringFromWasm0(ptr2, len2);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * @returns {string}
+ */
+export function generate_testnet10_wallet() {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.generate_testnet10_wallet();
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
 }
 
@@ -3250,6 +3585,7 @@ export function plan_send_change_outputs_with_utxos(wallet_json, transaction_mod
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(recipients_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
+        _assertBigInt(exact_fee_sompi);
         const ptr3 = passStringToWasm0(change_outputs_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ptr4 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -3511,6 +3847,31 @@ export function reset_qr_decoder() {
 }
 
 /**
+ * @param {string} mnemonic
+ * @returns {string}
+ */
+export function restore_testnet10_wallet(mnemonic) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.restore_testnet10_wallet(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * Derive x-only pubkey from a 32-byte secret key hex.
  * Returns 32-byte x-only pubkey hex.
  * @param {string} secret_key_hex
@@ -3652,6 +4013,66 @@ export function sha256_hash(input_hex) {
 }
 
 /**
+ * @param {string} wire_hex
+ * @param {string} mnemonic
+ * @returns {string}
+ */
+export function sign_testnet10_funding_pskb(wire_hex, mnemonic) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sign_testnet10_funding_pskb(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * @param {string} wire_hex
+ * @param {string} mnemonic
+ * @param {number} chain
+ * @param {number} index
+ * @returns {string}
+ */
+export function sign_testnet10_vault_v2_pskb(wire_hex, mnemonic, chain, index) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        _assertNum(chain);
+        _assertNum(index);
+        const ret = wasm.sign_testnet10_vault_v2_pskb(ptr0, len0, ptr1, len1, chain, index);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
  * Fund a Split Vault covenant with a genesis TX (creates covenant_id).
  * Same flow as tagged_vault_genesis but uses the split vault script.
  * Returns JSON: { txid, covenant_id_hex, covenant_address }
@@ -3671,6 +4092,8 @@ export function split_vault_genesis(ephemeral_address, secret_key_hex, owner_pub
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(send_amount);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -3702,6 +4125,7 @@ export function split_vault_spend(covenant_address, secret_key_hex, owner_pubkey
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -3758,12 +4182,17 @@ export function stealth_announce_lane_probe(ws_url, sender_secret_hex, funding_t
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(funding_txid_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertNum(funding_index);
+    _assertBigInt(funding_amount);
     const ptr3 = passStringToWasm0(meta_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr4 = passStringToWasm0(entropy_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len5 = WASM_VECTOR_LEN;
+    _assertBigInt(lane_gas);
     const ret = wasm.stealth_announce_lane_probe(ptr0, len0, ptr1, len1, ptr2, len2, funding_index, funding_amount, ptr3, len3, amount_sompi, fee_sompi, ptr4, len4, ptr5, len5, lane_gas);
     return ret;
 }
@@ -3814,6 +4243,8 @@ export function stealth_create_payment(wallet_json, meta_hex, amount_sompi, fee_
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(meta_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(entropy_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -3855,6 +4286,8 @@ export function stealth_create_payment_lane(wallet_json, meta_hex, amount_sompi,
     const len0 = WASM_VECTOR_LEN;
     const ptr1 = passStringToWasm0(meta_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len1 = WASM_VECTOR_LEN;
+    _assertBigInt(amount_sompi);
+    _assertBigInt(fee_sompi);
     const ptr2 = passStringToWasm0(entropy_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -3976,6 +4409,7 @@ export function stealth_scan_announcement(scan_privkey_hex, spend_pubkey_hex, ep
 export function stealth_scan_recent_blocks(ws_url, max_blocks) {
     const ptr0 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
+    _assertNum(max_blocks);
     const ret = wasm.stealth_scan_recent_blocks(ptr0, len0, max_blocks);
     return ret;
 }
@@ -4004,6 +4438,8 @@ export function tagged_vault_covenant_id(prev_txid_hex, prev_index, send_amount,
     try {
         const ptr0 = passStringToWasm0(prev_txid_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
+        _assertNum(prev_index);
+        _assertBigInt(send_amount);
         const ptr1 = passStringToWasm0(covenant_spk_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
         const ret = wasm.tagged_vault_covenant_id(ptr0, len0, prev_index, send_amount, ptr1, len1);
@@ -4047,6 +4483,8 @@ export function tagged_vault_genesis(ephemeral_address, secret_key_hex, owner_pu
     const len1 = WASM_VECTOR_LEN;
     const ptr2 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len2 = WASM_VECTOR_LEN;
+    _assertBigInt(send_amount);
+    _assertBigInt(fee);
     const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
     const ptr4 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -4107,6 +4545,7 @@ export function tagged_vault_spend(covenant_address, secret_key_hex, owner_pubke
     const len2 = WASM_VECTOR_LEN;
     const ptr3 = passStringToWasm0(covenant_id_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len3 = WASM_VECTOR_LEN;
+    _assertBigInt(fee);
     const ptr4 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len4 = WASM_VECTOR_LEN;
     const ptr5 = passStringToWasm0(ws_url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -4227,6 +4666,10 @@ export function zk_crowdfund_setup() {
     }
 }
 
+//#endregion
+
+//#region wasm imports
+
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -4239,31 +4682,35 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_function_49868bde5eb1e745: function(arg0) {
             const ret = typeof(arg0) === 'function';
+            _assertBoolean(ret);
             return ret;
         },
         __wbg___wbindgen_is_object_40c5a80572e8f9d3: function(arg0) {
             const val = arg0;
             const ret = typeof(val) === 'object' && val !== null;
+            _assertBoolean(ret);
             return ret;
         },
         __wbg___wbindgen_is_string_b29b5c5a8065ba1a: function(arg0) {
             const ret = typeof(arg0) === 'string';
+            _assertBoolean(ret);
             return ret;
         },
         __wbg___wbindgen_is_undefined_c0cca72b82b86f4d: function(arg0) {
             const ret = arg0 === undefined;
+            _assertBoolean(ret);
             return ret;
         },
         __wbg___wbindgen_throw_81fc77679af83bc6: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg__wbg_cb_unref_3c3b4f651835fbcb: function(arg0) {
+        __wbg__wbg_cb_unref_3c3b4f651835fbcb: function() { return logError(function (arg0) {
             arg0._wbg_cb_unref();
-        },
-        __wbg_buffer_a77cc90da4bdb503: function(arg0) {
+        }, arguments); },
+        __wbg_buffer_a77cc90da4bdb503: function() { return logError(function (arg0) {
             const ret = arg0.buffer;
             return ret;
-        },
+        }, arguments); },
         __wbg_call_368fa9c372d473ba: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             const ret = arg0.call(arg1, arg2, arg3);
             return ret;
@@ -4279,15 +4726,19 @@ function __wbg_get_imports() {
         __wbg_close_f181fdc02ee236e6: function() { return handleError(function (arg0) {
             arg0.close();
         }, arguments); },
-        __wbg_crypto_38df2bab126b63dc: function(arg0) {
+        __wbg_createTask_018910f7b0ac4894: function() { return handleError(function (arg0, arg1) {
+            const ret = console.createTask(getStringFromWasm0(arg0, arg1));
+            return ret;
+        }, arguments); },
+        __wbg_crypto_38df2bab126b63dc: function() { return logError(function (arg0) {
             const ret = arg0.crypto;
             return ret;
-        },
-        __wbg_data_60b50110c5bd9349: function(arg0) {
+        }, arguments); },
+        __wbg_data_60b50110c5bd9349: function() { return logError(function (arg0) {
             const ret = arg0.data;
             return ret;
-        },
-        __wbg_error_a6fa202b58aa1cd3: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_error_a6fa202b58aa1cd3: function() { return logError(function (arg0, arg1) {
             let deferred0_0;
             let deferred0_1;
             try {
@@ -4297,7 +4748,7 @@ function __wbg_get_imports() {
             } finally {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
-        },
+        }, arguments); },
         __wbg_getRandomValues_c44a50d8cfdaebeb: function() { return handleError(function (arg0, arg1) {
             arg0.getRandomValues(arg1);
         }, arguments); },
@@ -4305,7 +4756,7 @@ function __wbg_get_imports() {
             const ret = Reflect.get(arg0, arg1);
             return ret;
         }, arguments); },
-        __wbg_instanceof_ArrayBuffer_ff7c1337a5e3b33a: function(arg0) {
+        __wbg_instanceof_ArrayBuffer_ff7c1337a5e3b33a: function() { return logError(function (arg0) {
             let result;
             try {
                 result = arg0 instanceof ArrayBuffer;
@@ -4313,31 +4764,33 @@ function __wbg_get_imports() {
                 result = false;
             }
             const ret = result;
+            _assertBoolean(ret);
             return ret;
-        },
-        __wbg_length_0c32cb8543c8e4c8: function(arg0) {
+        }, arguments); },
+        __wbg_length_0c32cb8543c8e4c8: function() { return logError(function (arg0) {
             const ret = arg0.length;
+            _assertNum(ret);
             return ret;
-        },
-        __wbg_log_4c0baeb8af2f8f89: function(arg0) {
+        }, arguments); },
+        __wbg_log_4c0baeb8af2f8f89: function() { return logError(function (arg0) {
             console.log(arg0);
-        },
-        __wbg_msCrypto_bd5a034af96bcba6: function(arg0) {
+        }, arguments); },
+        __wbg_msCrypto_bd5a034af96bcba6: function() { return logError(function (arg0) {
             const ret = arg0.msCrypto;
             return ret;
-        },
-        __wbg_new_227d7c05414eb861: function() {
+        }, arguments); },
+        __wbg_new_227d7c05414eb861: function() { return logError(function () {
             const ret = new Error();
             return ret;
-        },
-        __wbg_new_40792555590ec35c: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_new_40792555590ec35c: function() { return logError(function (arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
                 var cb0 = (arg0, arg1) => {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined_______true_(a, state0.b, arg0, arg1);
+                        return wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function__js_sys_32fd341feeb745b8___Function______true_(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -4347,31 +4800,31 @@ function __wbg_get_imports() {
             } finally {
                 state0.a = 0;
             }
-        },
-        __wbg_new_4f9fafbb3909af72: function() {
+        }, arguments); },
+        __wbg_new_4f9fafbb3909af72: function() { return logError(function () {
             const ret = new Object();
             return ret;
-        },
+        }, arguments); },
         __wbg_new_a2d8434834334bbf: function() { return handleError(function (arg0, arg1) {
             const ret = new WebSocket(getStringFromWasm0(arg0, arg1));
             return ret;
         }, arguments); },
-        __wbg_new_a560378ea1240b14: function(arg0) {
+        __wbg_new_a560378ea1240b14: function() { return logError(function (arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
-        },
-        __wbg_new_from_slice_2580ff33d0d10520: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_new_from_slice_2580ff33d0d10520: function() { return logError(function (arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
             return ret;
-        },
-        __wbg_new_typed_14d7cc391ce53d2c: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_new_typed_14d7cc391ce53d2c: function() { return logError(function (arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
                 var cb0 = (arg0, arg1) => {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined_______true_(a, state0.b, arg0, arg1);
+                        return wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined_______true_(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -4381,137 +4834,157 @@ function __wbg_get_imports() {
             } finally {
                 state0.a = 0;
             }
-        },
-        __wbg_new_with_length_9cedd08484b73942: function(arg0) {
+        }, arguments); },
+        __wbg_new_with_length_9cedd08484b73942: function() { return logError(function (arg0) {
             const ret = new Uint8Array(arg0 >>> 0);
             return ret;
-        },
-        __wbg_node_84ea875411254db1: function(arg0) {
+        }, arguments); },
+        __wbg_node_84ea875411254db1: function() { return logError(function (arg0) {
             const ret = arg0.node;
             return ret;
-        },
-        __wbg_process_44c7a14e11e9f69e: function(arg0) {
+        }, arguments); },
+        __wbg_process_44c7a14e11e9f69e: function() { return logError(function (arg0) {
             const ret = arg0.process;
             return ret;
-        },
-        __wbg_prototypesetcall_3e05eb9545565046: function(arg0, arg1, arg2) {
+        }, arguments); },
+        __wbg_prototypesetcall_3e05eb9545565046: function() { return logError(function (arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
-        },
-        __wbg_queueMicrotask_abaf92f0bd4e80a4: function(arg0) {
+        }, arguments); },
+        __wbg_queueMicrotask_abaf92f0bd4e80a4: function() { return logError(function (arg0) {
             const ret = arg0.queueMicrotask;
             return ret;
-        },
-        __wbg_queueMicrotask_df5a6dac26d818f3: function(arg0) {
+        }, arguments); },
+        __wbg_queueMicrotask_df5a6dac26d818f3: function() { return logError(function (arg0) {
             queueMicrotask(arg0);
-        },
+        }, arguments); },
         __wbg_randomFillSync_6c25eac9869eb53c: function() { return handleError(function (arg0, arg1) {
             arg0.randomFillSync(arg1);
         }, arguments); },
-        __wbg_random_a72d453e63c9558c: function() {
+        __wbg_random_a72d453e63c9558c: function() { return logError(function () {
             const ret = Math.random();
             return ret;
-        },
+        }, arguments); },
         __wbg_require_b4edbdcf3e2a1ef0: function() { return handleError(function () {
             const ret = module.require;
             return ret;
         }, arguments); },
-        __wbg_resolve_0a79de24e9d2267b: function(arg0) {
+        __wbg_resolve_0a79de24e9d2267b: function() { return logError(function (arg0) {
             const ret = Promise.resolve(arg0);
             return ret;
-        },
+        }, arguments); },
+        __wbg_run_04c1a466c02cbe72: function() { return logError(function (arg0, arg1, arg2) {
+            try {
+                var state0 = {a: arg1, b: arg2};
+                var cb0 = () => {
+                    const a = state0.a;
+                    state0.a = 0;
+                    try {
+                        return wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___bool__true_(a, state0.b, );
+                    } finally {
+                        state0.a = a;
+                    }
+                };
+                const ret = arg0.run(cb0);
+                _assertBoolean(ret);
+                return ret;
+            } finally {
+                state0.a = 0;
+            }
+        }, arguments); },
         __wbg_send_ef0ff91d4523ddfd: function() { return handleError(function (arg0, arg1) {
             arg0.send(arg1);
         }, arguments); },
         __wbg_set_8ee2d34facb8466e: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(arg0, arg1, arg2);
+            _assertBoolean(ret);
             return ret;
         }, arguments); },
-        __wbg_set_binaryType_95c0a0f7586a3903: function(arg0, arg1) {
+        __wbg_set_binaryType_95c0a0f7586a3903: function() { return logError(function (arg0, arg1) {
             arg0.binaryType = __wbindgen_enum_BinaryType[arg1];
-        },
-        __wbg_set_onerror_3db8bc3e52b2b10b: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_set_onerror_3db8bc3e52b2b10b: function() { return logError(function (arg0, arg1) {
             arg0.onerror = arg1;
-        },
-        __wbg_set_onmessage_45bd33b110c54f5b: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_set_onmessage_45bd33b110c54f5b: function() { return logError(function (arg0, arg1) {
             arg0.onmessage = arg1;
-        },
-        __wbg_set_onopen_7ffeb01f8a628209: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_set_onopen_7ffeb01f8a628209: function() { return logError(function (arg0, arg1) {
             arg0.onopen = arg1;
-        },
-        __wbg_stack_3b0d974bbf31e44f: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_stack_3b0d974bbf31e44f: function() { return logError(function (arg0, arg1) {
             const ret = arg1.stack;
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
-        },
-        __wbg_static_accessor_GLOBAL_THIS_a1248013d790bf5f: function() {
+        }, arguments); },
+        __wbg_static_accessor_GLOBAL_THIS_a1248013d790bf5f: function() { return logError(function () {
             const ret = typeof globalThis === 'undefined' ? null : globalThis;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-        },
-        __wbg_static_accessor_GLOBAL_f2e0f995a21329ff: function() {
+        }, arguments); },
+        __wbg_static_accessor_GLOBAL_f2e0f995a21329ff: function() { return logError(function () {
             const ret = typeof global === 'undefined' ? null : global;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-        },
-        __wbg_static_accessor_SELF_24f78b6d23f286ea: function() {
+        }, arguments); },
+        __wbg_static_accessor_SELF_24f78b6d23f286ea: function() { return logError(function () {
             const ret = typeof self === 'undefined' ? null : self;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-        },
-        __wbg_static_accessor_WINDOW_59fd959c540fe405: function() {
+        }, arguments); },
+        __wbg_static_accessor_WINDOW_59fd959c540fe405: function() { return logError(function () {
             const ret = typeof window === 'undefined' ? null : window;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
-        },
-        __wbg_subarray_0f98d3fb634508ad: function(arg0, arg1, arg2) {
+        }, arguments); },
+        __wbg_subarray_0f98d3fb634508ad: function() { return logError(function (arg0, arg1, arg2) {
             const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
             return ret;
-        },
-        __wbg_then_00eed3ac0b8e82cb: function(arg0, arg1, arg2) {
+        }, arguments); },
+        __wbg_then_00eed3ac0b8e82cb: function() { return logError(function (arg0, arg1, arg2) {
             const ret = arg0.then(arg1, arg2);
             return ret;
-        },
-        __wbg_then_a0c8db0381c8994c: function(arg0, arg1) {
+        }, arguments); },
+        __wbg_then_a0c8db0381c8994c: function() { return logError(function (arg0, arg1) {
             const ret = arg0.then(arg1);
             return ret;
-        },
-        __wbg_versions_276b2795b1c6a219: function(arg0) {
+        }, arguments); },
+        __wbg_versions_276b2795b1c6a219: function() { return logError(function (arg0) {
             const ret = arg0.versions;
             return ret;
-        },
-        __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 162, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_);
+        }, arguments); },
+        __wbindgen_cast_0000000000000001: function() { return logError(function (arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 186, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue______true_);
             return ret;
-        },
-        __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 507, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_a36ba44a4de80ab___JsError___true_);
+        }, arguments); },
+        __wbindgen_cast_0000000000000002: function() { return logError(function (arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 541, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_d141c3b5d349aa5d___JsError___true_);
             return ret;
-        },
-        __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 162, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2);
+        }, arguments); },
+        __wbindgen_cast_0000000000000003: function() { return logError(function (arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 187, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___web_sys_7707c915de0fca79___features__gen_MessageEvent__MessageEvent______true_);
             return ret;
-        },
-        __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 161, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_);
+        }, arguments); },
+        __wbindgen_cast_0000000000000004: function() { return logError(function (arg0, arg1) {
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 185, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke_______true_);
             return ret;
-        },
-        __wbindgen_cast_0000000000000005: function(arg0) {
+        }, arguments); },
+        __wbindgen_cast_0000000000000005: function() { return logError(function (arg0) {
             // Cast intrinsic for `F64 -> Externref`.
             const ret = arg0;
             return ret;
-        },
-        __wbindgen_cast_0000000000000006: function(arg0, arg1) {
+        }, arguments); },
+        __wbindgen_cast_0000000000000006: function() { return logError(function (arg0, arg1) {
             // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
             const ret = getArrayU8FromWasm0(arg0, arg1);
             return ret;
-        },
-        __wbindgen_cast_0000000000000007: function(arg0, arg1) {
+        }, arguments); },
+        __wbindgen_cast_0000000000000007: function() { return logError(function (arg0, arg1) {
             // Cast intrinsic for `Ref(String) -> Externref`.
             const ret = getStringFromWasm0(arg0, arg1);
             return ret;
-        },
+        }, arguments); },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;
             const offset = table.grow(4);
@@ -4528,36 +5001,77 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_(arg0, arg1) {
-    wasm.wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_(arg0, arg1);
+
+//#endregion
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke_______true_(arg0, arg1) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke_______true_(arg0, arg1);
 }
 
-function wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_(arg0, arg1, arg2) {
-    wasm.wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_(arg0, arg1, arg2);
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___bool__true_(arg0, arg1) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    const ret = wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___bool__true_(arg0, arg1);
+    return ret !== 0;
 }
 
-function wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2(arg0, arg1, arg2) {
-    wasm.wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2(arg0, arg1, arg2);
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue______true_(arg0, arg1, arg2) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue______true_(arg0, arg1, arg2);
 }
 
-function wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_a36ba44a4de80ab___JsError___true_(arg0, arg1, arg2) {
-    const ret = wasm.wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_a36ba44a4de80ab___JsError___true_(arg0, arg1, arg2);
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___web_sys_7707c915de0fca79___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___web_sys_7707c915de0fca79___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2);
+}
+
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_d141c3b5d349aa5d___JsError___true_(arg0, arg1, arg2) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    const ret = wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___wasm_bindgen_d141c3b5d349aa5d___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_d141c3b5d349aa5d___JsError___true_(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
 }
 
-function wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined_______true_(arg0, arg1, arg2, arg3) {
-    wasm.wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined___js_sys_f26ab8eee41f1ff0___Function_fn_wasm_bindgen_a36ba44a4de80ab___JsValue_____wasm_bindgen_a36ba44a4de80ab___sys__Undefined_______true_(arg0, arg1, arg2, arg3);
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function__js_sys_32fd341feeb745b8___Function______true_(arg0, arg1, arg2, arg3) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function__js_sys_32fd341feeb745b8___Function______true_(arg0, arg1, arg2, arg3);
+}
+
+function wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined_______true_(arg0, arg1, arg2, arg3) {
+    _assertNum(arg0);
+    _assertNum(arg1);
+    wasm.wasm_bindgen_d141c3b5d349aa5d___convert__closures_____invoke___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined___js_sys_32fd341feeb745b8___Function_fn_wasm_bindgen_d141c3b5d349aa5d___JsValue_____wasm_bindgen_d141c3b5d349aa5d___sys__Undefined_______true_(arg0, arg1, arg2, arg3);
 }
 
 
 const __wbindgen_enum_BinaryType = ["blob", "arraybuffer"];
 
+
+//#region intrinsics
 function addToExternrefTable0(obj) {
     const idx = wasm.__externref_table_alloc();
     wasm.__wbindgen_externrefs.set(idx, obj);
     return idx;
+}
+
+function _assertBigInt(n) {
+    if (typeof(n) !== 'bigint') throw new Error(`expected a bigint argument, found ${typeof(n)}`);
+}
+
+function _assertBoolean(n) {
+    if (typeof(n) !== 'boolean') {
+        throw new Error(`expected a boolean argument, found ${typeof(n)}`);
+    }
+}
+
+function _assertNum(n) {
+    if (typeof(n) !== 'number') throw new Error(`expected a number argument, found ${typeof(n)}`);
 }
 
 const CLOSURE_DTORS = (typeof FinalizationRegistry === 'undefined')
@@ -4668,6 +5182,22 @@ function isLikeNone(x) {
     return x === undefined || x === null;
 }
 
+function logError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        let error = (function () {
+            try {
+                return e instanceof Error ? `${e.message}\n\nStack:\n${e.stack}` : e.toString();
+            } catch(_) {
+                return "<failed to stringify thrown value>";
+            }
+        }());
+        console.error("wasm-bindgen: imported JS function that was not marked as `catch` threw an error:", error);
+        throw e;
+    }
+}
+
 function makeMutClosure(arg0, arg1, f) {
     const state = { a: arg0, b: arg1, cnt: 1 };
     const real = (...args) => {
@@ -4704,6 +5234,7 @@ function passArray8ToWasm0(arg, malloc) {
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
+    if (typeof(arg) !== 'string') throw new Error(`expected a string argument, found ${typeof(arg)}`);
     if (realloc === undefined) {
         const buf = cachedTextEncoder.encode(arg);
         const ptr = malloc(buf.length, 1) >>> 0;
@@ -4731,7 +5262,7 @@ function passStringToWasm0(arg, malloc, realloc) {
         ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
         const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
         const ret = cachedTextEncoder.encodeInto(arg, view);
-
+        if (ret.read !== arg.length) throw new Error('failed to pass whole string');
         offset += ret.written;
         ptr = realloc(ptr, len, offset, 1) >>> 0;
     }
@@ -4775,6 +5306,10 @@ if (!('encodeInto' in cachedTextEncoder)) {
 
 let WASM_VECTOR_LEN = 0;
 
+
+//#endregion
+
+//#region wasm loading
 let wasmModule, wasm;
 function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
@@ -4867,3 +5402,5 @@ async function __wbg_init(module_or_path) {
 }
 
 export { initSync, __wbg_init as default };
+//#endregion
+export { wasm as __wasm }

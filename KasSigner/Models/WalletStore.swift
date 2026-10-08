@@ -593,6 +593,7 @@ private final class WalletTransactionCache {
 
 @MainActor
 final class WalletStore: ObservableObject {
+    @Published private(set) var activeNetwork: KaspaNetwork = .mainnet
     @Published private(set) var profiles: [WalletProfile] = []
     @Published private(set) var transactions: [WalletTransaction] = []
     @Published private(set) var pendingTransactions: [WalletTransaction] = []
@@ -602,6 +603,10 @@ final class WalletStore: ObservableObject {
         didSet {
             guard !isLoading else { return }
             guard selectedProfileID != pendingImportedProfile?.id else { return }
+            if let selectedProfileID,
+               profiles.contains(where: { $0.id == selectedProfileID && $0.network == activeNetwork.rawValue }) {
+                defaults.set(selectedProfileID.uuidString, forKey: selectionKey(for: activeNetwork))
+            }
             save()
         }
     }
@@ -638,11 +643,28 @@ final class WalletStore: ObservableObject {
     }
 
     var selectedProfile: WalletProfile? {
-        if selectedProfileID == pendingImportedProfile?.id {
+        if selectedProfileID == pendingImportedProfile?.id,
+           pendingImportedProfile?.network == activeNetwork.rawValue {
             return pendingImportedProfile
         }
-        guard let selectedProfileID else { return profiles.first }
-        return profiles.first(where: { $0.id == selectedProfileID }) ?? profiles.first
+        guard let selectedProfileID else { return activeProfiles.first }
+        return activeProfiles.first(where: { $0.id == selectedProfileID }) ?? activeProfiles.first
+    }
+
+    var activeProfiles: [WalletProfile] {
+        profiles.filter { $0.network == activeNetwork.rawValue }
+    }
+
+    func activateNetwork(_ network: KaspaNetwork) {
+        guard activeNetwork != network else { return }
+        activeNetwork = network
+        let storedID = defaults.string(forKey: selectionKey(for: network)).flatMap(UUID.init(uuidString:))
+        selectedProfileID = activeProfiles.first(where: { $0.id == storedID })?.id
+            ?? activeProfiles.first?.id
+    }
+
+    private func selectionKey(for network: KaspaNetwork) -> String {
+        "kassigner.selectedWalletProfile.\(network.rawValue).v1"
     }
 
     func beginPendingImport(_ profile: WalletProfile) {
