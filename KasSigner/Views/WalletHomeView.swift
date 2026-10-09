@@ -321,7 +321,6 @@ struct WalletHomeView: View {
     private enum WalletRoute: Hashable {
         case receive(UUID)
         case programmableUTXOTypes(UUID)
-        case createTimeLockedUTXO(UUID)
         case protectedVaultRules(UUID)
         case protectedVaultSetupDraft(UUID)
         case protectedVaultDetail(UUID)
@@ -344,6 +343,7 @@ struct WalletHomeView: View {
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @State private var showingAddWallet = false
+    @State private var showingTimeLockedUTXOPlaceholder = false
     @State private var showingSecondaryCurrency = false
     @State private var showingCurrencyConverter = false
     @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
@@ -404,6 +404,11 @@ struct WalletHomeView: View {
                 )
                 .presentationDragIndicator(.visible)
             }
+            .alert("Not Built Yet", isPresented: $showingTimeLockedUTXOPlaceholder) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("Time-Locked UTXOs are not built yet.")
+            }
             .task {
                 async let walletRefresh: Void = refreshSelectedWallet(force: false)
                 async let priceRefresh: Void = priceService.refresh(preferences: preferences)
@@ -424,14 +429,6 @@ struct WalletHomeView: View {
                 case .programmableUTXOTypes(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
                         programmableUTXOTypeSelection(profile)
-                    } else {
-                        unavailableAccountView
-                    }
-                case .createTimeLockedUTXO(let profileID):
-                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
-                        CreateTimeLockedUTXOView(
-                            returnAddress: walletHomeReceiveAddress(for: profile)
-                        )
                     } else {
                         unavailableAccountView
                     }
@@ -798,9 +795,18 @@ struct WalletHomeView: View {
     private func programmableUTXOTypeSelection(_ profile: WalletProfile) -> some View {
         List {
             Section("Types") {
-                NavigationLink(value: WalletRoute.createTimeLockedUTXO(profile.id)) {
-                    Label("New Time-Locked UTXO", systemImage: "clock.badge.checkmark")
+                Button {
+                    showingTimeLockedUTXOPlaceholder = true
+                } label: {
+                    Label {
+                        Text("New Time-Locked UTXO")
+                            .foregroundStyle(.primary)
+                    } icon: {
+                        Image(systemName: "clock.badge.checkmark")
+                            .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                    }
                 }
+                .buttonStyle(.plain)
 
                 NavigationLink(value: WalletRoute.protectedVaultRules(profile.id)) {
                     Label("New Protected Vault", systemImage: "lock.shield")
@@ -2097,71 +2103,6 @@ private struct EnterProtectedVaultRecoveryAddressView: View {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "kaspatest://", with: "kaspatest:", options: [.caseInsensitive])
             .replacingOccurrences(of: "kaspa://", with: "kaspa:", options: [.caseInsensitive])
-    }
-}
-
-private struct CreateTimeLockedUTXOView: View {
-    let returnAddress: String
-    @EnvironmentObject private var preferences: AppPreferences
-
-    @State private var amountText = ""
-    @State private var unlockDate = Calendar.current.date(byAdding: .day, value: 1, to: .now) ?? .now
-
-    private var amountIsValid: Bool {
-        guard let amount = Decimal(string: amountText), amount > 0 else { return false }
-        return true
-    }
-
-    var body: some View {
-        Form {
-            Section("Amount") {
-                HStack {
-                    TextField("0", text: $amountText)
-                        .keyboardType(.decimalPad)
-                        .multilineTextAlignment(.trailing)
-
-                    Text(preferences.network.currencySymbol)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
-            Section("Unlock Date & Time") {
-                DatePicker(
-                    "Unlock",
-                    selection: $unlockDate,
-                    in: Date.now...,
-                    displayedComponents: [.date, .hourAndMinute]
-                )
-            }
-
-            Section("Return Address") {
-                Text(returnAddress)
-                    .font(.footnote.monospaced())
-                    .textSelection(.enabled)
-            }
-
-            Section("Summary") {
-                LabeledContent("Amount", value: amountSummary)
-                LabeledContent(
-                    "Unlocks",
-                    value: unlockDate.formatted(date: .abbreviated, time: .shortened)
-                )
-                LabeledContent("Estimated Fee", value: "—")
-            }
-
-            Section {
-                Button("Review Time Lock") {
-                }
-                .frame(maxWidth: .infinity)
-                .disabled(!amountIsValid || unlockDate <= .now)
-            }
-        }
-        .navigationTitle("Create Time-Locked UTXO")
-        .navigationBarTitleDisplayMode(.inline)
-    }
-
-    private var amountSummary: String {
-        amountIsValid ? "\(amountText) \(preferences.network.currencySymbol)" : "—"
     }
 }
 
