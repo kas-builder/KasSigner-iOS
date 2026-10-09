@@ -95,9 +95,30 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
 
     enum RecoveryPath: String, Codable, CaseIterable, Identifiable {
         case cancelPendingWithdrawal = "Cancel pending withdrawal only"
-        case emergencyAnytime = "Emergency recovery at any time"
+        case emergencyAnytime = "Emergency Recovery 24/7"
 
         var id: Self { self }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            let value = try container.decode(String.self)
+            switch value {
+            case "Cancel pending withdrawal only":
+                self = .cancelPendingWithdrawal
+            case "Emergency recovery at any time", "Emergency Recovery 24/7":
+                self = .emergencyAnytime
+            default:
+                throw DecodingError.dataCorruptedError(
+                    in: container,
+                    debugDescription: "Unknown protected vault recovery path: \(value)"
+                )
+            }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
     }
 
     enum Status: String, Codable {

@@ -1204,6 +1204,7 @@ private struct ProtectedVaultRulesView: View {
     @State private var showingCreateProtectedVault = false
     @State private var showingAddressesInfo = false
     @State private var showingSecurityDelayInfo = false
+    @State private var showingRecoveryPathInfo = false
     @State private var showingVaultFlowInfo = false
     @State private var showingExpandedVaultFlow = false
     @State private var showingDraftExitPrompt = false
@@ -1339,7 +1340,17 @@ private struct ProtectedVaultRulesView: View {
                     Text("Enter Recovery Address")
                 }
             } header: {
-                Text("Recovery Path")
+                HStack(spacing: 6) {
+                    Text("Recovery Path")
+                    Button {
+                        showingRecoveryPathInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("About recovery paths")
+                }
             }
 
             Section {
@@ -1426,6 +1437,11 @@ private struct ProtectedVaultRulesView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Withdrawals to these addresses can be made immediately through the approved covenant path. The covenant rules are generated from the addresses you enter here. Other destinations use the security delay and require a second transaction to complete the withdrawal.")
+        }
+        .alert("Recovery Path", isPresented: $showingRecoveryPathInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Cancel pending withdrawal only: if an unapproved withdrawal has started its security delay, you can redirect the pending funds to the configured recovery address. This option does not provide an immediate recovery route while the vault is active.\n\nEmergency Recovery 24/7: enables a recovery spend from an active vault to the configured recovery address without waiting for the security delay. It can also be used to redirect a pending withdrawal. To sign either recovery transaction, the wallet account that controls the recovery address must be imported in the app.")
         }
         .alert("Vault Flow Example", isPresented: $showingVaultFlowInfo) {
             Button("OK", role: .cancel) { }
