@@ -177,6 +177,67 @@ struct AccountSwitchLoadingView: View {
 }
 
 @MainActor
+final class NetworkSwitchPresentationModel: ObservableObject {
+    @Published private(set) var isVisible = false
+    @Published private(set) var progress = 0.0
+    @Published private(set) var title = "Switching to Mainnet"
+
+    private var presentationTask: Task<Void, Never>?
+
+    func start(switchingTo network: KaspaNetwork) {
+        presentationTask?.cancel()
+        title = "Switching to \(network.title)"
+        progress = 0
+        isVisible = true
+
+        presentationTask = Task { @MainActor [weak self] in
+            let duration: TimeInterval = 2
+            let startedAt = Date()
+
+            while !Task.isCancelled,
+                  let self {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                self.progress = min(1, elapsed / duration)
+
+                guard elapsed < duration else {
+                    self.isVisible = false
+                    self.presentationTask = nil
+                    return
+                }
+
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+    }
+}
+
+struct NetworkSwitchLoadingView: View {
+    let progress: Double
+    let title: String
+
+    private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            VStack(spacing: 18) {
+                ProgressView(value: progress)
+                    .tint(teal)
+                    .frame(maxWidth: 260)
+
+                Text(title)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(.white)
+            }
+            .padding(28)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+    }
+}
+
+@MainActor
 final class AccountDiscoveryPresentationModel: ObservableObject {
     @Published private(set) var isVisible = false
     @Published private(set) var progress = 0.04
@@ -286,6 +347,8 @@ struct RootView: View {
         AccountDiscoveryPresentationModel()
     @StateObject private var accountSwitchPresentation =
         AccountSwitchPresentationModel()
+    @StateObject private var networkSwitchPresentation =
+        NetworkSwitchPresentationModel()
 
     @State private var selectedTab: Tab = .wallet
     @State private var showingAddWallet = false
@@ -335,6 +398,7 @@ struct RootView: View {
             isInitialDiscoveryBlocking
                 || discoveryPresentation.isVisible
                 || accountSwitchPresentation.isVisible
+                || networkSwitchPresentation.isVisible
         )
         .environmentObject(discoveryPresentation)
         .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
@@ -426,6 +490,16 @@ struct RootView: View {
                 .zIndex(10)
             }
         }
+        .overlay {
+            if networkSwitchPresentation.isVisible {
+                NetworkSwitchLoadingView(
+                    progress: networkSwitchPresentation.progress,
+                    title: networkSwitchPresentation.title
+                )
+                .transition(.opacity)
+                .zIndex(20)
+            }
+        }
     }
 
     var body: some View {
@@ -444,6 +518,7 @@ struct RootView: View {
             applyDefaultKYCStatuses()
         }
         .onChange(of: preferences.network) { _, network in
+            networkSwitchPresentation.start(switchingTo: network)
             liveRPCService.reset()
             walletStore.activateNetwork(network)
             syncService.preload(profile: walletStore.selectedProfile)

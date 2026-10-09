@@ -610,7 +610,9 @@ struct SendDestinationView: View {
 
     @MainActor
     private func resolveChangePlan(
-        _ outputs: [PlannedChangeOutput]
+        _ outputs: [PlannedChangeOutput],
+        feeSompiOverride: UInt64? = nil,
+        feeRateOverride: Double? = nil
     ) async throws -> (outputs: [PlannedChangeOutput], plan: ChangeFeePlan) {
         guard let activeProfile = walletStore.profiles.first(
             where: { $0.id == profile.id }
@@ -618,7 +620,7 @@ struct SendDestinationView: View {
             throw SendVerificationError.walletStateChanged
         }
         guard let recipients = sendRecipients,
-              let feeSompi = provisionalFeeSompi
+              let feeSompi = feeSompiOverride ?? provisionalFeeSompi
         else {
             throw SendVerificationError.invalidFeeArithmetic
         }
@@ -628,7 +630,7 @@ struct SendDestinationView: View {
             selectedUTXOs: selectedUTXOs,
             recipients: recipients,
             feeSompi: feeSompi,
-            feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
+            feeRateSompiPerGram: feeRateOverride ?? selectedFeeRateSompiPerGram ?? 0,
             usesExactFee: selectedFee == .custom,
             sendMax: false,
             changeOutputs: outputs
@@ -726,6 +728,8 @@ struct SendDestinationView: View {
     @MainActor
     private func buildFirstVerifiedPSKB() async {
         guard !isBuildingPSKB else { return }
+        isBuildingPSKB = true
+        defer { isBuildingPSKB = false }
 
         if transactionType == .decoy,
            acknowledgedDecoyAddresses != changeOutputs.map(\.id) {
@@ -747,6 +751,25 @@ struct SendDestinationView: View {
             acknowledgedDecoyAddresses = checkedOutputs.map(\.id)
         }
 
+        let freshEstimate: FeeEstimate
+        do {
+            freshEstimate = try await engine.getFeeEstimate(
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+        } catch {
+            showBuildError("Could not refresh the network fee. Try again before continuing. \(error.localizedDescription)")
+            return
+        }
+        let freshFeeRate = selectedFee == .normal ? freshEstimate.normalSompiPerGram : 0
+        let requestedFeeSompi: UInt64?
+        if selectedFee == .custom {
+            requestedFeeSompi = customFeeSompi
+        } else if freshFeeRate.isFinite, freshFeeRate > 0,
+                  freshEstimate.suggestedFee > 0 {
+            requestedFeeSompi = freshEstimate.suggestedFee
+        } else {
+            requestedFeeSompi = nil
+        }
         guard let requestedFeeSompi else {
             showBuildError(
                 selectedFee == .custom
@@ -784,9 +807,6 @@ struct SendDestinationView: View {
             amountSompi = enteredAmountSompi
         }
 
-        isBuildingPSKB = true
-        defer { isBuildingPSKB = false }
-
         do {
             guard let activeProfile = walletStore.profiles.first(
                 where: { $0.id == profile.id }
@@ -815,7 +835,11 @@ struct SendDestinationView: View {
                         minimumOutputSompi: 66_900
                     )
                 }
-                let resolved = try await resolveChangePlan(outputsToResolve)
+                let resolved = try await resolveChangePlan(
+                    outputsToResolve,
+                    feeSompiOverride: requestedFeeSompi,
+                    feeRateOverride: freshFeeRate
+                )
                 plannedChangeOutputs = resolved.outputs
                 plannedAvailableChangeSompi = resolved.plan.availableChangeSompi
                 transactionFeeSompi = resolved.plan.feeSompi
@@ -870,7 +894,7 @@ struct SendDestinationView: View {
                 selectedUTXOs: selectedUTXOs,
                 recipients: recipients,
                 feeSompi: transactionFeeSompi,
-                feeRateSompiPerGram: selectedFeeRateSompiPerGram ?? 0,
+                feeRateSompiPerGram: freshFeeRate,
                 usesExactFee: selectedFee == .custom,
                 sendMax: sendMax,
                 changeOutputs: plannedChangeOutputs
@@ -1043,6 +1067,8 @@ struct SendDestinationView: View {
                 amountSompi: verifiedRecipients[0].amountSompi,
                 recipients: verifiedRecipients,
                 feeSompi: reportedFee,
+                feeRateSompiPerGram: freshFeeRate,
+                usesExactFee: selectedFee == .custom,
                 changeSompi: verifiedChangeSompi,
                 changeOutputs: verifiedChangeOutputs,
                 selectedInputCount: builtInputs.count,
@@ -2020,6 +2046,8 @@ struct VerifiedTransactionReview: Identifiable, Hashable {
     let amountSompi: UInt64
     let recipients: [SendDraftRecipient]
     let feeSompi: UInt64
+    let feeRateSompiPerGram: Double
+    let usesExactFee: Bool
     let changeSompi: UInt64
     let changeOutputs: [PlannedChangeOutput]
     let selectedInputCount: Int
@@ -2069,6 +2097,8 @@ extension VerifiedTransactionReview {
         self.amountSompi = amountSompi
         recipients = [SendDraftRecipient(address: destination, amountSompi: amountSompi)]
         self.feeSompi = feeSompi
+        feeRateSompiPerGram = 0
+        usesExactFee = true
         self.changeSompi = changeSompi
         changeOutputs = []
         self.selectedInputCount = selectedInputCount
@@ -2094,6 +2124,8 @@ private struct VerifiedTransactionReviewView: View {
     @EnvironmentObject private var appLockService: AppLockService
 
     @State private var showingSigning = false
+    @State private var isCheckingReviewFee = false
+    @State private var reviewFeeErrorMessage: String?
     @State private var isBroadcastingTestnet = false
     @State private var testnetErrorMessage: String?
     @State private var testnetTransactionID: String?
@@ -2188,33 +2220,65 @@ private struct VerifiedTransactionReviewView: View {
     }
 
     private var continueButton: some View {
-        Button {
-
-            let currentDigest = SHA256.hash(
-                data: Data(review.unsignedPSKB.utf8)
-            ).map {
-                String(format: "%02x", $0)
-            }.joined()
-
-            guard currentDigest == review.verifiedDigest else {
-                assertionFailure("Verified PSKB integrity failure.")
-                return
+        VStack(spacing: 10) {
+            if let reviewFeeErrorMessage {
+                Text(reviewFeeErrorMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            Button {
+                Task {
+                    guard !isCheckingReviewFee else { return }
+                    isCheckingReviewFee = true
+                    defer { isCheckingReviewFee = false }
+                    reviewFeeErrorMessage = await refreshedFeeError()
+                    guard reviewFeeErrorMessage == nil else { return }
 
-            showingSigning = true
-        } label: {
-            Text("Continue to Signing")
+                    let currentDigest = SHA256.hash(
+                        data: Data(review.unsignedPSKB.utf8)
+                    ).map { String(format: "%02x", $0) }.joined()
+                    guard currentDigest == review.verifiedDigest else {
+                        assertionFailure("Verified PSKB integrity failure.")
+                        return
+                    }
+                    showingSigning = true
+                }
+            } label: {
+                Group {
+                    if isCheckingReviewFee {
+                        ProgressView()
+                    } else {
+                        Text("Continue to Signing")
+                    }
+                }
                 .font(.headline)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(
+                isCheckingReviewFee || !review.selectedInputsVerified
+                    || !review.destinationVerified
+                    || !review.changeVerified
+                    || !review.feeVerified
+            )
         }
-        .buttonStyle(.borderedProminent)
-        .disabled(
-            !review.selectedInputsVerified
-                || !review.destinationVerified
-                || !review.changeVerified
-                || !review.feeVerified
-        )
+    }
+
+    private func refreshedFeeError() async -> String? {
+        do {
+            let estimate = try await engine.getFeeEstimate(
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+            if !review.usesExactFee,
+               estimate.normalSompiPerGram > review.feeRateSompiPerGram {
+                return "The network fee rose. Go back and continue again to review an updated transaction."
+            }
+            return nil
+        } catch {
+            return "Could not refresh the network fee. Try again. \(error.localizedDescription)"
+        }
     }
 
     private var testnetBroadcastButton: some View {
@@ -2308,6 +2372,10 @@ private struct VerifiedTransactionReviewView: View {
         isBroadcastingTestnet = true
         testnetErrorMessage = nil
         defer { isBroadcastingTestnet = false }
+        if let feeError = await refreshedFeeError() {
+            testnetErrorMessage = feeError
+            return
+        }
         do {
             let digest = SHA256.hash(data: Data(review.unsignedPSKB.utf8))
                 .map { String(format: "%02x", $0) }.joined()

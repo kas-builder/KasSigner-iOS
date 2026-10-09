@@ -202,8 +202,26 @@ fn standard_compute_mass(
         .ok_or_else(|| "Transaction compute mass overflow".to_string())
 }
 
-fn minimum_relay_fee(compute_mass: u64) -> u64 {
-    let fee = compute_mass.saturating_mul(MINIMUM_RELAY_TRANSACTION_FEE) / 1000;
+/// The pinned node prices the larger of compute mass and normalized transient
+/// mass for standardness. A signed version-0 P2PK input has a 66-byte script;
+/// the post-Toccata transient cofactor is 500_000 / 1_000_000 on both networks.
+fn standard_relay_mass(input_count: usize, output_script_lengths: &[usize]) -> Result<u64, String> {
+    let compute_mass = standard_compute_mass(input_count, output_script_lengths)?;
+    let input_bytes = 118u64.checked_mul(input_count as u64)
+        .ok_or_else(|| "Transaction serialized size overflow".to_string())?;
+    let output_bytes = output_script_lengths.iter().try_fold(0u64, |size, script_len| {
+        size.checked_add(18)?.checked_add(*script_len as u64)
+    }).ok_or_else(|| "Transaction serialized size overflow".to_string())?;
+    let serialized_bytes = 94u64.checked_add(input_bytes)
+        .and_then(|size| size.checked_add(output_bytes))
+        .ok_or_else(|| "Transaction serialized size overflow".to_string())?;
+    let normalized_transient = serialized_bytes.checked_mul(2)
+        .ok_or_else(|| "Transaction transient mass overflow".to_string())?;
+    Ok(compute_mass.max(normalized_transient))
+}
+
+fn minimum_relay_fee(relay_mass: u64) -> u64 {
+    let fee = relay_mass.saturating_mul(MINIMUM_RELAY_TRANSACTION_FEE) / 1000;
     if fee == 0 {
         MINIMUM_RELAY_TRANSACTION_FEE
     } else {
@@ -211,7 +229,7 @@ fn minimum_relay_fee(compute_mass: u64) -> u64 {
     }
 }
 
-fn fee_for_mass(compute_mass: u64, transaction_mass: u64, fee_rate: f64) -> Result<u64, String> {
+fn fee_for_mass(relay_mass: u64, transaction_mass: u64, fee_rate: f64) -> Result<u64, String> {
     if !fee_rate.is_finite() || fee_rate < 0.0 {
         return Err("Invalid transaction fee rate".into());
     }
@@ -221,7 +239,7 @@ fn fee_for_mass(compute_mass: u64, transaction_mass: u64, fee_rate: f64) -> Resu
     }
     // Matches rusty-kaspa Generator::calc_fee_rate.
     let rate_fee = rate_fee_f64 as u64;
-    Ok(minimum_relay_fee(compute_mass).max(rate_fee))
+    Ok(minimum_relay_fee(relay_mass).max(rate_fee))
 }
 
 pub fn plan_explicit_change_fee(
@@ -328,7 +346,7 @@ pub fn plan_explicit_change_fee(
             ));
         }
         let fee = if exact_fee_sompi > 0 {
-            let minimum_fee = minimum_relay_fee(compute_mass);
+            let minimum_fee = minimum_relay_fee(standard_relay_mass(selected.len(), &script_lengths)?);
             if exact_fee_sompi < minimum_fee {
                 return Err(format!(
                     "Custom fee is below the minimum relay fee of {} sompi",
@@ -337,7 +355,7 @@ pub fn plan_explicit_change_fee(
             }
             exact_fee_sompi
         } else {
-            fee_for_mass(compute_mass, mass, fee_rate_sompi_per_gram)?
+            fee_for_mass(standard_relay_mass(selected.len(), &script_lengths)?, mass, fee_rate_sompi_per_gram)?
         };
         let available_change = selected_total
             .checked_sub(recipient_total)
@@ -444,7 +462,12 @@ fn standard_send_plan(
         standard_compute_mass(selected.len(), &[destination_script_len, change_script_len])?;
 
     let policy_fee = |compute_mass: u64, transaction_mass: u64| -> Result<u64, String> {
-        let minimum = minimum_relay_fee(compute_mass);
+        let script_lengths = if compute_mass == compute_no_change {
+            vec![destination_script_len]
+        } else {
+            vec![destination_script_len, change_script_len]
+        };
+        let minimum = minimum_relay_fee(standard_relay_mass(selected.len(), &script_lengths)?);
         if exact_fee > 0 {
             if exact_fee < minimum {
                 return Err(format!(
@@ -454,7 +477,7 @@ fn standard_send_plan(
             }
             Ok(exact_fee)
         } else {
-            fee_for_mass(compute_mass, transaction_mass, fee_rate)
+            fee_for_mass(standard_relay_mass(selected.len(), &script_lengths)?, transaction_mass, fee_rate)
         }
     };
 
@@ -1677,7 +1700,7 @@ pub async fn create_send_pskb_with_utxos(
                 mass, MAX_STANDARD_MASS
             ));
         }
-        let minimum_fee = minimum_relay_fee(compute_mass);
+        let minimum_fee = minimum_relay_fee(standard_relay_mass(selected.len(), &script_lengths)?);
         if exact_fee_sompi > 0 {
             if actual_fee != exact_fee_sompi {
                 return Err("Change amounts do not preserve the exact custom fee".into());
@@ -1689,7 +1712,7 @@ pub async fn create_send_pskb_with_utxos(
                 ));
             }
         } else {
-            let required_fee = fee_for_mass(compute_mass, mass, fee_rate_sompi_per_gram)?;
+            let required_fee = fee_for_mass(standard_relay_mass(selected.len(), &script_lengths)?, mass, fee_rate_sompi_per_gram)?;
             if actual_fee < required_fee {
                 return Err(format!(
                     "The selected fee requires at least {} sompi for these outputs",
@@ -3555,6 +3578,8 @@ mod standard_send_tests {
     fn minimum_relay_prices_compute_mass_at_one_hundred_sompi_per_gram() {
         assert_eq!(minimum_relay_fee(1_624), 162_400);
         assert_eq!(minimum_relay_fee(2_036), 203_600);
+        assert_eq!(standard_relay_mass(1, &[34]).unwrap(), 1_624);
+        assert_eq!(standard_relay_mass(1, &[34, 34]).unwrap(), 2_036);
     }
 
     #[test]
