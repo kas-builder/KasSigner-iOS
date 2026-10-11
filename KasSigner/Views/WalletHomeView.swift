@@ -4490,13 +4490,7 @@ private struct VaultFundingUTXOSelectionView: View {
 
                     Spacer()
 
-                    Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(
-                            utxo.blockDAAScore > 0
-                                ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                                : Color.orange
-                        )
+                    UTXOKYCStatusBadge(status: coinControlStore.kycStatus(for: utxo))
                 }
 
                 Divider()
@@ -5406,6 +5400,45 @@ struct SendTransactionTypeSelectionView: View {
     }
 }
 
+/// Read-only rendering of the saved UTXO status, shared by the UTXO tab and
+/// every selection list. Status editing remains in the UTXO tab's Menu.
+struct UTXOKYCStatusBadge: View {
+    let status: UTXOKYCStatus?
+
+    private var tint: Color {
+        switch status {
+        case .kyc: .red
+        case .nonKYC: .green
+        case nil: .secondary
+        }
+    }
+
+    private var symbol: String {
+        switch status {
+        case .kyc: "exclamationmark.shield.fill"
+        case .nonKYC: "checkmark.shield.fill"
+        case nil: "shield.lefthalf.filled"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+            Text(status?.title ?? "Set status")
+            Image(systemName: "chevron.down")
+                .font(.caption2.weight(.bold))
+        }
+        .font(.caption.weight(.semibold))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(tint.opacity(0.14), in: Capsule())
+        .foregroundStyle(tint)
+        .fixedSize()
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status.map { "KYC status: \($0.title)" } ?? "Set KYC status")
+    }
+}
+
 struct SendUTXOSelectionView: View {
     let profile: WalletProfile
     let transactionType: SendTransactionType
@@ -5668,13 +5701,7 @@ struct SendUTXOSelectionView: View {
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 3) {
-                        Text(utxo.blockDAAScore > 0 ? "Confirmed" : "Not confirmed")
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(
-                                utxo.blockDAAScore > 0
-                                    ? Color(red: 0.18, green: 0.68, blue: 0.62)
-                                    : Color.orange
-                            )
+                        UTXOKYCStatusBadge(status: coinControlStore.kycStatus(for: utxo))
 
                         Text(utxoTypeLabel(for: utxo))
                             .font(.subheadline.monospacedDigit())

@@ -1473,33 +1473,8 @@ struct UTXOsView: View {
                 }
             }
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: status == .kyc
-                    ? "exclamationmark.shield.fill"
-                    : status == .nonKYC
-                        ? "checkmark.shield.fill"
-                        : "shield.lefthalf.filled")
-                Text(status?.title ?? "Set status")
-                Image(systemName: "chevron.down")
-                    .font(.caption2.weight(.bold))
-            }
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(
-                (status == .kyc
-                    ? Color.red
-                    : status == .nonKYC ? Color.green : Color.secondary)
-                    .opacity(0.14),
-                in: Capsule()
-            )
-            .foregroundStyle(
-                status == .kyc
-                    ? Color.red
-                    : status == .nonKYC ? Color.green : Color.secondary
-            )
+            UTXOKYCStatusBadge(status: status)
         }
-        .fixedSize()
         .buttonStyle(.plain)
         .accessibilityLabel(
             status.map { "KYC status: \($0.title)" } ?? "Set KYC status"
