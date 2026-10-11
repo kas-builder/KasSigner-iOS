@@ -3008,10 +3008,10 @@ private struct ProtectedVaultDetailView: View {
     @State private var renameText = ""
     @State private var showingSend = false
     @State private var isRefreshing = false
-    @State private var refreshError: String?
     @State private var currentVaultOutputs: [WalletUTXO] = []
 
     var body: some View {
+        let refreshState = protectedVaultStore.refreshState(for: vault.id)
         Form {
             Section("Summary") {
                 LabeledContent {
@@ -3044,6 +3044,48 @@ private struct ProtectedVaultDetailView: View {
                     "Created",
                     value: (vault.fundedAt ?? vault.createdAt).formatted(date: .abbreviated, time: .shortened)
                 )
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        if refreshState.isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Refreshing on-chain data…")
+                                .foregroundStyle(.secondary)
+                        } else if refreshState.isStale {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text(refreshState.lastSuccessfulInfo == nil
+                                 ? "On-chain state not verified"
+                                 : "Showing last verified data")
+                                .foregroundStyle(.orange)
+                        } else if refreshState.lastSuccessfulInfo != nil {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                            Text("On-chain data verified")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Image(systemName: "questionmark.circle")
+                                .foregroundStyle(.secondary)
+                            Text("On-chain state not checked yet")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    if let info = refreshState.lastSuccessfulInfo {
+                        Text("Last verified: \(info.network) · \(info.nodeLabel) · \(info.checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let errorMessage = refreshState.errorMessage {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button("Retry") {
+                            Task { await refreshVault() }
+                        }
+                        .disabled(isRefreshing)
+                    }
+                }
+                .font(.subheadline)
             }
 
             if let transactionID = vault.fundingTransactionID {
@@ -3215,15 +3257,12 @@ private struct ProtectedVaultDetailView: View {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
-        do {
-            currentVaultOutputs = try await protectedVaultStore.refreshOnChain(
+        if let outputs = try? await protectedVaultStore.refreshOnChain(
                 id: vault.id,
                 engine: engine,
                 preferences: preferences
-            )
-            refreshError = nil
-        } catch {
-            refreshError = error.localizedDescription
+        ) {
+            currentVaultOutputs = outputs
         }
     }
 

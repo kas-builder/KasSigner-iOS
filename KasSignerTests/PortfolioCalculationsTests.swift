@@ -363,6 +363,60 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
 
 @MainActor
 final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
+    func testRefreshFailureRetainsVerifiedTimestampAndSuccessfulRetryClearsStaleState() throws {
+        let firstCheck = Date(timeIntervalSince1970: 1_800_000_000)
+        let verified = ProtectedVaultRefreshInfo(
+            checkedAt: firstCheck,
+            network: "Testnet 10",
+            nodeLabel: "Automatic Nodes"
+        )
+        var state = ProtectedVaultRefreshState()
+        state.begin(at: firstCheck, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.succeed(with: verified)
+
+        let failedAttempt = firstCheck.addingTimeInterval(60)
+        state.begin(at: failedAttempt, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.fail(message: "Could not refresh on-chain data.")
+
+        XCTAssertTrue(state.isStale)
+        XCTAssertFalse(state.isRefreshing)
+        XCTAssertEqual(state.lastSuccessfulInfo, verified)
+        XCTAssertEqual(state.lastAttemptAt, failedAttempt)
+        XCTAssertEqual(state.errorMessage, "Could not refresh on-chain data.")
+
+        let retryCheck = firstCheck.addingTimeInterval(120)
+        let refreshed = ProtectedVaultRefreshInfo(
+            checkedAt: retryCheck,
+            network: "Testnet 10",
+            nodeLabel: "Automatic Nodes"
+        )
+        state.begin(at: retryCheck, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.succeed(with: refreshed)
+
+        XCTAssertFalse(state.isStale)
+        XCTAssertFalse(state.isRefreshing)
+        XCTAssertNil(state.errorMessage)
+        XCTAssertEqual(state.lastSuccessfulInfo, refreshed)
+    }
+
+    func testRefreshStateRoundTripsForProtectedPersistence() throws {
+        let info = ProtectedVaultRefreshInfo(
+            checkedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            network: "Mainnet",
+            nodeLabel: "example.org:443"
+        )
+        var state = ProtectedVaultRefreshState(lastSuccessfulInfo: info)
+        state.begin(at: info.checkedAt.addingTimeInterval(30), network: "Mainnet", nodeLabel: "example.org:443")
+        state.fail(message: "Could not refresh on-chain data.")
+
+        let data = try JSONEncoder().encode(state)
+        let restored = try JSONDecoder().decode(ProtectedVaultRefreshState.self, from: data)
+
+        XCTAssertEqual(restored, state)
+        XCTAssertTrue(restored.isStale)
+        XCTAssertEqual(restored.lastSuccessfulInfo, info)
+    }
+
     func testLegacyVaultMigrationAndSameWalletReassociationSurviveRelaunch() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "VaultRecovery-\(UUID().uuidString)", directoryHint: .isDirectory)

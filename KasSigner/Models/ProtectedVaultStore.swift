@@ -34,6 +34,66 @@ private struct ProtectedVaultPersistentState: Codable {
     var setupDrafts: [ProtectedVaultSetupDraft] = []
     var lastOpenedAtByItemKey: [String: Date] = [:]
     var walletFingerprintsByProfileID: [String: String] = [:]
+    var refreshStatesByVaultID: [String: ProtectedVaultRefreshState]? = nil
+}
+
+struct ProtectedVaultRefreshInfo: Codable, Equatable {
+    let checkedAt: Date
+    let network: String
+    let nodeLabel: String
+}
+
+struct ProtectedVaultRefreshState: Codable, Equatable {
+    private(set) var isRefreshing = false
+    private(set) var lastSuccessfulInfo: ProtectedVaultRefreshInfo?
+    private(set) var lastAttemptAt: Date?
+    private(set) var attemptedNetwork: String?
+    private(set) var attemptedNodeLabel: String?
+    private(set) var errorMessage: String?
+
+    var isStale: Bool { errorMessage != nil }
+
+    init(lastSuccessfulInfo: ProtectedVaultRefreshInfo? = nil) {
+        self.lastSuccessfulInfo = lastSuccessfulInfo
+    }
+
+    mutating func begin(at date: Date, network: String, nodeLabel: String) {
+        isRefreshing = true
+        lastAttemptAt = date
+        attemptedNetwork = network
+        attemptedNodeLabel = nodeLabel
+    }
+
+    mutating func succeed(with info: ProtectedVaultRefreshInfo) {
+        isRefreshing = false
+        lastSuccessfulInfo = info
+        lastAttemptAt = info.checkedAt
+        attemptedNetwork = info.network
+        attemptedNodeLabel = info.nodeLabel
+        errorMessage = nil
+    }
+
+    mutating func fail(message: String) {
+        isRefreshing = false
+        errorMessage = message
+    }
+
+    mutating func markInterrupted() {
+        fail(message: "The previous refresh did not finish. Retry to verify current on-chain data.")
+    }
+}
+
+@MainActor
+enum ProtectedVaultNodeLabel {
+    static func make(preferences: AppPreferences) -> String {
+        guard preferences.activeNodeMode == .custom,
+              let components = URLComponents(string: preferences.activeCustomNodeURL),
+              let host = components.host else {
+            return preferences.activeNodeMode.title
+        }
+        let port = components.port.map { ":\($0)" } ?? ""
+        return "\(host)\(port)"
+    }
 }
 
 struct ProtectedVaultSetupDraft: Codable, Equatable, Identifiable {
@@ -777,6 +837,7 @@ final class ProtectedVaultStore: ObservableObject {
     @Published private(set) var vaults: [ProtectedVault] = []
     @Published private(set) var setupDrafts: [ProtectedVaultSetupDraft] = []
     @Published private(set) var storageError: String?
+    @Published private(set) var refreshStates: [UUID: ProtectedVaultRefreshState] = [:]
 
     private let protectedFileName = "protected-vault-state.json"
     private let storageKey = "kassigner.protectedVaults.v1"
@@ -786,6 +847,7 @@ final class ProtectedVaultStore: ObservableObject {
     private let protectedStorage: ProtectedWalletStorage
     private var lastOpenedAtByItemKey: [String: Date] = [:]
     private var walletFingerprintsByProfileID: [String: String] = [:]
+    private var refreshStatesByVaultID: [String: ProtectedVaultRefreshState] = [:]
 
     init(defaults: UserDefaults = .standard,
          protectedStorage: ProtectedWalletStorage = .shared) {
@@ -1007,6 +1069,15 @@ final class ProtectedVaultStore: ObservableObject {
         lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)]
     }
 
+    func refreshState(for vaultID: UUID) -> ProtectedVaultRefreshState {
+        refreshStates[vaultID] ?? refreshStatesByVaultID[vaultID.uuidString] ?? ProtectedVaultRefreshState()
+    }
+
+    private func setRefreshState(_ state: ProtectedVaultRefreshState, for vaultID: UUID) {
+        refreshStates[vaultID] = state
+        _ = commit { refreshStatesByVaultID[vaultID.uuidString] = state }
+    }
+
     func recordOpened(id: UUID, profileID: UUID, at date: Date = .now) {
         _ = commit {
             lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
@@ -1035,7 +1106,12 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     func remove(id: UUID) {
-        _ = commit { vaults.removeAll { $0.id == id } }
+        if commit({
+            vaults.removeAll { $0.id == id }
+            refreshStatesByVaultID.removeValue(forKey: id.uuidString)
+        }) {
+            refreshStates.removeValue(forKey: id)
+        }
     }
 
     func rename(id: UUID, to name: String) {
@@ -1065,10 +1141,11 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
+    @discardableResult
     func recordPendingWithdrawal(id: UUID, destination: String,
                                  pendingAddress: String, transactionID: String,
                                  pendingBalanceSompi: UInt64? = nil,
-                                 pendingBlockDAAScore: UInt64? = nil) {
+                                 pendingBlockDAAScore: UInt64? = nil) -> Bool {
         update(id: id) { vault in
             let prior = vault.pendingWithdrawals.first {
                 $0.pendingAddress == pendingAddress && $0.completedAt == nil
@@ -1168,14 +1245,15 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
-    func updateOnChainFunding(id: UUID, utxos: [WalletUTXO]) {
+    @discardableResult
+    func updateOnChainFunding(id: UUID, utxos: [WalletUTXO]) -> Bool {
         var total: UInt64 = 0
         for utxo in utxos {
             let addition = total.addingReportingOverflow(utxo.amount)
-            guard !addition.overflow else { return }
+            guard !addition.overflow else { return false }
             total = addition.partialValue
         }
-        update(id: id) { vault in
+        return update(id: id) { vault in
             let covenantIDs = utxos.compactMap(\.covenantID).sorted()
             let onChainStatus: ProtectedVault.Status
             let onChainBalance: UInt64
@@ -1229,35 +1307,79 @@ final class ProtectedVaultStore: ObservableObject {
         guard let vault = vaults.first(where: { $0.id == id }),
               let address = vault.vaultAddress else { return [] }
 
-        let result = try await engine.syncAddress(
-            address,
-            nodeConfiguration: preferences.nodeConfiguration
-        )
-        updateOnChainFunding(id: id, utxos: result.utxos)
+        let now = Date()
+        let network = preferences.network.title
+        let nodeLabel = ProtectedVaultNodeLabel.make(preferences: preferences)
+        var state = refreshState(for: id)
+        state.begin(at: now, network: network, nodeLabel: nodeLabel)
+        setRefreshState(state, for: id)
 
-        if preferences.network == .testnet10 {
-            for pending in vault.pendingWithdrawals where pending.completedAt == nil {
-                let pendingResult = try await engine.syncAddress(
-                    pending.pendingAddress,
-                    nodeConfiguration: preferences.nodeConfiguration
+        do {
+            let result = try await engine.syncAddress(
+                address,
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+            var pendingResults: [(ProtectedVault.PendingWithdrawal, [WalletUTXO])] = []
+            if preferences.network == .testnet10 {
+                for pending in vault.pendingWithdrawals where pending.completedAt == nil {
+                    let pendingResult = try await engine.syncAddress(
+                        pending.pendingAddress,
+                        nodeConfiguration: preferences.nodeConfiguration
+                    )
+                    pendingResults.append((pending, pendingResult.utxos))
+                }
+            }
+
+            guard updateOnChainFunding(id: id, utxos: result.utxos) else {
+                throw KasSignerEngine.EngineError.javascript(
+                    "The refreshed vault data could not be saved."
                 )
-                if let pendingUTXO = ProtectedVaultStageOutput.classify(pendingResult.utxos)
+            }
+            for (pending, utxos) in pendingResults {
+                if let pendingUTXO = ProtectedVaultStageOutput.classify(utxos)
                     .filter({ $0.isCovenantTagged })
                     .map(\.utxo)
                     .sorted(by: { $0.id < $1.id })
                     .first {
-                    recordPendingWithdrawal(
+                    guard recordPendingWithdrawal(
                         id: vault.id,
                         destination: pending.destinationAddress,
                         pendingAddress: pending.pendingAddress,
                         transactionID: pending.transactionID,
                         pendingBalanceSompi: pendingUTXO.amount,
                         pendingBlockDAAScore: pendingUTXO.blockDAAScore
-                    )
+                    ) else {
+                        throw KasSignerEngine.EngineError.javascript(
+                            "The refreshed withdrawal data could not be saved."
+                        )
+                    }
                 }
             }
+
+            let info = ProtectedVaultRefreshInfo(
+                checkedAt: Date(), network: network, nodeLabel: nodeLabel
+            )
+            var refreshedState = refreshState(for: id)
+            refreshedState.succeed(with: info)
+            setRefreshState(refreshedState, for: id)
+            guard storageError == nil else {
+                throw KasSignerEngine.EngineError.javascript(
+                    "The vault refresh status could not be saved."
+                )
+            }
+            return result.utxos
+        } catch {
+            var failedState = refreshState(for: id)
+            failedState.fail(message: Self.refreshFailureMessage())
+            setRefreshState(failedState, for: id)
+            throw error
         }
-        return result.utxos
+    }
+
+    private static func refreshFailureMessage() -> String {
+        // Keep raw connection errors off-screen because they may echo custom
+        // node URLs containing credentials or tokens.
+        return "Could not refresh on-chain data. Check the network connection and try again."
     }
 
     func refreshAllOnChain(
@@ -1278,9 +1400,10 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
-    private func update(id: UUID, transform: (ProtectedVault) -> ProtectedVault) {
-        guard let index = vaults.firstIndex(where: { $0.id == id }) else { return }
-        _ = commit { vaults[index] = transform(vaults[index]) }
+    @discardableResult
+    private func update(id: UUID, transform: (ProtectedVault) -> ProtectedVault) -> Bool {
+        guard let index = vaults.firstIndex(where: { $0.id == id }) else { return false }
+        return commit { vaults[index] = transform(vaults[index]) }
     }
 
     private func replacing(_ vault: ProtectedVault, status: ProtectedVault.Status,
@@ -1319,6 +1442,16 @@ final class ProtectedVaultStore: ObservableObject {
                 setupDrafts = saved.setupDrafts
                 lastOpenedAtByItemKey = saved.lastOpenedAtByItemKey
                 walletFingerprintsByProfileID = saved.walletFingerprintsByProfileID
+                refreshStatesByVaultID = saved.refreshStatesByVaultID ?? [:]
+                var restoredRefreshStates: [UUID: ProtectedVaultRefreshState] = [:]
+                for (key, savedState) in refreshStatesByVaultID {
+                    guard let id = UUID(uuidString: key) else { continue }
+                    var state = savedState
+                    if state.isRefreshing { state.markInterrupted() }
+                    restoredRefreshStates[id] = state
+                }
+                refreshStates = restoredRefreshStates
+                refreshStatesByVaultID = Dictionary(uniqueKeysWithValues: refreshStates.map { ($0.key.uuidString, $0.value) })
                 return
             }
         } catch {
@@ -1355,12 +1488,14 @@ final class ProtectedVaultStore: ObservableObject {
         let previousDrafts = setupDrafts
         let previousDates = lastOpenedAtByItemKey
         let previousFingerprints = walletFingerprintsByProfileID
+        let previousRefreshStates = refreshStatesByVaultID
         change()
         guard persist() else {
             vaults = previousVaults
             setupDrafts = previousDrafts
             lastOpenedAtByItemKey = previousDates
             walletFingerprintsByProfileID = previousFingerprints
+            refreshStatesByVaultID = previousRefreshStates
             return false
         }
         return true
@@ -1370,7 +1505,8 @@ final class ProtectedVaultStore: ObservableObject {
         let state = ProtectedVaultPersistentState(
             vaults: vaults, setupDrafts: setupDrafts,
             lastOpenedAtByItemKey: lastOpenedAtByItemKey,
-            walletFingerprintsByProfileID: walletFingerprintsByProfileID
+            walletFingerprintsByProfileID: walletFingerprintsByProfileID,
+            refreshStatesByVaultID: refreshStatesByVaultID
         )
         guard protectedStorage.save(state, fileName: protectedFileName) else {
             storageError = "The vault registry could not be saved. Check device storage before continuing."
