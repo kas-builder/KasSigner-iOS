@@ -522,7 +522,9 @@ struct WalletHomeView: View {
                                             profileID: builtVault.profileID,
                                             index: index
                                           ) else { return false }
-                                    protectedVaultStore.add(builtVault)
+                                    guard protectedVaultStore.add(builtVault) else {
+                                        return false
+                                    }
                                 }
                                 protectedVaultStore.removeSetupDraft(id: builtVault.id)
                                 protectedVaultDraftsAwaitingFunding.removeValue(forKey: builtVault.id)
@@ -794,6 +796,12 @@ struct WalletHomeView: View {
 
     private func programmableUTXOTypeSelection(_ profile: WalletProfile) -> some View {
         List {
+            if let storageError = protectedVaultStore.storageError {
+                Section {
+                    Label(storageError, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                }
+            }
             Section("Types") {
                 Button {
                     showingTimeLockedUTXOPlaceholder = true
@@ -812,6 +820,7 @@ struct WalletHomeView: View {
                     Label("New Protected Vault", systemImage: "lock.shield")
                         .imageScale(.large)
                 }
+                .disabled(protectedVaultStore.storageError != nil)
             }
 
             Section("Vaults") {
@@ -3064,7 +3073,7 @@ private struct ProtectedVaultDetailView: View {
             }
 
             Section {
-                if !vault.fundingOutpoints.isEmpty {
+                if hasConsensusDetails {
                     Button {
                         showingConsensusDetails = true
                     } label: {
@@ -3278,6 +3287,14 @@ private struct ProtectedVaultDetailView: View {
             || vault.status == .fundingBroadcast || vault.status == .incompatibleFunding
     }
 
+    private var hasConsensusDetails: Bool {
+        vault.fundingTransactionID != nil
+            || !vault.fundingOutpoints.isEmpty
+            || !vault.covenantIDs.isEmpty
+            || vault.approvedWithdrawalTransactionID != nil
+            || !vault.pendingWithdrawals.isEmpty
+    }
+
     private var deleteConfirmationTitle: String {
         if hasOnChainState { return "Remove this vault from the app?" }
         return vault.status == .spent ? "Remove completed vault?" : "Delete this vault draft?"
@@ -3312,7 +3329,9 @@ private struct ProtectedVaultConsensusDetailsView: View {
         List {
             Section("On-chain Outputs") {
                 if outputs.isEmpty {
-                    Text("No live vault outputs are loaded. Return to the vault and refresh, then open Consensus again.")
+                    Text(vault.status == .spent
+                         ? "No live vault outputs remain for this spent vault. The saved covenant script is available below."
+                         : "No live vault outputs are loaded. Return to the vault and refresh, then open Advanced again.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {

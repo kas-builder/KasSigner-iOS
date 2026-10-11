@@ -333,6 +333,88 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
 }
 
 @MainActor
+final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
+    func testLegacyVaultMigrationAndSameWalletReassociationSurviveRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultRecovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultRecovery.\(UUID().uuidString)"))
+        let oldProfile = WalletProfile(name: "Original", kpub: "kpub-recovery-test",
+                                       network: KaspaNetwork.testnet10.rawValue)
+        let vault = ProtectedVault(profileID: oldProfile.id, amount: 1,
+                                   approvedAddresses: ["kaspatest:approved"],
+                                   delayDays: 1, delayHours: 0, delayMinutes: 0)
+        defaults.set(try JSONEncoder().encode([vault]), forKey: "kassigner.protectedVaults.v1")
+
+        let migrated = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertNil(migrated.storageError)
+        XCTAssertEqual(migrated.vaults(for: oldProfile.id).count, 1)
+        XCTAssertTrue(storage.contains(fileName: "protected-vault-state.json"))
+        XCTAssertNil(defaults.data(forKey: "kassigner.protectedVaults.v1"))
+        XCTAssertTrue(migrated.registerWallet(oldProfile))
+
+        let restoredProfile = WalletProfile(name: "Restored", kpub: oldProfile.kpub,
+                                            network: oldProfile.network)
+        XCTAssertTrue(migrated.reassociateVaults(to: restoredProfile))
+        XCTAssertTrue(migrated.vaults(for: oldProfile.id).isEmpty)
+        XCTAssertEqual(migrated.vaults(for: restoredProfile.id).first?.id, vault.id)
+
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.vaults(for: restoredProfile.id).first?.id, vault.id)
+    }
+
+    func testCorruptProtectedVaultFileIsNotReplacedByLegacyData() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultCorrupt-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appending(path: "protected-vault-state.json")
+        let corrupt = Data("invalid vault JSON".utf8)
+        try corrupt.write(to: file)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultCorrupt.\(UUID().uuidString)"))
+        let store = ProtectedVaultStore(defaults: defaults,
+                                        protectedStorage: ProtectedWalletStorage(directoryURL: root))
+        XCTAssertNotNil(store.storageError)
+        XCTAssertFalse(store.add(ProtectedVault(profileID: UUID(), amount: 1,
+                                                approvedAddresses: ["kaspatest:approved"],
+                                                delayDays: 1, delayHours: 0, delayMinutes: 0)))
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+    }
+
+    func testWalletImportDoesNotPublishProfileWhenProtectedSaveFails() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WalletSaveFailure-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: root)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "WalletSaveFailure.\(UUID().uuidString)"))
+        let wallet = WalletStore(protectedStorage: ProtectedWalletStorage(directoryURL: root),
+                                 defaults: defaults)
+        let profile = WalletProfile(name: "Must Not Appear", kpub: "kpub-save-failure")
+        XCTAssertFalse(wallet.add(profile))
+        XCTAssertTrue(wallet.profiles.isEmpty)
+        XCTAssertNil(wallet.selectedProfile)
+    }
+
+    func testRecoveryFileRejectsAnotherWallet() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultWrongWallet-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultWrongWallet.\(UUID().uuidString)"))
+        let store = ProtectedVaultStore(defaults: defaults,
+                                        protectedStorage: ProtectedWalletStorage(directoryURL: root))
+        let original = WalletProfile(name: "Original", kpub: "kpub-one",
+                                     network: KaspaNetwork.testnet10.rawValue)
+        let other = WalletProfile(name: "Other", kpub: "kpub-two",
+                                  network: KaspaNetwork.testnet10.rawValue)
+        let document = try store.recoveryDocument(for: original)
+        do {
+            _ = try await store.restoreRecoveryDocument(document, for: other,
+                                                        engine: KasSignerEngine())
+            XCTFail("A vault recovery file must not load into another wallet.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("does not belong"))
+        }
+    }
+}
+
+@MainActor
 final class UTXOBadgePersistenceTests: XCTestCase {
     private func utxo(_ id: String) -> WalletUTXO {
         WalletUTXO(

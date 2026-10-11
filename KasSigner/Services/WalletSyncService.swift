@@ -1689,9 +1689,17 @@ final class WalletSyncService: ObservableObject {
             if beganWithInitialDiscovery {
                 completedProfile.requiresInitialDiscovery = false
                 if walletStore.pendingImportedProfile?.id == completedProfile.id {
-                    walletStore.commitPendingImport(completedProfile)
+                    guard walletStore.commitPendingImport(completedProfile) else {
+                        throw KasSignerEngine.EngineError.javascript(
+                            "The imported account could not be saved. Check device storage and retry."
+                        )
+                    }
                 } else {
-                    walletStore.update(completedProfile)
+                    guard walletStore.update(completedProfile) else {
+                        throw KasSignerEngine.EngineError.javascript(
+                            "The updated account could not be saved. Check device storage and retry."
+                        )
+                    }
                 }
                 initialDiscoveryProgress = DiscoveryProgress(
                     title: "Wallet ready",

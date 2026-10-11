@@ -1,11 +1,13 @@
 import SwiftUI
 import UIKit
 import LocalAuthentication
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let onWalletSelected: ((WalletProfile) -> Void)?
 
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
@@ -20,6 +22,11 @@ struct SettingsView: View {
     @State private var showingAccountReorder = false
     @State private var revealedTestnetWords: String?
     @State private var seedRevealError: String?
+    @State private var vaultRecoveryDocument: ProtectedVaultRecoveryDocument?
+    @State private var vaultRecoveryProfile: WalletProfile?
+    @State private var showingVaultExport = false
+    @State private var showingVaultImport = false
+    @State private var vaultRecoveryMessage: String?
 
     init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
@@ -79,6 +86,16 @@ struct SettingsView: View {
                                         Text("Copy kpub")
                                     } icon: {
                                         Image(uiImage: primaryMenuIcon("doc.on.doc"))
+                                    }
+                                }
+
+                                if profile.network == KaspaNetwork.testnet10.rawValue {
+                                    Button("Export Vault Recovery File") {
+                                        exportVaultRecoveryFile(for: profile)
+                                    }
+                                    Button("Import Vault Recovery File") {
+                                        vaultRecoveryProfile = profile
+                                        showingVaultImport = true
                                     }
                                 }
 
@@ -327,7 +344,10 @@ struct SettingsView: View {
             } message: { profile in
                 Text(
                     "This removes “\(profile.name)” from this iPhone. "
-                        + "It does not affect funds or the KasSigner device."
+                        + "It does not affect funds or the KasSigner device. "
+                        + (protectedVaultStore.vaults(for: profile.id).isEmpty
+                           ? ""
+                           : "This account has saved vaults. Keep your recovery words and export their vault records before deleting it.")
                 )
             }
             .alert("Address Derivation Failed", isPresented: Binding(
@@ -337,6 +357,27 @@ struct SettingsView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(derivationError ?? "Unknown error")
+            }
+            .fileExporter(isPresented: $showingVaultExport,
+                          document: vaultRecoveryDocument,
+                          contentType: .json,
+                          defaultFilename: "KasSigner-Vault-Recovery") { result in
+                if case .failure(let error) = result {
+                    vaultRecoveryMessage = "Could not export the vault recovery file: \(error.localizedDescription)"
+                }
+                vaultRecoveryDocument = nil
+            }
+            .fileImporter(isPresented: $showingVaultImport,
+                          allowedContentTypes: [.json]) { result in
+                Task { await importVaultRecoveryFile(result) }
+            }
+            .alert("Vault Recovery", isPresented: Binding(
+                get: { vaultRecoveryMessage != nil },
+                set: { if !$0 { vaultRecoveryMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { vaultRecoveryMessage = nil }
+            } message: {
+                Text(vaultRecoveryMessage ?? "")
             }
     }
 
@@ -435,13 +476,51 @@ struct SettingsView: View {
         copyFeedbackCenter.showCopied(profile.kpub, label: "kpub")
     }
 
+    private func exportVaultRecoveryFile(for profile: WalletProfile) {
+        do {
+            vaultRecoveryDocument = try protectedVaultStore.recoveryDocument(for: profile)
+            showingVaultExport = true
+        } catch {
+            vaultRecoveryMessage = "Could not prepare the vault recovery file: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func importVaultRecoveryFile(_ result: Result<URL, Error>) async {
+        guard let profile = vaultRecoveryProfile else { return }
+        defer { vaultRecoveryProfile = nil }
+        do {
+            let url = try result.get()
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let document = ProtectedVaultRecoveryDocument(data: try Data(contentsOf: url))
+            let imported = try await protectedVaultStore.restoreRecoveryDocument(
+                document, for: profile, engine: engine
+            )
+            vaultRecoveryMessage = imported == 0
+                ? "All vault records in this file are already present."
+                : "Restored \(imported) vault record\(imported == 1 ? "" : "s"). Refresh the wallet to verify current on-chain status."
+        } catch {
+            vaultRecoveryMessage = "Vault recovery failed: \(error.localizedDescription)"
+        }
+    }
+
     private func deleteProfile(_ profile: WalletProfile) {
         guard let index = walletStore.profiles.firstIndex(where: { $0.id == profile.id }) else {
             return
         }
 
+        guard protectedVaultStore.registerWallet(profile) else {
+            seedRevealError = "Vault records could not be saved. Account deletion was canceled."
+            profilePendingDeletion = nil
+            return
+        }
+
+        let wasSelected = walletStore.selectedProfile?.id == profile.id
+        var savedMnemonic: String?
         if profile.network == KaspaNetwork.testnet10.rawValue {
             do {
+                savedMnemonic = try TestnetSeedStore.load(for: profile.id)
                 try TestnetSeedStore.remove(for: profile.id)
             } catch {
                 seedRevealError = "Could not remove this Testnet account's recovery words: \(error.localizedDescription)"
@@ -450,10 +529,23 @@ struct SettingsView: View {
             }
         }
 
-        let wasSelected = walletStore.selectedProfile?.id == profile.id
+        guard walletStore.remove(at: IndexSet(integer: index)) else {
+            if let savedMnemonic {
+                do {
+                    try TestnetSeedStore.save(savedMnemonic, for: profile.id)
+                    seedRevealError = "The account could not be removed from protected storage. Its Testnet recovery words were restored."
+                } catch {
+                    seedRevealError = "Account deletion failed, and the Testnet recovery words could not be restored to Keychain. Restore them from your backup before signing."
+                }
+            } else {
+                seedRevealError = "The account could not be removed from protected storage. Check device storage and try again."
+            }
+            profilePendingDeletion = nil
+            return
+        }
+
         WalletSnapshotCache.shared.remove(profileID: profile.id)
         coinControlStore.removeData(profileID: profile.id)
-        walletStore.remove(at: IndexSet(integer: index))
 
         if wasSelected {
             syncService.reset()

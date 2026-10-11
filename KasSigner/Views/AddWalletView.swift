@@ -1,5 +1,6 @@
 import CryptoKit
 import SwiftUI
+import UIKit
 
 enum KpubQRPayloadError: LocalizedError {
     case invalidHex
@@ -112,6 +113,7 @@ enum KpubQRPayload {
 struct AddWalletView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var discoveryPresentation:
@@ -130,6 +132,7 @@ struct AddWalletView: View {
     @State private var recoveryWords = ""
     @State private var pendingTestnetWallet: TestnetHotWalletImportResult?
     @State private var showingTestnetWords = false
+    @State private var didCopyTestnetWords = false
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -149,7 +152,7 @@ struct AddWalletView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .lineLimit(3...6)
-                        Button("Restore Account") {
+                        Button("Import Account") {
                             Task { await prepareTestnetWallet(restore: true) }
                         }
                         .disabled(walletName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -253,25 +256,37 @@ struct AddWalletView: View {
                         VStack(alignment: .leading, spacing: 20) {
                             Text("Testnet 10 recovery words")
                                 .font(.title2.bold())
-                            Text("Keep these 12 words private. Anyone with them can spend this Testnet account's TKAS.")
-                                .foregroundStyle(.secondary)
                             Text(pendingTestnetWallet?.mnemonic ?? "")
                                 .font(.body.monospaced())
                                 .textSelection(.enabled)
                                 .padding()
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
-                            Button("Copy all 12 words") {
-                                if let words = pendingTestnetWallet?.mnemonic { PrivatePasteboard.copy(words) }
-                            }
-                            .buttonStyle(.bordered)
-                            Button("Add Account") { finishTestnetWallet() }
+                            HStack(spacing: 12) {
+                                Button {
+                                    guard let words = pendingTestnetWallet?.mnemonic else { return }
+                                    UIPasteboard.general.string = words
+                                    didCopyTestnetWords = UIPasteboard.general.string == words
+                                } label: {
+                                    Label(didCopyTestnetWords ? "Copied" : "Copy",
+                                          systemImage: didCopyTestnetWords ? "checkmark" : "doc.on.doc")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .sensoryFeedback(.success, trigger: didCopyTestnetWords)
+
+                                Button("Add Account") {
+                                    Task { await finishTestnetWallet() }
+                                }
                                 .buttonStyle(.borderedProminent)
                                 .frame(maxWidth: .infinity)
+                                .disabled(isImporting)
+                            }
+                            .frame(maxWidth: .infinity)
                         }
                         .padding()
                     }
-                    .navigationTitle("Recovery Words")
+                    .navigationTitle("Import Testnet Account")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -308,6 +323,7 @@ struct AddWalletView: View {
                 duplicateProfile = existing
                 return
             }
+            didCopyTestnetWords = false
             pendingTestnetWallet = result
             showingTestnetWords = true
         } catch {
@@ -315,8 +331,11 @@ struct AddWalletView: View {
         }
     }
 
-    private func finishTestnetWallet() {
-        guard let result = pendingTestnetWallet else { return }
+    private func finishTestnetWallet() async {
+        guard let result = pendingTestnetWallet, !isImporting else { return }
+        isImporting = true
+        defer { isImporting = false }
+        errorMessage = nil
         let profile = WalletProfile(
             name: walletName.trimmingCharacters(in: .whitespacesAndNewlines),
             kpub: result.wallet.kpub,
@@ -326,14 +345,37 @@ struct AddWalletView: View {
         )
         do {
             try TestnetSeedStore.save(result.mnemonic, for: profile.id)
-            walletStore.add(profile)
-            pendingTestnetWallet = nil
-            recoveryWords = ""
-            showingTestnetWords = false
-            dismiss()
         } catch {
             errorMessage = "Could not securely store the recovery words: \(error.localizedDescription)"
+            return
         }
+        guard walletStore.add(profile) else {
+            do {
+                try TestnetSeedStore.remove(for: profile.id)
+                errorMessage = "The account could not be saved. Check device storage and try again."
+            } catch {
+                errorMessage = "The account could not be saved, and its recovery words could not be removed from secure storage: \(error.localizedDescription)"
+            }
+            return
+        }
+        guard protectedVaultStore.reassociateVaults(to: profile) else {
+            errorMessage = "The account was saved, but its vault records could not be restored. Do not delete the account; check device storage and reopen the app."
+            return
+        }
+        do {
+            _ = try await protectedVaultStore.recoverLegacyOrphanedVaults(
+                to: profile,
+                knownProfileIDs: Set(walletStore.profiles.map(\.id)),
+                engine: engine
+            )
+        } catch {
+            errorMessage = "The account was saved, but older vault records could not be checked: \(error.localizedDescription)"
+            return
+        }
+        pendingTestnetWallet = nil
+        recoveryWords = ""
+        showingTestnetWords = false
+        dismiss()
     }
 
     @MainActor

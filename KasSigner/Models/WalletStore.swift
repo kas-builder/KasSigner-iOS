@@ -673,13 +673,23 @@ final class WalletStore: ObservableObject {
         selectedProfileID = profile.id
     }
 
-    func commitPendingImport(_ profile: WalletProfile) {
-        guard pendingImportedProfile?.id == profile.id else { return }
+    @discardableResult
+    func commitPendingImport(_ profile: WalletProfile) -> Bool {
+        guard pendingImportedProfile?.id == profile.id else { return false }
+        let previousProfiles = profiles
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         profiles.append(profile)
+        selectedProfileID = profile.id
+        guard save() else {
+            profiles = previousProfiles
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
         pendingImportedProfile = nil
         selectionBeforePendingImport = nil
-        selectedProfileID = profile.id
-        save()
+        return true
     }
 
     func discardPendingImport() {
@@ -689,10 +699,19 @@ final class WalletStore: ObservableObject {
         selectionBeforePendingImport = nil
     }
 
-    func add(_ profile: WalletProfile) {
+    @discardableResult
+    func add(_ profile: WalletProfile) -> Bool {
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         profiles.append(profile)
         selectedProfileID = profile.id
-        save()
+        guard save() else {
+            profiles.removeAll { $0.id == profile.id }
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
+        return true
     }
 
     @discardableResult
@@ -1077,7 +1096,11 @@ final class WalletStore: ObservableObject {
         transactionRevision &+= 1
     }
 
-    func remove(at offsets: IndexSet) {
+    @discardableResult
+    func remove(at offsets: IndexSet) -> Bool {
+        let previousProfiles = profiles
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         let removedProfileIDs = offsets.compactMap { index in
             profiles.indices.contains(index) ? profiles[index].id : nil
         }
@@ -1088,20 +1111,26 @@ final class WalletStore: ObservableObject {
             persistentState.changeIndices.removeValue(forKey: key)
             persistentState.usedChangeAddresses.removeValue(forKey: key)
             persistentState.usedReceiveAddresses.removeValue(forKey: key)
-            transactionCache.remove(profileID: profileID)
-            TransactionGraphCache.shared.remove(profileID: profileID)
         }
-
-        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
-
-        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
-        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
 
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
             self.selectedProfileID = profiles.first?.id
         }
-        save()
+        guard persistProtectedState() else {
+            profiles = previousProfiles
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
+        for profileID in removedProfileIDs {
+            transactionCache.remove(profileID: profileID)
+            TransactionGraphCache.shared.remove(profileID: profileID)
+        }
+        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
+        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        return true
     }
 
     private func load() {
@@ -1190,7 +1219,9 @@ final class WalletStore: ObservableObject {
         persistentState.profiles = profiles
         persistentState.selectedProfileID = selectedProfileID
         let didSaveWalletState = persistProtectedState()
-        _ = persistTransactionCache()
+        if didSaveWalletState {
+            _ = persistTransactionCache()
+        }
         return didSaveWalletState
     }
 

@@ -1,4 +1,40 @@
 import Foundation
+import CryptoKit
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct ProtectedVaultRecoveryDocument: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    var data: Data
+
+    init(data: Data) { self.data = data }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        self.data = data
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: data)
+    }
+}
+
+private struct ProtectedVaultRecoveryBackup: Codable {
+    let version: Int
+    let walletFingerprint: String
+    let vaults: [ProtectedVault]
+    let setupDrafts: [ProtectedVaultSetupDraft]
+}
+
+private struct ProtectedVaultPersistentState: Codable {
+    var version = 1
+    var vaults: [ProtectedVault] = []
+    var setupDrafts: [ProtectedVaultSetupDraft] = []
+    var lastOpenedAtByItemKey: [String: Date] = [:]
+    var walletFingerprintsByProfileID: [String: String] = [:]
+}
 
 struct ProtectedVaultSetupDraft: Codable, Equatable, Identifiable {
     enum Step: String, Codable {
@@ -53,6 +89,16 @@ struct ProtectedVaultSetupDraft: Codable, Equatable, Identifiable {
         self.feeChoiceRawValue = feeChoiceRawValue
         self.customFeeText = customFeeText
         self.step = step
+    }
+
+    func reassociated(to profileID: UUID) -> Self {
+        Self(id: id, profileID: profileID, createdAt: createdAt,
+             approvedAddressCount: approvedAddressCount,
+             approvedAddresses: approvedAddresses, recoveryAddress: recoveryAddress,
+             recoveryPath: recoveryPath, delayDays: delayDays,
+             delayHours: delayHours, delayMinutes: delayMinutes,
+             selectedUTXOIDs: selectedUTXOIDs, feeChoiceRawValue: feeChoiceRawValue,
+             customFeeText: customFeeText, step: step)
     }
 }
 
@@ -279,6 +325,24 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         fundingOutpoints = try values.decodeIfPresent([String].self, forKey: .fundingOutpoints) ?? []
         covenantIDs = try values.decodeIfPresent([String].self, forKey: .covenantIDs) ?? []
         pendingWithdrawals = try values.decodeIfPresent([PendingWithdrawal].self, forKey: .pendingWithdrawals) ?? []
+    }
+}
+
+extension ProtectedVault {
+    func reassociated(to profileID: UUID) -> Self {
+        Self(id: id, profileID: profileID, name: name, amount: amount,
+             usesSendMaxFunding: usesSendMaxFunding,
+             approvedAddresses: approvedAddresses,
+             recoveryAddress: recoveryAddress, recoveryPath: recoveryPath,
+             delayDays: delayDays, delayHours: delayHours,
+             delayMinutes: delayMinutes, ownerDerivationIndex: ownerDerivationIndex,
+             ownerPublicKey: ownerPublicKey, redeemScriptHex: redeemScriptHex,
+             vaultAddress: vaultAddress, createdAt: createdAt, status: status,
+             fundingTransactionID: fundingTransactionID,
+             approvedWithdrawalTransactionID: approvedWithdrawalTransactionID,
+             fundedAt: fundedAt, lockedSompi: lockedSompi,
+             fundingOutpoints: fundingOutpoints, covenantIDs: covenantIDs,
+             pendingWithdrawals: pendingWithdrawals)
     }
 }
 
@@ -680,16 +744,205 @@ enum SignedProtectedVaultFundingVerifier {
 final class ProtectedVaultStore: ObservableObject {
     @Published private(set) var vaults: [ProtectedVault] = []
     @Published private(set) var setupDrafts: [ProtectedVaultSetupDraft] = []
+    @Published private(set) var storageError: String?
 
+    private let protectedFileName = "protected-vault-state.json"
     private let storageKey = "kassigner.protectedVaults.v1"
     private let setupDraftStorageKey = "kassigner.protectedVaultSetupDrafts.v1"
     private let lastOpenedStorageKey = "kassigner.protectedVaultLastOpened.v1"
     private let defaults: UserDefaults
+    private let protectedStorage: ProtectedWalletStorage
     private var lastOpenedAtByItemKey: [String: Date] = [:]
+    private var walletFingerprintsByProfileID: [String: String] = [:]
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard,
+         protectedStorage: ProtectedWalletStorage = .shared) {
         self.defaults = defaults
+        self.protectedStorage = protectedStorage
         load()
+    }
+
+    private static func fingerprint(for profile: WalletProfile) -> String {
+        let identity = "\(profile.network.lowercased()):\(profile.kpub)"
+        return SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    @discardableResult
+    func registerWallet(_ profile: WalletProfile) -> Bool {
+        let key = profile.id.uuidString
+        let fingerprint = Self.fingerprint(for: profile)
+        if walletFingerprintsByProfileID[key] == fingerprint { return true }
+        return commit {
+            walletFingerprintsByProfileID[key] = fingerprint
+        }
+    }
+
+    @discardableResult
+    func reassociateVaults(to profile: WalletProfile) -> Bool {
+        let fingerprint = Self.fingerprint(for: profile)
+        let oldIDs = Set(walletFingerprintsByProfileID.compactMap { key, value in
+            value == fingerprint && key != profile.id.uuidString ? UUID(uuidString: key) : nil
+        })
+        guard !oldIDs.isEmpty else { return registerWallet(profile) }
+        return commit {
+            vaults = vaults.map { vault in
+                guard oldIDs.contains(vault.profileID) else { return vault }
+                return vault.reassociated(to: profile.id)
+            }
+            setupDrafts = setupDrafts.map { draft in
+                guard oldIDs.contains(draft.profileID) else { return draft }
+                return draft.reassociated(to: profile.id)
+            }
+            walletFingerprintsByProfileID[profile.id.uuidString] = fingerprint
+            for oldID in oldIDs {
+                walletFingerprintsByProfileID.removeValue(forKey: oldID.uuidString)
+            }
+        }
+    }
+
+    func recoverLegacyOrphanedVaults(to profile: WalletProfile,
+                                     knownProfileIDs: Set<UUID>,
+                                     engine: KasSignerEngine) async throws -> Int {
+        guard storageError == nil else {
+            throw KasSignerEngine.EngineError.javascript(storageError ?? "Vault storage is unavailable.")
+        }
+        var matchedVaultIDs = Set<UUID>()
+        for vault in vaults where !knownProfileIDs.contains(vault.profileID)
+            && walletFingerprintsByProfileID[vault.profileID.uuidString] == nil {
+            guard let index = vault.ownerDerivationIndex, index >= 0,
+                  !vault.approvedAddresses.isEmpty,
+                  let recovery = vault.recoveryAddress,
+                  let path = vault.recoveryPath,
+                  let owner = vault.ownerPublicKey,
+                  let script = vault.redeemScriptHex,
+                  let address = vault.vaultAddress,
+                  (0...365).contains(vault.delayDays),
+                  (0...23).contains(vault.delayHours),
+                  (0...59).contains(vault.delayMinutes) else { continue }
+            let minutes = vault.delayDays * 1440 + vault.delayHours * 60 + vault.delayMinutes
+            guard minutes > 0,
+                  let derived = try? await engine.deriveProtectedVault(
+                    profile: profile, receiveIndex: index,
+                    approvedAddresses: vault.approvedAddresses,
+                    recoveryAddress: recovery,
+                    emergencyAnytime: path == .emergencyAnytime,
+                    delayDAA: UInt64(minutes) * 600
+                  ),
+                  derived.ownerPublicKey.caseInsensitiveCompare(owner) == .orderedSame,
+                  derived.redeemScriptHex.caseInsensitiveCompare(script) == .orderedSame,
+                  derived.vaultAddress.caseInsensitiveCompare(address) == .orderedSame
+            else { continue }
+            matchedVaultIDs.insert(vault.id)
+        }
+        guard !matchedVaultIDs.isEmpty else { return 0 }
+        let count = matchedVaultIDs.count
+        guard commit({
+            vaults = vaults.map { matchedVaultIDs.contains($0.id)
+                ? $0.reassociated(to: profile.id) : $0 }
+            walletFingerprintsByProfileID[profile.id.uuidString] = Self.fingerprint(for: profile)
+        }) else {
+            throw KasSignerEngine.EngineError.javascript("Recovered vault records could not be saved.")
+        }
+        return count
+    }
+
+    func recoveryDocument(for profile: WalletProfile) throws -> ProtectedVaultRecoveryDocument {
+        guard storageError == nil else {
+            throw KasSignerEngine.EngineError.javascript(storageError ?? "Vault storage is unavailable.")
+        }
+        let backup = ProtectedVaultRecoveryBackup(
+            version: 1, walletFingerprint: Self.fingerprint(for: profile),
+            vaults: vaults(for: profile.id), setupDrafts: setupDrafts(for: profile.id)
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return ProtectedVaultRecoveryDocument(data: try encoder.encode(backup))
+    }
+
+    func restoreRecoveryDocument(_ document: ProtectedVaultRecoveryDocument,
+                                 for profile: WalletProfile,
+                                 engine: KasSignerEngine) async throws -> Int {
+        guard storageError == nil else {
+            throw KasSignerEngine.EngineError.javascript(storageError ?? "Vault storage is unavailable.")
+        }
+        guard document.data.count <= 2_000_000 else {
+            throw KasSignerEngine.EngineError.javascript("The vault recovery file is too large.")
+        }
+        let backup = try JSONDecoder().decode(ProtectedVaultRecoveryBackup.self, from: document.data)
+        guard backup.version == 1,
+              backup.walletFingerprint == Self.fingerprint(for: profile),
+              profile.network == KaspaNetwork.testnet10.rawValue else {
+            throw KasSignerEngine.EngineError.javascript("This recovery file does not belong to the selected Testnet 10 account.")
+        }
+        guard Set(backup.vaults.map(\.id)).count == backup.vaults.count else {
+            throw KasSignerEngine.EngineError.javascript("The recovery file contains duplicate vault records.")
+        }
+        guard Set(backup.setupDrafts.map(\.id)).count == backup.setupDrafts.count else {
+            throw KasSignerEngine.EngineError.javascript("The recovery file contains duplicate setup drafts.")
+        }
+        for incoming in backup.vaults {
+            if let current = vaults.first(where: { $0.id == incoming.id }),
+               current.vaultAddress?.caseInsensitiveCompare(incoming.vaultAddress ?? "") != .orderedSame {
+                throw KasSignerEngine.EngineError.javascript("A saved vault conflicts with the recovery file.")
+            }
+        }
+        for vault in backup.vaults {
+            guard let index = vault.ownerDerivationIndex,
+                  index >= 0,
+                  !vault.approvedAddresses.isEmpty,
+                  let recovery = vault.recoveryAddress,
+                  let path = vault.recoveryPath,
+                  let owner = vault.ownerPublicKey,
+                  let script = vault.redeemScriptHex,
+                  let address = vault.vaultAddress,
+                  (0...365).contains(vault.delayDays),
+                  (0...23).contains(vault.delayHours),
+                  (0...59).contains(vault.delayMinutes) else {
+                throw KasSignerEngine.EngineError.javascript("The recovery file contains an incomplete vault descriptor.")
+            }
+            let minutes = vault.delayDays * 1440 + vault.delayHours * 60 + vault.delayMinutes
+            guard minutes > 0 else {
+                throw KasSignerEngine.EngineError.javascript("The recovery file contains an invalid security delay.")
+            }
+            let derived = try await engine.deriveProtectedVault(
+                profile: profile, receiveIndex: index,
+                approvedAddresses: vault.approvedAddresses,
+                recoveryAddress: recovery,
+                emergencyAnytime: path == .emergencyAnytime,
+                delayDAA: UInt64(minutes) * 600
+            )
+            guard derived.scriptVersion == 2,
+                  derived.ownerPublicKey.caseInsensitiveCompare(owner) == .orderedSame,
+                  derived.redeemScriptHex.caseInsensitiveCompare(script) == .orderedSame,
+                  derived.vaultAddress.caseInsensitiveCompare(address) == .orderedSame else {
+                throw KasSignerEngine.EngineError.javascript("A vault descriptor does not match this wallet and its covenant rules.")
+            }
+            for pending in vault.pendingWithdrawals {
+                let expected = try await engine.deriveProtectedVaultPendingWithRecovery(
+                    vault: vault, destination: pending.destinationAddress
+                )
+                guard expected.pendingAddress.caseInsensitiveCompare(pending.pendingAddress) == .orderedSame else {
+                    throw KasSignerEngine.EngineError.javascript("A pending withdrawal address does not match its covenant rules.")
+                }
+            }
+        }
+        let existingIDs = Set(vaults.map(\.id))
+        let imported = backup.vaults.filter { !existingIDs.contains($0.id) }.map {
+            $0.reassociated(to: profile.id)
+        }
+        let existingDraftIDs = Set(setupDrafts.map(\.id))
+        let importedDrafts = backup.setupDrafts.filter { !existingDraftIDs.contains($0.id) }.map {
+            $0.reassociated(to: profile.id)
+        }
+        guard commit({
+            vaults.append(contentsOf: imported)
+            setupDrafts.append(contentsOf: importedDrafts)
+            walletFingerprintsByProfileID[profile.id.uuidString] = Self.fingerprint(for: profile)
+        }) else {
+            throw KasSignerEngine.EngineError.javascript("The restored vault records could not be saved.")
+        }
+        return imported.count
     }
 
     func vaults(for profileID: UUID) -> [ProtectedVault] {
@@ -723,41 +976,41 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     func recordOpened(id: UUID, profileID: UUID, at date: Date = .now) {
-        lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
-        saveLastOpenedDates()
+        _ = commit {
+            lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
+        }
     }
 
-    func saveSetupDraft(_ draft: ProtectedVaultSetupDraft) {
-        if let index = setupDrafts.firstIndex(where: { $0.id == draft.id }) {
-            setupDrafts[index] = draft
-        } else {
-            setupDrafts.append(draft)
+    @discardableResult
+    func saveSetupDraft(_ draft: ProtectedVaultSetupDraft) -> Bool {
+        commit {
+            if let index = setupDrafts.firstIndex(where: { $0.id == draft.id }) {
+                setupDrafts[index] = draft
+            } else {
+                setupDrafts.append(draft)
+            }
         }
-        saveSetupDrafts()
     }
 
     func removeSetupDraft(id: UUID) {
-        setupDrafts.removeAll { $0.id == id }
-        saveSetupDrafts()
+        _ = commit { setupDrafts.removeAll { $0.id == id } }
     }
 
-    func add(_ vault: ProtectedVault) {
-        guard !vaults.contains(where: { $0.id == vault.id }) else { return }
-        vaults.append(vault)
-        save()
+    @discardableResult
+    func add(_ vault: ProtectedVault) -> Bool {
+        guard !vaults.contains(where: { $0.id == vault.id }) else { return true }
+        return commit { vaults.append(vault) }
     }
 
     func remove(id: UUID) {
-        vaults.removeAll { $0.id == id }
-        save()
+        _ = commit { vaults.removeAll { $0.id == id } }
     }
 
     func rename(id: UUID, to name: String) {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty,
               let index = vaults.firstIndex(where: { $0.id == id }) else { return }
-        vaults[index].name = trimmedName
-        save()
+        _ = commit { vaults[index].name = trimmedName }
     }
 
     func recordFundingBroadcast(id: UUID, transactionID: String) {
@@ -991,8 +1244,7 @@ final class ProtectedVaultStore: ObservableObject {
 
     private func update(id: UUID, transform: (ProtectedVault) -> ProtectedVault) {
         guard let index = vaults.firstIndex(where: { $0.id == id }) else { return }
-        vaults[index] = transform(vaults[index])
-        save()
+        _ = commit { vaults[index] = transform(vaults[index]) }
     }
 
     private func replacing(_ vault: ProtectedVault, status: ProtectedVault.Status,
@@ -1019,33 +1271,76 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     private func load() {
-        if let data = defaults.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([ProtectedVault].self, from: data) {
-            vaults = decoded
+        do {
+            if let saved = try protectedStorage.loadIfPresent(
+                ProtectedVaultPersistentState.self, fileName: protectedFileName
+            ) {
+                guard saved.version == 1 else {
+                    storageError = "This vault registry version is not supported. Its file was left intact."
+                    return
+                }
+                vaults = saved.vaults
+                setupDrafts = saved.setupDrafts
+                lastOpenedAtByItemKey = saved.lastOpenedAtByItemKey
+                walletFingerprintsByProfileID = saved.walletFingerprintsByProfileID
+                return
+            }
+        } catch {
+            storageError = "The protected vault registry could not be read. Its file was left intact: \(error.localizedDescription)"
+            return
         }
-        if let draftData = defaults.data(forKey: setupDraftStorageKey),
-           let decodedDrafts = try? JSONDecoder().decode([ProtectedVaultSetupDraft].self, from: draftData) {
-            setupDrafts = decodedDrafts
+        do {
+            if let data = defaults.data(forKey: storageKey) {
+                vaults = try JSONDecoder().decode([ProtectedVault].self, from: data)
+            }
+            if let data = defaults.data(forKey: setupDraftStorageKey) {
+                setupDrafts = try JSONDecoder().decode([ProtectedVaultSetupDraft].self, from: data)
+            }
+            if let data = defaults.data(forKey: lastOpenedStorageKey) {
+                lastOpenedAtByItemKey = try JSONDecoder().decode([String: Date].self, from: data)
+            }
+        } catch {
+            storageError = "Legacy vault data could not be decoded. It was left intact: \(error.localizedDescription)"
+            vaults = []
+            setupDrafts = []
+            lastOpenedAtByItemKey = [:]
+            return
         }
-        if let data = defaults.data(forKey: lastOpenedStorageKey),
-           let decodedDates = try? JSONDecoder().decode([String: Date].self, from: data) {
-            lastOpenedAtByItemKey = decodedDates
-        }
+        guard persist() else { return }
+        defaults.removeObject(forKey: storageKey)
+        defaults.removeObject(forKey: setupDraftStorageKey)
+        defaults.removeObject(forKey: lastOpenedStorageKey)
     }
 
-    private func save() {
-        guard let data = try? JSONEncoder().encode(vaults) else { return }
-        defaults.set(data, forKey: storageKey)
+    @discardableResult
+    private func commit(_ change: () -> Void) -> Bool {
+        guard storageError == nil else { return false }
+        let previousVaults = vaults
+        let previousDrafts = setupDrafts
+        let previousDates = lastOpenedAtByItemKey
+        let previousFingerprints = walletFingerprintsByProfileID
+        change()
+        guard persist() else {
+            vaults = previousVaults
+            setupDrafts = previousDrafts
+            lastOpenedAtByItemKey = previousDates
+            walletFingerprintsByProfileID = previousFingerprints
+            return false
+        }
+        return true
     }
 
-    private func saveSetupDrafts() {
-        guard let data = try? JSONEncoder().encode(setupDrafts) else { return }
-        defaults.set(data, forKey: setupDraftStorageKey)
-    }
-
-    private func saveLastOpenedDates() {
-        guard let data = try? JSONEncoder().encode(lastOpenedAtByItemKey) else { return }
-        defaults.set(data, forKey: lastOpenedStorageKey)
+    private func persist() -> Bool {
+        let state = ProtectedVaultPersistentState(
+            vaults: vaults, setupDrafts: setupDrafts,
+            lastOpenedAtByItemKey: lastOpenedAtByItemKey,
+            walletFingerprintsByProfileID: walletFingerprintsByProfileID
+        )
+        guard protectedStorage.save(state, fileName: protectedFileName) else {
+            storageError = "The vault registry could not be saved. Check device storage before continuing."
+            return false
+        }
+        return true
     }
 
     private func lastOpenedItemKey(id: UUID, profileID: UUID) -> String {

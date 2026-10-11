@@ -43,8 +43,16 @@ struct KasSignerApp: App {
             .environmentObject(protectedVaultStore)
             .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
             .task {
+                for profile in walletStore.profiles {
+                    _ = protectedVaultStore.registerWallet(profile)
+                }
                 await priceService.prepareHistoricalPrices()
                 await priceService.refreshHistoricalPricesIfNeeded()
+            }
+            .onChange(of: walletStore.profiles) { _, profiles in
+                for profile in profiles {
+                    _ = protectedVaultStore.registerWallet(profile)
+                }
             }
         }
     }
