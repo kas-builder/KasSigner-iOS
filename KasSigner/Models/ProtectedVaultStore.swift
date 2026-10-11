@@ -740,6 +740,38 @@ enum SignedProtectedVaultFundingVerifier {
     }
 }
 
+/// A UTXO observed at a protected-vault stage. A covenant tag makes an output
+/// a candidate; the PSKB builder and verifier still validate its exact binding.
+struct ProtectedVaultStageOutput: Identifiable, Equatable {
+    enum Classification: Equatable {
+        case covenantTagged
+        case unsupportedDeposit
+    }
+
+    let utxo: WalletUTXO
+
+    var id: String { utxo.id.lowercased() }
+
+    var classification: Classification {
+        guard let covenantID = utxo.covenantID,
+              covenantID.count == 64,
+              covenantID.allSatisfy(\.isHexDigit) else {
+            return .unsupportedDeposit
+        }
+        return .covenantTagged
+    }
+
+    var isCovenantTagged: Bool { classification == .covenantTagged }
+
+    func canCoverFee(_ feeSompi: UInt64) -> Bool {
+        isCovenantTagged && utxo.amount > feeSompi
+    }
+
+    static func classify(_ utxos: [WalletUTXO]) -> [ProtectedVaultStageOutput] {
+        utxos.map { ProtectedVaultStageOutput(utxo: $0) }
+    }
+}
+
 @MainActor
 final class ProtectedVaultStore: ObservableObject {
     @Published private(set) var vaults: [ProtectedVault] = []
@@ -1167,7 +1199,9 @@ final class ProtectedVaultStore: ObservableObject {
                 // While a delayed withdrawal is in progress, the original vault
                 // address is expected to be empty. Preserve its last known value.
                 onChainBalance = vault.status == .pendingWithdrawal ? (vault.lockedSompi ?? 0) : 0
-            } else if covenantIDs.count == utxos.count {
+            } else if utxos.allSatisfy({
+                ProtectedVaultStageOutput(utxo: $0).isCovenantTagged
+            }) {
                 onChainStatus = .active
                 onChainBalance = total
                 onChainOutpoints = utxos.map(\.id).sorted()
@@ -1207,9 +1241,11 @@ final class ProtectedVaultStore: ObservableObject {
                     pending.pendingAddress,
                     nodeConfiguration: preferences.nodeConfiguration
                 )
-                if pendingResult.utxos.count == 1,
-                   let pendingUTXO = pendingResult.utxos.first,
-                   pendingUTXO.covenantID?.count == 64 {
+                if let pendingUTXO = ProtectedVaultStageOutput.classify(pendingResult.utxos)
+                    .filter({ $0.isCovenantTagged })
+                    .map(\.utxo)
+                    .sorted(by: { $0.id < $1.id })
+                    .first {
                     recordPendingWithdrawal(
                         id: vault.id,
                         destination: pending.destinationAddress,

@@ -33,6 +33,35 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
         XCTAssertTrue(session.begin(profileID: UUID()))
     }
 
+    func testVaultStageKeepsCovenantOutputSpendableBesideUnsupportedDeposit() {
+        let original = WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: 0,
+            amount: 250_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: String(repeating: "b", count: 64)
+        )
+        let unsupportedDeposit = WalletUTXO(
+            txID: String(repeating: "c", count: 64),
+            index: 1,
+            amount: 10_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 43,
+            covenantID: nil
+        )
+
+        let outputs = ProtectedVaultStageOutput.classify([original, unsupportedDeposit])
+        let spendable = outputs.filter { $0.canCoverFee(1_000_000) }
+        let unsupported = outputs.filter { !$0.isCovenantTagged }
+
+        XCTAssertEqual(outputs.count, 2)
+        XCTAssertEqual(spendable.map(\.id), [original.id.lowercased()])
+        XCTAssertEqual(spendable.first?.utxo, original)
+        XCTAssertEqual(unsupported.map(\.id), [unsupportedDeposit.id.lowercased()])
+        XCTAssertFalse(unsupported.first?.canCoverFee(1_000_000) ?? true)
+    }
+
     func testMultipleInputsProduceRequestedFeeAndWalletChange() throws {
         let plan = try ProtectedVaultFundingPlan(
             vault: vault(amount: Decimal(string: "1.25")!),

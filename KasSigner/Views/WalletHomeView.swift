@@ -3051,6 +3051,22 @@ private struct ProtectedVaultDetailView: View {
                     .padding(.top, -6)
             }
 
+            let unsupportedDeposits = ProtectedVaultStageOutput.classify(currentVaultOutputs)
+                .filter { !$0.isCovenantTagged }
+            if !unsupportedDeposits.isEmpty {
+                Section("Unsupported Deposits") {
+                    Text("These outputs are at the vault address but are not covenant-tagged, so they cannot be spent through the protected-vault flow. They do not prevent spending a separately selected covenant output.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    ForEach(unsupportedDeposits) { output in
+                        LabeledContent(
+                            "\(formatTKAS(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))",
+                            value: "Unsupported"
+                        )
+                    }
+                }
+            }
+
             if vault.status == .spent {
                 if let transactionID = vault.approvedWithdrawalTransactionID {
                     transactionCard(title: "Approved Withdrawal Transaction", transactionID: transactionID)
@@ -3103,8 +3119,11 @@ private struct ProtectedVaultDetailView: View {
                 }
             }
 
+            let hasCovenantOutput = ProtectedVaultStageOutput.classify(currentVaultOutputs)
+                .contains { $0.isCovenantTagged }
             if vault.status == .active ||
-                (preferences.network == .testnet10 && vault.status == .pendingWithdrawal) {
+                (preferences.network == .testnet10 && vault.status == .pendingWithdrawal) ||
+                (vault.status == .incompatibleFunding && hasCovenantOutput) {
                 Section {
                     Button(action: { showingSend = true }) {
                         Text("Spend from Vault")
@@ -3206,6 +3225,15 @@ private struct ProtectedVaultDetailView: View {
         } catch {
             refreshError = error.localizedDescription
         }
+    }
+
+    private func formatTKAS(_ sompi: UInt64) -> String {
+        "\((Decimal(sompi) / 100_000_000).formatted()) TKAS"
+    }
+
+    private func shortOutpoint(_ outpoint: String) -> String {
+        guard outpoint.count > 20 else { return outpoint }
+        return "\(outpoint.prefix(10))…\(outpoint.suffix(8))"
     }
 
     private func transactionCard(title: String, transactionID: String) -> some View {
@@ -3477,12 +3505,27 @@ private struct TestnetProtectedVaultSpendView: View {
     @State private var errorMessage: String?
     @State private var transactionID: String?
     @State private var feeSompi: UInt64 = 500_000
+    @State private var stageOutputs: [ProtectedVaultStageOutput] = []
+    @State private var selectedStageOutpoint = ""
     @State private var preparedSpend: PreparedSpend?
     @State private var isRestoringPreparedReview = false
     @State private var didInitializePendingSpendPath = false
 
     private var vault: ProtectedVault? {
         protectedVaultStore.vaults.first { $0.id == vaultID }
+    }
+
+    private var spendableStageOutputs: [ProtectedVaultStageOutput] {
+        stageOutputs.filter { $0.canCoverFee(feeSompi) }
+    }
+
+    private var unsupportedStageOutputs: [ProtectedVaultStageOutput] {
+        stageOutputs.filter { !$0.isCovenantTagged }
+    }
+
+    private var selectedStageOutput: ProtectedVaultStageOutput? {
+        if spendableStageOutputs.count == 1 { return spendableStageOutputs[0] }
+        return spendableStageOutputs.first { $0.id == selectedStageOutpoint }
     }
 
     private var availablePaths: [SpendPath] {
@@ -3656,6 +3699,23 @@ private struct TestnetProtectedVaultSpendView: View {
                         .pickerStyle(.navigationLink)
                         LabeledContent("Estimated Amount", value: estimatedAmountText(for: vault))
                         LabeledContent("Network Fee", value: formatTKAS(feeSompi))
+                        if spendableStageOutputs.count > 1 {
+                            Picker("Covenant Output", selection: $selectedStageOutpoint) {
+                                Text("Select an output").tag("")
+                                ForEach(spendableStageOutputs) { output in
+                                    Text("\(formatTKAS(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))")
+                                        .tag(output.id)
+                                }
+                            }
+                            .pickerStyle(.navigationLink)
+                        } else if spendableStageOutputs.count == 1,
+                                  let output = spendableStageOutputs.first {
+                            LabeledContent("Covenant Output", value: "\(formatTKAS(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))")
+                        } else {
+                            Text("No spendable covenant-tagged output is currently available at this stage.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         if path == .approved {
                             LabeledContent("Security Delay", value: "None")
                         }
@@ -3685,6 +3745,19 @@ private struct TestnetProtectedVaultSpendView: View {
                             )
                         }
                     }
+                    if !unsupportedStageOutputs.isEmpty {
+                        Section("Unsupported Deposits") {
+                            Text("These deposits are not covenant-tagged and cannot be spent through this vault flow. They are excluded from the output choices above.")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                            ForEach(unsupportedStageOutputs) { output in
+                                LabeledContent(
+                                    "\(formatTKAS(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))",
+                                    value: "Unsupported"
+                                )
+                            }
+                        }
+                    }
                     Section {
                         if path == .mature,
                            vault.status == .pendingWithdrawal,
@@ -3711,6 +3784,8 @@ private struct TestnetProtectedVaultSpendView: View {
                                 .disabled(
                                     isWorking
                                         || pending.pendingBlockDAAScore == nil
+                                        || selectedStageOutput == nil
+                                        || (spendableStageOutputs.count > 1 && selectedStageOutpoint.isEmpty)
                                         || remainingDelaySeconds(
                                             for: pending,
                                             delayDAA: delayDAA(for: vault),
@@ -3729,7 +3804,10 @@ private struct TestnetProtectedVaultSpendView: View {
                                 }
                             }
                             .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: true))
-                            .disabled(isWorking || (transactionID != nil && vault.status != .pendingWithdrawal))
+                            .disabled(isWorking
+                                || selectedStageOutput == nil
+                                || (spendableStageOutputs.count > 1 && selectedStageOutpoint.isEmpty)
+                                || (transactionID != nil && vault.status != .pendingWithdrawal))
                         }
                     }
                     .listRowInsets(EdgeInsets())
@@ -3763,6 +3841,7 @@ private struct TestnetProtectedVaultSpendView: View {
                     isRestoringPreparedReview = shouldRestorePreparedReview
                     await refreshPendingDAAScore(for: vault)
                 }
+                await refreshStageOutputs(for: vault, path: path)
             }
             if let estimate = try? await engine.getFeeEstimate(nodeConfiguration: preferences.nodeConfiguration) {
                 feeSompi = min(10_000_000, max(500_000, estimate.suggestedFee))
@@ -3772,10 +3851,19 @@ private struct TestnetProtectedVaultSpendView: View {
                 isRestoringPreparedReview = false
             }
         }
+        .onChange(of: path) { _, newPath in
+            guard let vault else { return }
+            Task { await refreshStageOutputs(for: vault, path: newPath) }
+        }
     }
 
     private func formatTKAS(_ sompi: UInt64) -> String {
         "\((Decimal(sompi) / 100_000_000).formatted()) TKAS"
+    }
+
+    private func shortOutpoint(_ outpoint: String) -> String {
+        guard outpoint.count > 20 else { return outpoint }
+        return "\(outpoint.prefix(10))…\(outpoint.suffix(8))"
     }
 
     private func prepareButtonTitle(for path: SpendPath) -> String {
@@ -3834,6 +3922,32 @@ private struct TestnetProtectedVaultSpendView: View {
     }
 
     @MainActor
+    private func refreshStageOutputs(for vault: ProtectedVault, path: SpendPath) async {
+        guard preferences.network == .testnet10 else { return }
+        let pending = vault.pendingWithdrawals.first { $0.completedAt == nil }
+        let sourceAddress = (path == .mature || path == .cancel)
+            ? pending?.pendingAddress
+            : vault.vaultAddress
+        guard let sourceAddress else { return }
+        do {
+            let sync = try await engine.syncAddress(
+                sourceAddress,
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+            let outputs = ProtectedVaultStageOutput.classify(sync.utxos)
+            stageOutputs = outputs
+            let candidates = outputs.filter { $0.canCoverFee(feeSompi) }
+            if candidates.count == 1 {
+                selectedStageOutpoint = candidates[0].id
+            } else if !candidates.contains(where: { $0.id == selectedStageOutpoint }) {
+                selectedStageOutpoint = ""
+            }
+        } catch {
+            // The explicit prepare action retries the lookup before building.
+        }
+    }
+
+    @MainActor
     private func refreshPendingDAAScore(for vault: ProtectedVault) async {
         guard preferences.network == .testnet10,
               vault.status == .pendingWithdrawal,
@@ -3843,9 +3957,11 @@ private struct TestnetProtectedVaultSpendView: View {
                 pending.pendingAddress,
                 nodeConfiguration: preferences.nodeConfiguration
             )
-            guard result.utxos.count == 1,
-                  let utxo = result.utxos.first,
-                  utxo.covenantID?.count == 64 else { return }
+            guard let utxo = ProtectedVaultStageOutput.classify(result.utxos)
+                .filter({ $0.isCovenantTagged })
+                .map(\.utxo)
+                .sorted(by: { $0.id < $1.id })
+                .first else { return }
             protectedVaultStore.recordPendingWithdrawal(
                 id: vault.id,
                 destination: pending.destinationAddress,
@@ -3860,7 +3976,8 @@ private struct TestnetProtectedVaultSpendView: View {
     }
 
     private func estimatedAmountText(for vault: ProtectedVault) -> String {
-        let balanceSompi = vault.lockedSompi
+        let balanceSompi = selectedStageOutput?.utxo.amount
+            ?? vault.lockedSompi
             ?? NSDecimalNumber(decimal: vault.amount * Decimal(100_000_000)).uint64Value
         return formatTKAS(balanceSompi > feeSompi ? balanceSompi - feeSompi : 0)
     }
@@ -3893,9 +4010,17 @@ private struct TestnetProtectedVaultSpendView: View {
             let sourceAddress = isPending ? pending?.pendingAddress : vault.vaultAddress
             guard let sourceAddress else { throw KasSignerEngine.EngineError.invalidResponse }
             let sync = try await engine.syncAddress(sourceAddress, nodeConfiguration: preferences.nodeConfiguration)
-            guard sync.utxos.count == 1, let utxo = sync.utxos.first,
-                  utxo.covenantID?.count == 64, utxo.amount > feeSompi else {
-                throw KasSignerEngine.EngineError.javascript("Expected one funded, covenant-tagged output at the selected vault stage.")
+            let outputs = ProtectedVaultStageOutput.classify(sync.utxos)
+            stageOutputs = outputs
+            let candidates = outputs.filter { $0.canCoverFee(feeSompi) }
+            if candidates.count == 1 {
+                selectedStageOutpoint = candidates[0].id
+            }
+            guard let utxo = candidates.first(where: { $0.id == selectedStageOutpoint })?.utxo else {
+                if candidates.isEmpty {
+                    throw KasSignerEngine.EngineError.javascript("No covenant-tagged vault output with enough balance to cover the fee is available at this stage.")
+                }
+                throw KasSignerEngine.EngineError.javascript("Select the covenant-tagged vault output to spend.")
             }
             let pendingDescriptor = path == .beginDelay
                 ? try await engine.deriveProtectedVaultPendingWithRecovery(vault: vault, destination: destination)
@@ -3995,6 +4120,13 @@ private struct TestnetProtectedVaultSpendView: View {
                     "The vault output changed since review. Prepare the withdrawal again."
                 )
             }
+            let isAuthorized = await appLockService.authorizeTransactionBroadcast()
+            guard isAuthorized else {
+                errorMessage = appLockService.authenticationError.map {
+                    "Authentication failed: \($0)"
+                } ?? "Authentication is required to broadcast this transaction."
+                return
+            }
             if preparedSpend.path == .beginDelay,
                let pendingDescriptor = preparedSpend.pendingDescriptor {
                 protectedVaultStore.rememberPendingDestination(
@@ -4060,8 +4192,18 @@ private struct ProtectedVaultSendView: View {
     @State private var signingReview: VerifiedTransactionReview?
     @State private var showingSigning = false
     @State private var selectedApprovedAddress: String
+    @State private var stageOutputs: [ProtectedVaultStageOutput] = []
+    @State private var selectedStageOutpoint = ""
 
     private let feeSompi: UInt64 = 1_000_000
+
+    private var spendableStageOutputs: [ProtectedVaultStageOutput] {
+        stageOutputs.filter { $0.canCoverFee(feeSompi) }
+    }
+
+    private var unsupportedStageOutputs: [ProtectedVaultStageOutput] {
+        stageOutputs.filter { !$0.isCovenantTagged }
+    }
 
     init(vault: ProtectedVault) {
         self.vault = vault
@@ -4086,9 +4228,38 @@ private struct ProtectedVaultSendView: View {
                 }
                 .pickerStyle(.navigationLink)
                 LabeledContent("Network Fee", value: formatKas(feeSompi))
+                if spendableStageOutputs.count > 1 {
+                    Picker("Covenant Output", selection: $selectedStageOutpoint) {
+                        Text("Select an output").tag("")
+                        ForEach(spendableStageOutputs) { output in
+                            Text("\(formatKas(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))")
+                                .tag(output.id)
+                        }
+                    }
+                    .pickerStyle(.navigationLink)
+                } else if let output = spendableStageOutputs.first {
+                    LabeledContent("Covenant Output", value: "\(formatKas(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))")
+                } else {
+                    Text("No covenant-tagged vault output is currently available.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 Text("This sends the vault's entire balance, minus the fee, to the selected approved address.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+            if !unsupportedStageOutputs.isEmpty {
+                Section("Unsupported Deposits") {
+                    Text("These deposits are not covenant-tagged and cannot be spent through this vault flow. They are excluded from the output choices above.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    ForEach(unsupportedStageOutputs) { output in
+                        LabeledContent(
+                            "\(formatKas(output.utxo.amount)) · \(shortOutpoint(output.utxo.id))",
+                            value: "Unsupported"
+                        )
+                    }
+                }
             }
             Section {
                 Button {
@@ -4102,7 +4273,10 @@ private struct ProtectedVaultSendView: View {
                 }
                 .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: true))
                 .controlSize(.large)
-                .disabled(isBuilding || !vault.approvedAddresses.contains(selectedApprovedAddress))
+                .disabled(isBuilding
+                    || !vault.approvedAddresses.contains(selectedApprovedAddress)
+                    || spendableStageOutputs.isEmpty
+                    || (spendableStageOutputs.count > 1 && selectedStageOutpoint.isEmpty))
             }
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
@@ -4114,6 +4288,7 @@ private struct ProtectedVaultSendView: View {
         }
         .navigationTitle("Spend from Vault")
         .navigationBarTitleDisplayMode(.inline)
+        .task { await refreshStageOutputs() }
         .navigationDestination(isPresented: $showingSigning) {
             if let signingReview {
                 VerifiedSigningPreparationView(
@@ -4133,6 +4308,26 @@ private struct ProtectedVaultSendView: View {
     }
 
     @MainActor
+    private func refreshStageOutputs() async {
+        guard let address = vault.vaultAddress else { return }
+        do {
+            let sync = try await engine.syncAddress(
+                address,
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+            stageOutputs = ProtectedVaultStageOutput.classify(sync.utxos)
+            let candidates = stageOutputs.filter { $0.canCoverFee(feeSompi) }
+            if candidates.count == 1 {
+                selectedStageOutpoint = candidates[0].id
+            } else if !candidates.contains(where: { $0.id == selectedStageOutpoint }) {
+                selectedStageOutpoint = ""
+            }
+        } catch {
+            // The send action will retry the on-chain lookup.
+        }
+    }
+
+    @MainActor
     private func buildApprovedSpend() async {
         guard !isBuilding, let redeem = vault.redeemScriptHex,
               vault.approvedAddresses.contains(selectedApprovedAddress) else { return }
@@ -4146,15 +4341,18 @@ private struct ProtectedVaultSendView: View {
             let sync = try await engine.syncAddress(
                 address, nodeConfiguration: preferences.nodeConfiguration
             )
-            guard sync.utxos.count == 1, let utxo = sync.utxos.first,
-                  let covenantID = utxo.covenantID,
-                  covenantID.count == 64 else {
-                throw KasSignerEngine.EngineError.javascript(
-                    "Approved V1 spending requires exactly one covenant-tagged vault output."
-                )
+            stageOutputs = ProtectedVaultStageOutput.classify(sync.utxos)
+            let candidates = stageOutputs.filter { $0.canCoverFee(feeSompi) }
+            if candidates.count == 1 {
+                selectedStageOutpoint = candidates[0].id
             }
-            guard utxo.amount > feeSompi else {
-                throw KasSignerEngine.EngineError.javascript("Vault balance does not cover the network fee.")
+            guard let utxo = candidates.first(where: { $0.id == selectedStageOutpoint })?.utxo,
+                  let covenantID = utxo.covenantID else {
+                throw KasSignerEngine.EngineError.javascript(
+                    candidates.isEmpty
+                        ? "No covenant-tagged vault output with enough balance to cover the fee is available."
+                        : "Select the covenant-tagged vault output to spend."
+                )
             }
             let pskb = try await engine.buildProtectedVaultApprovedSpendPSKB(
                 utxo: utxo,
@@ -4204,6 +4402,11 @@ private struct ProtectedVaultSendView: View {
 
     private func formatKas(_ sompi: UInt64) -> String {
         "\((Decimal(sompi) / Decimal(100_000_000)).formatted()) \(preferences.network.currencySymbol)"
+    }
+
+    private func shortOutpoint(_ outpoint: String) -> String {
+        guard outpoint.count > 20 else { return outpoint }
+        return "\(outpoint.prefix(10))…\(outpoint.suffix(8))"
     }
 }
 

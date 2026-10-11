@@ -2401,6 +2401,13 @@ private struct VerifiedTransactionReviewView: View {
             try SignedProtectedVaultFundingVerifier.verify(unsigned: unsigned, signed: signedSummary)
             try await engine.verifyStandardPSKBSignatures(signed)
             _ = try await engine.finalizeSignedPSKB(signed)
+            let isAuthorized = await appLockService.authorizeTransactionBroadcast()
+            guard isAuthorized else {
+                testnetErrorMessage = appLockService.authenticationError.map {
+                    "Authentication failed: \($0)"
+                } ?? "Authentication is required to broadcast this transaction."
+                return
+            }
             let txid = try await engine.broadcastSignedPSKB(signed,
                 nodeConfiguration: preferences.nodeConfiguration)
             testnetTransactionID = txid
@@ -3057,17 +3064,15 @@ struct VerifiedSigningPreparationView: View {
         }
 
         scanErrorMessage = nil
-        if preferences.network != .testnet10 {
-            isAuthorizingBroadcast = true
-            let isAuthorized = await appLockService.authorizeTransactionBroadcast()
-            isAuthorizingBroadcast = false
+        isAuthorizingBroadcast = true
+        let isAuthorized = await appLockService.authorizeTransactionBroadcast()
+        isAuthorizingBroadcast = false
 
-            guard isAuthorized else {
-                if let authenticationError = appLockService.authenticationError {
-                    scanErrorMessage = "Authentication failed: \(authenticationError)"
-                }
-                return
+        guard isAuthorized else {
+            if let authenticationError = appLockService.authenticationError {
+                scanErrorMessage = "Authentication failed: \(authenticationError)"
             }
+            return
         }
 
         guard let snapshot = syncService.snapshot else {
