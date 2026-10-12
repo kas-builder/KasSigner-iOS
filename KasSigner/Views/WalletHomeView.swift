@@ -3008,6 +3008,7 @@ private struct ProtectedVaultDetailView: View {
     @State private var renameText = ""
     @State private var showingSend = false
     @State private var isRefreshing = false
+    @State private var showingRefreshDetails = false
     @State private var currentVaultOutputs: [WalletUTXO] = []
 
     var body: some View {
@@ -3044,48 +3045,57 @@ private struct ProtectedVaultDetailView: View {
                     "Created",
                     value: (vault.fundedAt ?? vault.createdAt).formatted(date: .abbreviated, time: .shortened)
                 )
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 7) {
+                DisclosureGroup("On-Chain Data", isExpanded: $showingRefreshDetails) {
+                    VStack(alignment: .leading, spacing: 6) {
                         if refreshState.isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Refreshing on-chain data…")
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Refreshing on-chain data…")
+                            }
                                 .foregroundStyle(.secondary)
-                        } else if refreshState.isStale {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text(refreshState.lastSuccessfulInfo == nil
-                                 ? "On-chain state not verified"
-                                 : "Showing last verified data")
-                                .foregroundStyle(.orange)
-                        } else if refreshState.lastSuccessfulInfo != nil {
-                            Image(systemName: "checkmark.circle.fill")
+                        } else if !refreshState.isStale,
+                                  refreshState.lastSuccessfulInfo != nil {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text("On-chain data verified")
+                            }
                                 .foregroundStyle(.green)
-                            Text("On-chain data verified")
+                        } else if !refreshState.isStale {
+                            HStack(spacing: 6) {
+                                Image(systemName: "questionmark.circle")
+                                Text("On-chain state not checked yet")
+                            }
                                 .foregroundStyle(.secondary)
-                        } else {
-                            Image(systemName: "questionmark.circle")
-                                .foregroundStyle(.secondary)
-                            Text("On-chain state not checked yet")
+                        }
+                        if let info = refreshState.lastSuccessfulInfo {
+                            Text("Last verified: \(info.network) · \(info.nodeLabel) · \(info.checkedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    if let info = refreshState.lastSuccessfulInfo {
-                        Text("Last verified: \(info.network) · \(info.nodeLabel) · \(info.checkedAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    if let errorMessage = refreshState.errorMessage {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                    .font(.subheadline)
+                }
+                if refreshState.isStale {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(
+                            refreshState.lastSuccessfulInfo == nil
+                                ? "On-chain state not verified"
+                                : "Showing last verified data",
+                            systemImage: "exclamationmark.triangle.fill"
+                        )
+                        .foregroundStyle(.orange)
+                        if let errorMessage = refreshState.errorMessage {
+                            Text(errorMessage)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                         Button("Retry") {
                             Task { await refreshVault() }
                         }
                         .disabled(isRefreshing)
                     }
+                    .font(.subheadline)
                 }
-                .font(.subheadline)
             }
 
             if let transactionID = vault.fundingTransactionID {
