@@ -66,6 +66,19 @@ final class ProtectedWalletStorage {
         try? fileManager.removeItem(at: fileURL(fileName))
     }
 
+    @discardableResult
+    func removeAndVerify(fileName: String) -> Bool {
+        let url = fileURL(fileName)
+        do {
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+            return !fileManager.fileExists(atPath: url.path)
+        } catch {
+            return false
+        }
+    }
+
     func contains(fileName: String) -> Bool {
         fileManager.fileExists(atPath: fileURL(fileName).path)
     }
@@ -102,6 +115,18 @@ private struct WalletPersistentState: Codable {
     var changeIndices: [String: Int] = [:]
     var usedChangeAddresses: [String: [String]] = [:]
     var usedReceiveAddresses: [String: [String]] = [:]
+}
+
+private struct WalletDeletionIntent: Codable, Equatable {
+    let profileID: UUID
+    let network: String
+}
+
+enum WalletDeletionResult: Equatable {
+    case deleted
+    case profilePersistenceFailed
+    case seedCleanupPending
+    case journalPersistenceFailed
 }
 
 enum WalletTransactionDirection: String, Codable, Equatable {
@@ -612,6 +637,8 @@ final class WalletStore: ObservableObject {
     }
 
     @Published private(set) var pendingImportedProfile: WalletProfile?
+    @Published private(set) var accountDeletionRecoveryMessage: String?
+    @Published private(set) var pendingAccountDeletionIDs: Set<UUID> = []
     private var selectionBeforePendingImport: UUID?
 
     private let storageKey = "kassigner.walletProfiles.v1"
@@ -625,20 +652,31 @@ final class WalletStore: ObservableObject {
     private let protectedStorage: ProtectedWalletStorage
     private let defaults: UserDefaults
     private let transactionCache: WalletTransactionCache
+    private let removeTestnetSeed: (UUID) throws -> Void
     private var persistentState = WalletPersistentState()
     private var isLoading = true
 
     init(
         protectedStorage: ProtectedWalletStorage = .shared,
         defaults: UserDefaults = .standard,
-        transactionCacheDirectoryURL: URL? = nil
+        transactionCacheDirectoryURL: URL? = nil,
+        removeTestnetSeed: @escaping (UUID) throws -> Void = { profileID in
+            try TestnetSeedStore.remove(for: profileID)
+            try TestnetSeedStore.verifyAbsent(for: profileID)
+        }
     ) {
         self.protectedStorage = protectedStorage
         self.defaults = defaults
         transactionCache = WalletTransactionCache(
             directoryURL: transactionCacheDirectoryURL
         )
+        self.removeTestnetSeed = removeTestnetSeed
         load()
+        do {
+            pendingAccountDeletionIDs = Set(try loadDeletionIntents().map(\.profileID))
+        } catch {
+            accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+        }
         isLoading = false
     }
 
@@ -652,7 +690,10 @@ final class WalletStore: ObservableObject {
     }
 
     var activeProfiles: [WalletProfile] {
-        profiles.filter { $0.network == activeNetwork.rawValue }
+        profiles.filter {
+            $0.network == activeNetwork.rawValue
+                && !pendingAccountDeletionIDs.contains($0.id)
+        }
     }
 
     func activateNetwork(_ network: KaspaNetwork) {
@@ -1131,6 +1172,153 @@ final class WalletStore: ObservableObject {
         transactions.removeAll { removedProfileIDs.contains($0.profileID) }
         pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
         return true
+    }
+
+    @discardableResult
+    func deleteAccount(
+        profileID: UUID,
+        cleanup: (UUID) -> Void = { _ in }
+    ) -> WalletDeletionResult {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else {
+            return .deleted
+        }
+        var intents: [WalletDeletionIntent]
+        do {
+            intents = try loadDeletionIntents()
+        } catch {
+            accountDeletionRecoveryMessage = "Account deletion could not start because its recovery record could not be read. No account data was changed."
+            return .journalPersistenceFailed
+        }
+        if let existingIntent = intents.first(where: { $0.profileID == profileID }) {
+            guard existingIntent.network == profile.network else {
+                accountDeletionRecoveryMessage = "The account deletion record does not match this account. No further account data was changed."
+                return .journalPersistenceFailed
+            }
+            return finishAccountDeletion(
+                existingIntent,
+                intents: intents,
+                cleanup: cleanup
+            )
+        }
+
+        let previousIntents = intents
+        let intent = WalletDeletionIntent(profileID: profileID, network: profile.network)
+        intents.append(intent)
+        guard saveDeletionIntents(intents) else {
+            // Preserve earlier pending deletions. A failed read-after-write
+            // can still leave the new intent on disk, so restore the prior
+            // journal and verify that restoration before changing the account.
+            if !saveDeletionIntents(previousIntents) {
+                if let persistedIntents = try? loadDeletionIntents() {
+                    pendingAccountDeletionIDs = Set(persistedIntents.map(\.profileID))
+                }
+                accountDeletionRecoveryMessage = "The deletion record could not be verified or cleared. Account deletion may resume when the app is reopened."
+            } else {
+                accountDeletionRecoveryMessage = "The deletion record could not be saved. The account and its recovery words were left unchanged."
+            }
+            return .journalPersistenceFailed
+        }
+        return finishAccountDeletion(intent, intents: intents, cleanup: cleanup)
+    }
+
+    @discardableResult
+    func resumePendingAccountDeletions(
+        cleanup: (UUID) -> Void = { _ in }
+    ) -> Bool {
+        let intents: [WalletDeletionIntent]
+        do {
+            intents = try loadDeletionIntents()
+        } catch {
+            accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+            return false
+        }
+        guard !intents.isEmpty else {
+            pendingAccountDeletionIDs = []
+            accountDeletionRecoveryMessage = nil
+            return true
+        }
+        for intent in intents {
+            let currentIntents: [WalletDeletionIntent]
+            do {
+                currentIntents = try loadDeletionIntents()
+            } catch {
+                accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+                return false
+            }
+            guard finishAccountDeletion(intent, intents: currentIntents, cleanup: cleanup) == .deleted else {
+                return false
+            }
+        }
+        accountDeletionRecoveryMessage = nil
+        return true
+    }
+
+    private static let deletionJournalFileName = "wallet-deletion-intents.json"
+
+    private func loadDeletionIntents() throws -> [WalletDeletionIntent] {
+        let intents = try protectedStorage.loadIfPresent(
+            [WalletDeletionIntent].self,
+            fileName: Self.deletionJournalFileName
+        ) ?? []
+        guard Set(intents.map(\.profileID)).count == intents.count,
+              intents.allSatisfy({
+                  $0.network == KaspaNetwork.mainnet.rawValue
+                      || $0.network == KaspaNetwork.testnet10.rawValue
+              }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return intents
+    }
+
+    private func saveDeletionIntents(_ intents: [WalletDeletionIntent]) -> Bool {
+        let didSave: Bool
+        if intents.isEmpty {
+            didSave = protectedStorage.removeAndVerify(fileName: Self.deletionJournalFileName)
+        } else {
+            didSave = protectedStorage.save(intents, fileName: Self.deletionJournalFileName)
+        }
+        if didSave {
+            pendingAccountDeletionIDs = Set(intents.map(\.profileID))
+        }
+        return didSave
+    }
+
+    private func finishAccountDeletion(
+        _ intent: WalletDeletionIntent,
+        intents: [WalletDeletionIntent],
+        cleanup: (UUID) -> Void
+    ) -> WalletDeletionResult {
+        if let profile = profiles.first(where: { $0.id == intent.profileID }),
+           profile.network != intent.network {
+            accountDeletionRecoveryMessage = "The account deletion record does not match this account. No further account data was changed."
+            return .journalPersistenceFailed
+        }
+        // Remove and verify the signer secret before committing profile
+        // deletion. The durable intent lets a relaunch finish the profile
+        // removal if the app stops between these steps.
+        if intent.network == KaspaNetwork.testnet10.rawValue {
+            do {
+                try removeTestnetSeed(intent.profileID)
+            } catch {
+                accountDeletionRecoveryMessage = "The account is hidden from active wallets because its Testnet recovery words could not yet be removed from Keychain. Deletion will retry when the app is reopened."
+                return .seedCleanupPending
+            }
+        }
+
+        if let index = profiles.firstIndex(where: { $0.id == intent.profileID }),
+           !remove(at: IndexSet(integer: index)) {
+            accountDeletionRecoveryMessage = "The Testnet recovery words were removed, but the account profile could not yet be saved as deleted. It is hidden from active wallets while deletion retries."
+            return .profilePersistenceFailed
+        }
+
+        cleanup(intent.profileID)
+        let remaining = intents.filter { $0.profileID != intent.profileID }
+        guard saveDeletionIntents(remaining) else {
+            accountDeletionRecoveryMessage = "Account data was removed, but its deletion record could not be cleared. Cleanup will be verified again when the app is reopened."
+            return .journalPersistenceFailed
+        }
+        accountDeletionRecoveryMessage = nil
+        return .deleted
     }
 
     private func load() {

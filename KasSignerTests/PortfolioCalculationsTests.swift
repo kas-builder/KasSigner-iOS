@@ -2367,6 +2367,91 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
+    func testAccountDeletionJournalContainsNoSeedAndResumesKeychainCleanup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        var failSeedRemoval = true
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            removeTestnetSeed: { _ in
+                if failSeedRemoval {
+                    failSeedRemoval = false
+                    throw NSError(domain: "TestSeedRemoval", code: 1)
+                }
+            }
+        )
+        let profile = WalletProfile(
+            name: "Deletion journal test",
+            kpub: "kpub-deletion-journal-test",
+            network: KaspaNetwork.testnet10.rawValue
+        )
+        XCTAssertTrue(store.add(profile))
+
+        XCTAssertEqual(store.deleteAccount(profileID: profile.id), .seedCleanupPending)
+        XCTAssertTrue(store.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertTrue(storage.contains(fileName: "wallet-deletion-intents.json"))
+        let journalData = try Data(
+            contentsOf: root.appending(path: "wallet-deletion-intents.json")
+        )
+        let journalJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: journalData) as? [[String: Any]]
+        )
+        let journalKeys = Set(try XCTUnwrap(journalJSON.first).keys)
+        XCTAssertEqual(journalKeys, Set(["profileID", "network"]))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            removeTestnetSeed: { _ in }
+        )
+        XCTAssertTrue(relaunchedStore.resumePendingAccountDeletions())
+        XCTAssertFalse(storage.contains(fileName: "wallet-deletion-intents.json"))
+        XCTAssertFalse(relaunchedStore.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertNil(relaunchedStore.accountDeletionRecoveryMessage)
+    }
+
+    @MainActor
+    func testAccountDeletionRemovesSeedBeforeRetryingFailedProfileWrite() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var seedRemovalCount = 0
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            removeTestnetSeed: { _ in seedRemovalCount += 1 }
+        )
+        let profile = WalletProfile(
+            name: "Failed deletion test",
+            kpub: "kpub-failed-deletion-test",
+            network: KaspaNetwork.testnet10.rawValue
+        )
+        XCTAssertTrue(store.add(profile))
+
+        let stateURL = root.appending(path: "wallet-state.json")
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
+
+        XCTAssertEqual(store.deleteAccount(profileID: profile.id), .profilePersistenceFailed)
+        XCTAssertTrue(store.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertEqual(seedRemovalCount, 1)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appending(path: "wallet-deletion-intents.json").path
+        ))
+    }
+
+    @MainActor
     func testSendSessionsAreFreshMemoryOnlyAndRejectStaleUpdates() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: UUID().uuidString, directoryHint: .isDirectory)

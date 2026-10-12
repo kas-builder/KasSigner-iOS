@@ -40,6 +40,13 @@ struct SettingsView: View {
 
     private var settingsList: some View {
         List {
+                if let recoveryMessage = walletStore.accountDeletionRecoveryMessage {
+                    Section("Account cleanup") {
+                        Label(recoveryMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
                 if !walletStore.activeProfiles.isEmpty {
                     Section("Accounts") {
                         ForEach(walletStore.activeProfiles) { profile in
@@ -292,7 +299,7 @@ struct SettingsView: View {
                     revealedTestnetWords = nil
                 }
             }
-            .alert("Recovery Words Unavailable", isPresented: Binding(
+            .alert("Account Status", isPresented: Binding(
                 get: { seedRevealError != nil },
                 set: { if !$0 { seedRevealError = nil } }
             )) {
@@ -506,7 +513,7 @@ struct SettingsView: View {
     }
 
     private func deleteProfile(_ profile: WalletProfile) {
-        guard let index = walletStore.profiles.firstIndex(where: { $0.id == profile.id }) else {
+        guard walletStore.profiles.contains(where: { $0.id == profile.id }) else {
             return
         }
 
@@ -517,38 +524,27 @@ struct SettingsView: View {
         }
 
         let wasSelected = walletStore.selectedProfile?.id == profile.id
-        var savedMnemonic: String?
-        if profile.network == KaspaNetwork.testnet10.rawValue {
-            do {
-                savedMnemonic = try TestnetSeedStore.load(for: profile.id)
-                try TestnetSeedStore.remove(for: profile.id)
-            } catch {
-                seedRevealError = "Could not remove this Testnet account's recovery words: \(error.localizedDescription)"
-                profilePendingDeletion = nil
-                return
-            }
+        let result = walletStore.deleteAccount(profileID: profile.id) { removedProfileID in
+            WalletSnapshotCache.shared.remove(profileID: removedProfileID)
+            coinControlStore.removeData(profileID: removedProfileID)
         }
 
-        guard walletStore.remove(at: IndexSet(integer: index)) else {
-            if let savedMnemonic {
-                do {
-                    try TestnetSeedStore.save(savedMnemonic, for: profile.id)
-                    seedRevealError = "The account could not be removed from protected storage. Its Testnet recovery words were restored."
-                } catch {
-                    seedRevealError = "Account deletion failed, and the Testnet recovery words could not be restored to Keychain. Restore them from your backup before signing."
-                }
-            } else {
-                seedRevealError = "The account could not be removed from protected storage. Check device storage and try again."
-            }
-            profilePendingDeletion = nil
-            return
-        }
-
-        WalletSnapshotCache.shared.remove(profileID: profile.id)
-        coinControlStore.removeData(profileID: profile.id)
-
-        if wasSelected {
+        if wasSelected && !walletStore.profiles.contains(where: { $0.id == profile.id }) {
             syncService.reset()
+        }
+
+        switch result {
+        case .deleted:
+            break
+        case .profilePersistenceFailed:
+            seedRevealError = profile.network == KaspaNetwork.testnet10.rawValue
+                ? "The Testnet recovery words were removed, but the account profile could not yet be saved as deleted. The account is hidden from active wallets while deletion retries."
+                : "The account could not yet be saved as deleted. It is hidden from active wallets while deletion retries."
+        case .seedCleanupPending:
+            seedRevealError = "The account is hidden from active wallets because its Testnet recovery words could not yet be removed from Keychain. Deletion will retry when the app is reopened."
+        case .journalPersistenceFailed:
+            seedRevealError = walletStore.accountDeletionRecoveryMessage
+                ?? "Account deletion could not be fully verified. Check the account list before trying again."
         }
 
         profilePendingDeletion = nil
