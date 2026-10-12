@@ -125,6 +125,42 @@ pub(crate) fn network_to_prefix(network: &str) -> &'static str {
     }
 }
 
+fn require_testnet10_vault_network(network: &str) -> Result<&'static str, &'static str> {
+    if network == "testnet-10" {
+        Ok("kaspatest")
+    } else {
+        Err("Protected Vault is limited to Testnet 10")
+    }
+}
+
+fn require_testnet10_vault_address(address: &str) -> Result<(), &'static str> {
+    if address.starts_with("kaspatest:") {
+        Ok(())
+    } else {
+        Err("Protected Vault addresses must be on Testnet 10")
+    }
+}
+
+#[cfg(test)]
+mod protected_vault_network_tests {
+    use super::*;
+
+    #[test]
+    fn vault_network_rejects_mainnet_and_other_networks() {
+        assert_eq!(require_testnet10_vault_network("testnet-10"), Ok("kaspatest"));
+        assert!(require_testnet10_vault_network("mainnet").is_err());
+        assert!(require_testnet10_vault_network("testnet-11").is_err());
+        assert!(require_testnet10_vault_network("").is_err());
+    }
+
+    #[test]
+    fn vault_addresses_reject_mainnet_prefix() {
+        assert!(require_testnet10_vault_address("kaspatest:example").is_ok());
+        assert!(require_testnet10_vault_address("kaspa:example").is_err());
+        assert!(require_testnet10_vault_address("kaspasim:example").is_err());
+    }
+}
+
 pub(crate) fn hex_to_pubkey32(hex_str: &str) -> Result<[u8; 32], JsValue> {
     let bytes = hex::decode(hex_str).map_err(|e| JsValue::from_str(&format!("Bad hex: {}", e)))?;
     if bytes.len() != 32 {
@@ -561,6 +597,14 @@ pub async fn create_protected_vault_funding_pskb_with_utxos(
 ) -> Result<String, JsValue> {
     let wallet: bip32::WalletData = serde_json::from_str(wallet_json)
         .map_err(|e| JsValue::from_str(&format!("Bad wallet: {}", e)))?;
+    require_testnet10_vault_address(vault_address).map_err(JsValue::from_str)?;
+    for address in wallet
+        .receive_addresses
+        .iter()
+        .chain(wallet.change_addresses.iter())
+    {
+        require_testnet10_vault_address(address).map_err(JsValue::from_str)?;
+    }
     let selected: Vec<rpc::UtxoEntry> = serde_json::from_str::<Vec<serde_json::Value>>(utxos_json)
         .map_err(|e| JsValue::from_str(&format!("Bad UTXOs JSON: {}", e)))?
         .iter()
@@ -675,6 +719,7 @@ pub fn create_protected_vault_approved_spend_pskb(
     approved_address: &str,
     fee_sompi: u64,
 ) -> Result<String, JsValue> {
+    require_testnet10_vault_address(approved_address).map_err(JsValue::from_str)?;
     let utxo: rpc::UtxoEntry = serde_json::from_str(utxo_json)
         .map_err(|e| JsValue::from_str(&format!("Bad vault UTXO: {}", e)))?;
     let covenant_id_hex = utxo
@@ -1211,9 +1256,9 @@ pub fn encode_p2sh_address(
     Ok(address::encode_p2sh_address(&arr, prefix))
 }
 
-/// Derive the deterministic Protected Vault V1 descriptor for an M5-signable
-/// receive key at account path /0/index. This is derivation only: no transaction
-/// is created, signed, or broadcast.
+/// Retain the legacy V1 export for API compatibility. It has no network argument
+/// and previously derived Mainnet vaults, so it is disabled until Mainnet vault
+/// support is implemented.
 #[wasm_bindgen]
 pub fn derive_protected_vault_v1(
     kpub_str: &str,
@@ -1221,51 +1266,16 @@ pub fn derive_protected_vault_v1(
     approved_address: &str,
     delay_daa: u64,
 ) -> Result<String, JsValue> {
-    let account = bip32::ExtPubKey::from_kpub(kpub_str).map_err(|e| JsValue::from_str(&e))?;
-    let owner = account
-        .derive_child(0)
-        .and_then(|chain| chain.derive_child(receive_index))
-        .map_err(|e| JsValue::from_str(&e))?;
-    let owner_pubkey = owner.x_only_bytes();
-
-    let (version, approved_payload) =
-        address::decode_address(approved_address).map_err(|e| JsValue::from_str(&e))?;
-    if version != 0 {
-        return Err(JsValue::from_str(
-            "Protected Vault V1 supports only a P2PK approved destination",
-        ));
-    }
-
-    let mut approved_spk = vec![0x00, 0x00, 0x20];
-    approved_spk.extend_from_slice(&approved_payload);
-    approved_spk.push(0xac);
-
-    let redeem_script = kspt::build_protected_vault_script(
-        &owner_pubkey,
-        &approved_spk,
-        delay_daa,
-        kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI,
-    )
-    .map_err(|e| JsValue::from_str(&e))?;
-    let vault_spk = kspt::protected_vault_p2sh_spk(&redeem_script);
-    let mut script_hash = [0u8; 32];
-    script_hash.copy_from_slice(&vault_spk[4..36]);
-    let vault_address = address::encode_p2sh_address(&script_hash, "kaspa");
-
-    serde_json::to_string(&serde_json::json!({
-        "owner_derivation_index": receive_index,
-        "owner_derivation_path": format!("/0/{}", receive_index),
-        "owner_public_key": hex::encode(owner_pubkey),
-        "redeem_script_hex": hex::encode(&redeem_script),
-        "script_hash_hex": hex::encode(script_hash),
-        "vault_address": vault_address,
-        "delay_daa": delay_daa,
-    }))
-    .map_err(|e| JsValue::from_str(&e.to_string()))
+    // This legacy export has no network argument and previously produced a
+    // Mainnet address. Retain the export for compatibility, but reject it.
+    let _ = (kpub_str, receive_index, approved_address, delay_daa);
+    Err(JsValue::from_str(
+        "Legacy Protected Vault V1 derivation is unavailable",
+    ))
 }
 
-/// Derive a vault whose immediate path accepts any one of the committed
-/// mainnet P2PK destinations. The address list is fixed in the redeem script.
+/// Derive a Testnet-10 vault whose immediate path accepts any one of the
+/// committed P2PK destinations. The list is fixed in the redeem script.
 #[wasm_bindgen]
 pub fn derive_protected_vault_with_destinations(
     kpub_str: &str,
@@ -1274,11 +1284,7 @@ pub fn derive_protected_vault_with_destinations(
     delay_daa: u64,
     network: &str,
 ) -> Result<String, JsValue> {
-    let prefix = match network {
-        "mainnet" => "kaspa",
-        "testnet-10" => "kaspatest",
-        _ => return Err(JsValue::from_str("Unsupported Protected Vault network")),
-    };
+    let prefix = require_testnet10_vault_network(network).map_err(JsValue::from_str)?;
     let approved_addresses: Vec<String> = serde_json::from_str(approved_addresses_json)
         .map_err(|e| JsValue::from_str(&format!("Bad approved address list: {e}")))?;
     let mut approved_spks = Vec::with_capacity(approved_addresses.len());
@@ -1343,11 +1349,7 @@ pub fn derive_protected_vault_with_recovery(
     emergency_anytime: bool,
     network: &str,
 ) -> Result<String, JsValue> {
-    let prefix = match network {
-        "mainnet" => "kaspa",
-        "testnet-10" => "kaspatest",
-        _ => return Err(JsValue::from_str("Unsupported Protected Vault network")),
-    };
+    let prefix = require_testnet10_vault_network(network).map_err(JsValue::from_str)?;
     let addresses: Vec<String> = serde_json::from_str(approved_addresses_json)
         .map_err(|e| JsValue::from_str(&format!("Bad approved address list: {e}")))?;
     if addresses.is_empty() || addresses.len() > 5 {
