@@ -1121,7 +1121,8 @@ final class ProtectedVaultStore: ObservableObject {
         _ = commit { vaults[index].name = trimmedName }
     }
 
-    func recordFundingBroadcast(id: UUID, transactionID: String) {
+    @discardableResult
+    func recordFundingBroadcast(id: UUID, transactionID: String) -> Bool {
         update(id: id) { vault in
             replacing(vault, status: .fundingBroadcast,
                 fundingTransactionID: transactionID, fundedAt: vault.fundedAt ?? .now,
@@ -1130,7 +1131,8 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
-    func recordApprovedSpend(id: UUID, transactionID: String) {
+    @discardableResult
+    func recordApprovedSpend(id: UUID, transactionID: String) -> Bool {
         update(id: id) { vault in
             replacing(
                 vault, status: .spent,
@@ -1187,12 +1189,13 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
+    @discardableResult
     func completePendingWithdrawal(
         id: UUID,
         pendingID: UUID,
         transactionID: String,
         outcome: ProtectedVault.PendingWithdrawal.CompletionOutcome
-    ) {
+    ) -> Bool {
         update(id: id) { vault in
             let pending = vault.pendingWithdrawals.map { item in
                 item.id == pendingID

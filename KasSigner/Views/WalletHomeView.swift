@@ -299,9 +299,17 @@ private struct ProtectedVaultDraftExitPrompt: ViewModifier {
 }
 
 struct WalletHomeView: View {
+    private struct VaultBroadcastReceipt: Identifiable {
+        let id = UUID()
+        let vaultID: UUID
+        let transactionID: String
+        let localRecordWarning: String?
+    }
+
     private enum WalletHomeAlert {
         case timeLockedPlaceholder
         case mainnetProgrammableUTXO
+        case vaultRecordWarning(String)
 
         var title: String {
             switch self {
@@ -309,6 +317,8 @@ struct WalletHomeView: View {
                 return "Not Built Yet"
             case .mainnetProgrammableUTXO:
                 return "Not Built on Mainnet"
+            case .vaultRecordWarning:
+                return "Local Record Needs Attention"
             }
         }
 
@@ -318,6 +328,8 @@ struct WalletHomeView: View {
                 return "Time-Locked UTXOs are not built yet."
             case .mainnetProgrammableUTXO:
                 return "Programmable UTXOs and Protected Vaults are not yet available on Mainnet."
+            case .vaultRecordWarning(let warning):
+                return warning
             }
         }
     }
@@ -347,11 +359,13 @@ struct WalletHomeView: View {
         case protectedVaultRules(UUID)
         case protectedVaultSetupDraft(UUID)
         case protectedVaultDetail(UUID)
+        case spendProtectedVault(UUID)
         case fundProtectedVault(UUID)
         case reviewVaultFunding(UUID)
     }
 
     @State private var navigationPath = NavigationPath()
+    @State private var vaultBroadcastReceipt: VaultBroadcastReceipt?
     @State private var showingSendFlow = false
     @State private var protectedVaultFundingSelections: [UUID: [WalletUTXO]] = [:]
     @State private var protectedVaultFundingFeeSelections: [UUID: ProtectedVaultFundingFeeSelection] = [:]
@@ -505,10 +519,18 @@ struct WalletHomeView: View {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
                             Group {
                                 if vault.status == .pendingWithdrawal {
-                                    TestnetProtectedVaultSpendView(vaultID: vaultID)
+                                    TestnetProtectedVaultSpendView(vaultID: vaultID) { transactionID, warning, startedDelay in
+                                        if startedDelay {
+                                            showDelayProgress(vaultID: vaultID, warning: warning)
+                                        } else {
+                                            presentVaultBroadcast(vaultID: vaultID, transactionID: transactionID, warning: warning)
+                                        }
+                                    }
                                 } else {
                                     ProtectedVaultDetailView(vault: vault) {
                                         navigationPath.append(WalletRoute.fundProtectedVault(vaultID))
+                                    } onSpend: {
+                                        navigationPath.append(WalletRoute.spendProtectedVault(vaultID))
                                     }
                                 }
                             }
@@ -517,6 +539,20 @@ struct WalletHomeView: View {
                             }
                         } else {
                             mainnetVaultUnavailableView
+                        }
+                    } else {
+                        ContentUnavailableView("Vault Unavailable", systemImage: "lock.slash")
+                    }
+                case .spendProtectedVault(let vaultID):
+                    if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }),
+                       let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }),
+                       profile.network == KaspaNetwork.testnet10.rawValue {
+                        TestnetProtectedVaultSpendView(vaultID: vaultID) { transactionID, warning, startedDelay in
+                            if startedDelay {
+                                showDelayProgress(vaultID: vaultID, warning: warning)
+                            } else {
+                                presentVaultBroadcast(vaultID: vaultID, transactionID: transactionID, warning: warning)
+                            }
                         }
                     } else {
                         ContentUnavailableView("Vault Unavailable", systemImage: "lock.slash")
@@ -530,7 +566,10 @@ struct WalletHomeView: View {
                                     vault: vault,
                                     profile: profile,
                                     initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
-                                        ?? ProtectedVaultFundingFeeSelection()
+                                        ?? ProtectedVaultFundingFeeSelection(),
+                                    onBroadcast: { transactionID, warning in
+                                        presentVaultBroadcast(vaultID: vaultID, transactionID: transactionID, warning: warning)
+                                    }
                                 )
                             } else {
                                 FundProtectedVaultView(
@@ -538,7 +577,10 @@ struct WalletHomeView: View {
                                     profile: profile,
                                     selectedUTXOs: protectedVaultFundingSelections[vaultID],
                                     initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
-                                        ?? ProtectedVaultFundingFeeSelection()
+                                        ?? ProtectedVaultFundingFeeSelection(),
+                                    onBroadcast: { transactionID, warning in
+                                        presentVaultBroadcast(vaultID: vaultID, transactionID: transactionID, warning: warning)
+                                    }
                                 )
                             }
                         } else {
@@ -573,6 +615,9 @@ struct WalletHomeView: View {
                                     protectedVaultStore.removeSetupDraft(id: builtVault.id)
                                     protectedVaultDraftsAwaitingFunding.removeValue(forKey: builtVault.id)
                                     return true
+                                },
+                                onBroadcast: { transactionID, warning in
+                                    presentVaultBroadcast(vaultID: vaultID, transactionID: transactionID, warning: warning)
                                 }
                             )
                         } else {
@@ -588,6 +633,17 @@ struct WalletHomeView: View {
                 }
             }
         }
+        .fullScreenCover(item: $vaultBroadcastReceipt) { receipt in
+            BroadcastSuccessView(
+                transactionID: receipt.transactionID,
+                localRecordWarning: receipt.localRecordWarning
+            ) {
+                vaultBroadcastReceipt = nil
+                if hasSavedVaultTransaction(receipt.transactionID, vaultID: receipt.vaultID) {
+                    navigateToVaultStatus(receipt.vaultID)
+                }
+            }
+        }
         .onChange(of: walletStore.selectedProfileID) { oldValue, newValue in
             guard oldValue != newValue else { return }
             showingSendFlow = false
@@ -595,11 +651,41 @@ struct WalletHomeView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .protectedVaultFundingCompleted)) { note in
             guard let vaultID = note.object as? UUID,
-                  let profileID = protectedVaultStore.vaults.first(where: { $0.id == vaultID })?.profileID
+                  protectedVaultStore.vaults.contains(where: { $0.id == vaultID })
             else { return }
-            navigationPath = NavigationPath()
-            navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
-            navigationPath.append(WalletRoute.protectedVaultDetail(vaultID))
+            navigateToVaultStatus(vaultID)
+        }
+    }
+
+    private func presentVaultBroadcast(vaultID: UUID, transactionID: String, warning: String?) {
+        vaultBroadcastReceipt = VaultBroadcastReceipt(
+            vaultID: vaultID,
+            transactionID: transactionID,
+            localRecordWarning: warning
+        )
+    }
+
+    private func hasSavedVaultTransaction(_ transactionID: String, vaultID: UUID) -> Bool {
+        guard let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }) else {
+            return false
+        }
+        return vault.fundingTransactionID == transactionID
+            || vault.approvedWithdrawalTransactionID == transactionID
+            || vault.pendingWithdrawals.contains { $0.completionTransactionID == transactionID }
+    }
+
+    private func navigateToVaultStatus(_ vaultID: UUID) {
+        guard let profileID = protectedVaultStore.vaults.first(where: { $0.id == vaultID })?.profileID
+        else { return }
+        navigationPath = NavigationPath()
+        navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
+        navigationPath.append(WalletRoute.protectedVaultDetail(vaultID))
+    }
+
+    private func showDelayProgress(vaultID: UUID, warning: String?) {
+        navigateToVaultStatus(vaultID)
+        if let warning {
+            walletHomeAlert = .vaultRecordWarning(warning)
         }
     }
 
@@ -3055,6 +3141,7 @@ private struct ReviewWalletFundingView: View {
 private struct ProtectedVaultDetailView: View {
     let vault: ProtectedVault
     let onFund: () -> Void
+    let onSpend: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
@@ -3065,7 +3152,6 @@ private struct ProtectedVaultDetailView: View {
     @State private var showingRenamePrompt = false
     @State private var showingConsensusDetails = false
     @State private var renameText = ""
-    @State private var showingSend = false
     @State private var isRefreshing = false
     @State private var showingRefreshDetails = false
     @State private var currentVaultOutputs: [WalletUTXO] = []
@@ -3236,7 +3322,7 @@ private struct ProtectedVaultDetailView: View {
                 (preferences.network == .testnet10 && vault.status == .pendingWithdrawal) ||
                 (vault.status == .incompatibleFunding && hasCovenantOutput) {
                 Section {
-                    Button(action: { showingSend = true }) {
+                    Button(action: onSpend) {
                         Text("Spend from Vault")
                             .frame(maxWidth: .infinity)
                     }
@@ -3264,9 +3350,6 @@ private struct ProtectedVaultDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await refreshVault() }
         .refreshable { await refreshVault() }
-        .navigationDestination(isPresented: $showingSend) {
-            TestnetProtectedVaultSpendView(vaultID: vault.id)
-        }
         .navigationDestination(isPresented: $showingConsensusDetails) {
             ProtectedVaultConsensusDetailsView(
                 vault: vault,
@@ -3596,6 +3679,7 @@ private struct TestnetProtectedVaultSpendView: View {
     }
 
     let vaultID: UUID
+    let onBroadcast: (String, String?, Bool) -> Void
     @EnvironmentObject private var appLockService: AppLockService
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -3828,6 +3912,7 @@ private struct TestnetProtectedVaultSpendView: View {
                                 vault.approvedAddresses.count == 1 ? "Approved Destination" : "Approved Destinations",
                                 selection: $approvedAddress
                             ) {
+                                Text("Select an approved destination").tag("")
                                 ForEach(vault.approvedAddresses, id: \.self) { address in
                                     Text(address).tag(address)
                                 }
@@ -3909,9 +3994,9 @@ private struct TestnetProtectedVaultSpendView: View {
                             }
                             .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: true))
                             .disabled(isWorking
+                                || transactionID != nil
                                 || selectedStageOutput == nil
-                                || (spendableStageOutputs.count > 1 && selectedStageOutpoint.isEmpty)
-                                || (transactionID != nil && vault.status != .pendingWithdrawal))
+                                || (spendableStageOutputs.count > 1 && selectedStageOutpoint.isEmpty))
                         }
                     }
                     .listRowInsets(EdgeInsets())
@@ -3919,12 +4004,6 @@ private struct TestnetProtectedVaultSpendView: View {
                 }
                 if let errorMessage {
                     Section { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
-                }
-                if let transactionID {
-                    Section("Broadcast") {
-                        Link(transactionID, destination: preferences.explorer.transactionURL(transactionID, network: preferences.network))
-                            .font(.caption.monospaced())
-                    }
                 }
             }
         }
@@ -4242,33 +4321,39 @@ private struct TestnetProtectedVaultSpendView: View {
                 preparedSpend.signedPSKB,
                 nodeConfiguration: preferences.nodeConfiguration
             )
-            _ = walletStore.recordBroadcastedTransaction(
+            let walletRecorded = walletStore.recordBroadcastedTransaction(
                 profileID: vault.profileID,
                 transactionID: txid,
                 destination: preparedSpend.outputAddress,
                 amountSompi: preparedSpend.amountSompi,
                 feeSompi: preparedSpend.feeSompi
             )
+            let vaultRecorded: Bool
             if preparedSpend.path == .beginDelay,
                let pendingDescriptor = preparedSpend.pendingDescriptor {
-                protectedVaultStore.recordPendingWithdrawal(
+                vaultRecorded = protectedVaultStore.recordPendingWithdrawal(
                     id: vault.id, destination: preparedSpend.destination,
                     pendingAddress: pendingDescriptor.pendingAddress, transactionID: txid
                 )
             } else if let pendingID = preparedSpend.pendingID {
-                protectedVaultStore.completePendingWithdrawal(
+                vaultRecorded = protectedVaultStore.completePendingWithdrawal(
                     id: vault.id,
                     pendingID: pendingID,
                     transactionID: txid,
                     outcome: preparedSpend.path == .cancel ? .recovery : .delayCompleted
                 )
             } else {
-                protectedVaultStore.recordApprovedSpend(id: vault.id, transactionID: txid)
+                vaultRecorded = protectedVaultStore.recordApprovedSpend(id: vault.id, transactionID: txid)
             }
             transactionID = txid
             self.preparedSpend = nil
-            if preparedSpend.path == .beginDelay {
-                path = .mature
+            let warning = (!walletRecorded || !vaultRecorded)
+                ? "The transaction was broadcast, but its local record could not be saved. Refresh the wallet and check the transaction ID before sending again."
+                : nil
+            if preparedSpend.path == .beginDelay && !vaultRecorded {
+                errorMessage = "The security-delay transaction was broadcast with ID \(txid), but its local vault record could not be saved. Refresh the vault before taking another action."
+            } else {
+                onBroadcast(txid, warning, preparedSpend.path == .beginDelay)
             }
             Task {
                 await syncService.refreshAfterBroadcast(
@@ -4519,6 +4604,7 @@ private struct FundProtectedVaultView: View {
     let profile: WalletProfile
     let selectedUTXOs: [WalletUTXO]?
     let initialFeeSelection: ProtectedVaultFundingFeeSelection
+    let onBroadcast: (String, String?) -> Void
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
@@ -4540,13 +4626,15 @@ private struct FundProtectedVaultView: View {
                         vault: vault,
                         profile: profile,
                         selectedUTXOs: selectedUTXOs,
-                        initialFeeSelection: initialFeeSelection
+                        initialFeeSelection: initialFeeSelection,
+                        onBroadcast: onBroadcast
                     )
                 } else {
                     VaultFundingUTXOSelectionView(
                         vault: vault,
                         profile: profile,
-                        initialFeeSelection: initialFeeSelection
+                        initialFeeSelection: initialFeeSelection,
+                        onBroadcast: onBroadcast
                     )
                 }
             } label: {
@@ -4601,6 +4689,7 @@ private struct VaultFundingUTXOSelectionView: View {
     let vault: ProtectedVault
     let profile: WalletProfile
     let initialFeeSelection: ProtectedVaultFundingFeeSelection
+    let onBroadcast: (String, String?) -> Void
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
@@ -4659,7 +4748,8 @@ private struct VaultFundingUTXOSelectionView: View {
                 vault: vault,
                 profile: profile,
                 selectedUTXOs: fundingSelectionSnapshot,
-                initialFeeSelection: initialFeeSelection
+                initialFeeSelection: initialFeeSelection,
+                onBroadcast: onBroadcast
             )
         }
         .onAppear {
@@ -4858,6 +4948,7 @@ private struct ReviewVaultFundingView: View {
     let selectedUTXOs: [WalletUTXO]
     let initialFeeSelection: ProtectedVaultFundingFeeSelection
     let onDraftBuilt: ((ProtectedVault) -> Bool)?
+    let onBroadcast: (String, String?) -> Void
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var engine: KasSignerEngine
@@ -4878,13 +4969,15 @@ private struct ReviewVaultFundingView: View {
         profile: WalletProfile,
         selectedUTXOs: [WalletUTXO],
         initialFeeSelection: ProtectedVaultFundingFeeSelection = ProtectedVaultFundingFeeSelection(),
-        onDraftBuilt: ((ProtectedVault) -> Bool)? = nil
+        onDraftBuilt: ((ProtectedVault) -> Bool)? = nil,
+        onBroadcast: @escaping (String, String?) -> Void
     ) {
         self.vault = vault
         self.profile = profile
         self.selectedUTXOs = selectedUTXOs
         self.initialFeeSelection = initialFeeSelection
         self.onDraftBuilt = onDraftBuilt
+        self.onBroadcast = onBroadcast
         _selectedFee = State(initialValue: initialFeeSelection.choice)
         _customFeeText = State(initialValue: initialFeeSelection.customFeeText)
     }
@@ -4928,7 +5021,7 @@ private struct ReviewVaultFundingView: View {
             Text(buildErrorMessage)
         }
         .navigationDestination(item: $verifiedReview) { review in
-            VerifiedVaultFundingReviewView(review: review)
+            VerifiedVaultFundingReviewView(review: review, onBroadcast: onBroadcast)
         }
         .task {
             _ = await refreshFeeEstimate()
@@ -5308,6 +5401,7 @@ private struct VerifiedVaultFundingReview: Identifiable, Hashable {
 
 private struct VerifiedVaultFundingReviewView: View {
     let review: VerifiedVaultFundingReview
+    let onBroadcast: (String, String?) -> Void
     @EnvironmentObject private var appLockService: AppLockService
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -5420,11 +5514,6 @@ private struct VerifiedVaultFundingReviewView: View {
             if let fundingError {
                 Section { Text(fundingError).foregroundStyle(.red).font(.footnote) }
             }
-            if let testnetTransactionID {
-                Section("Transaction Being Broadcasted") {
-                    Text(testnetTransactionID).font(.caption.monospaced()).textSelection(.enabled)
-                }
-            }
         }
         .navigationTitle("Verify PSKB")
         .navigationBarTitleDisplayMode(.inline)
@@ -5503,14 +5592,17 @@ private struct VerifiedVaultFundingReviewView: View {
             try await engine.verifyStandardPSKBSignatures(signed)
             _ = try await engine.finalizeSignedPSKB(signed)
             let txid = try await engine.broadcastSignedPSKB(signed, nodeConfiguration: preferences.nodeConfiguration)
-            protectedVaultStore.recordFundingBroadcast(id: review.vaultID, transactionID: txid)
-            _ = walletStore.recordBroadcastedTransaction(
+            let vaultRecorded = protectedVaultStore.recordFundingBroadcast(id: review.vaultID, transactionID: txid)
+            let walletRecorded = walletStore.recordBroadcastedTransaction(
                 profileID: review.profileID, transactionID: txid,
                 destination: review.vaultAddress, amountSompi: review.depositSompi,
                 feeSompi: review.feeSompi
             )
             testnetTransactionID = txid
-            NotificationCenter.default.post(name: .protectedVaultFundingCompleted, object: review.vaultID)
+            let warning = (!vaultRecorded || !walletRecorded)
+                ? "The transaction was broadcast, but its local record could not be saved. Refresh the wallet and check the transaction ID before sending again."
+                : nil
+            onBroadcast(txid, warning)
         } catch {
             fundingError = error.localizedDescription
         }

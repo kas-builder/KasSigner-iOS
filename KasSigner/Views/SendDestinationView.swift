@@ -3362,9 +3362,10 @@ struct VerifiedSigningPreparationView: View {
     }
 }
 
-private struct BroadcastSuccessView: View {
+struct BroadcastSuccessView: View {
     @EnvironmentObject private var preferences: AppPreferences
     let transactionID: String
+    var localRecordWarning: String? = nil
     let onDone: () -> Void
 
     var body: some View {
@@ -3393,6 +3394,13 @@ private struct BroadcastSuccessView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
+
+                    if let localRecordWarning {
+                        Text(localRecordWarning)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                            .multilineTextAlignment(.center)
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -3433,7 +3441,7 @@ private struct BroadcastSuccessView: View {
 
                 Spacer()
 
-                Button("Done") {
+                Button("OK") {
                     onDone()
                 }
                 .buttonStyle(.borderedProminent)
