@@ -1,168 +1,173 @@
-# KasSigner-iOS
+# KasSigner iOS
 
-KAS donations: kaspa:qqpzpn5e7enn2ylfdxvlwtm3829gn6j9z9dnnmcsw5arkgnurktty6ulgzkfk 💚
+KasSigner iOS is a native iPhone wallet and portfolio app for Kaspa. It supports Mainnet watch-only accounts that use an air-gapped **M5 Stack Core S3** for signing, plus Testnet 10 accounts and Protected Vaults for testing.
 
-KasSigner-iOS is a native, watch-only Kaspa wallet and portfolio app for iPhone. It discovers and monitors accounts from an imported public wallet key (`kpub`), constructs transactions on the phone, and exchanges animated QR codes with an air-gapped KasSigner device for independent review and signing.
+The app bundles its own transaction runtime and connects directly to Kaspa network services or a supported node. It does not require a companion website to operate.
 
-Private keys, seed phrases, and signing passphrases are never requested or stored by the iOS app.
+**Project version:** 6.0 (build 1)
 
-**Current version:** 4.3 (build 22)
+KAS donations: `kaspa:qqpzpn5e7enn2ylfdxvlwtm3829gn6j9z9dnnmcsw5arkgnurktty6ulgzkfk`
 
-## Beta status
+## Status
 
-KasSigner is under active development and should be considered beta software. Wallet discovery, transaction construction, air-gapped signing, return verification, broadcast, and portfolio tracking are implemented, but bugs and edge cases may remain.
+KasSigner iOS is under active development. Treat it as beta software. Test with small amounts and carefully review every transaction before approving it. For Mainnet transactions, verify the destination, amount, change, and fee on the M5 Stack Core S3.
 
-Test with small amounts and verify the destination, amount, change, and fee on the air-gapped signing device before approving every transaction. Never include seed words, private keys, signing payloads, or other sensitive wallet information in bug reports, screenshots, or logs.
+The app supports two distinct account workflows:
 
-## Trust model
+- **Mainnet:** import a public account key (`kpub`) and use a compatible, air-gapped M5 Stack Core S3 to sign.
+- **Testnet 10:** create or restore a 12-word account in the app. The app stores its recovery words in the iOS Keychain and signs Testnet 10 transactions on the iPhone.
 
-KasSigner separates wallet coordination from signing:
+Never include recovery words, private keys, or signing payloads in bug reports, screenshots, or logs.
 
-- The iPhone imports public account material and operates as a watch-only wallet.
-- The iPhone discovers addresses, synchronizes wallet activity, selects UTXOs, and constructs unsigned transactions.
-- The air-gapped KasSigner device holds private keys, displays transaction details, and signs after physical approval.
-- The iPhone verifies the returned transaction and Schnorr signatures before broadcast.
+## Networks and account types
 
-The hardware signer is the final review authority. Confirm transaction details on its screen rather than relying only on the phone.
+Choose the network in **Settings → Network & Node** before adding an account.
 
-## Wallet and synchronization features
+### Mainnet watch-only accounts
 
-- Import compatible KasSigner `kpub` QR exports without exposing private keys
-- Manage, switch, rename, copy, and locally remove multiple watch-only accounts
-- Automatically discover historical activity across receive and change chains
-- Maintain a safety gap beyond the highest discovered activity
-- Keep new imports provisional until initial discovery succeeds
-- Retry or cancel interrupted discovery without replacing the last usable wallet
-- Cache wallet state for immediate display while current data refreshes
-- Synchronize balances, UTXOs, transaction history, and used-address state
-- Subscribe to Kaspa node notifications and refresh affected wallet data
+Mainnet accounts are imported from a `kpub` QR code or pasted public key. The iPhone derives and monitors the account’s addresses, synchronizes wallet activity, selects UTXOs, and prepares transactions. The Mainnet watch-only workflow does not import the account’s seed phrase or private keys.
+
+Mainnet transaction signing is performed by a compatible air-gapped M5 Stack Core S3. The iPhone sends an unsigned transaction request through animated QR codes, receives the signed response, verifies it, and broadcasts it after device-owner authentication.
+
+### Testnet 10 accounts
+
+Testnet 10 accounts can be generated in the app or restored with their 12 recovery words. The app stores those words in the iOS Keychain, scoped to the device and available only while it is unlocked. Back up the recovery words separately if you need to restore the account on another installation.
+
+Testnet 10 transactions are signed on the iPhone. Testnet 10 accounts and funds are separate from Mainnet accounts and funds.
+
+Testnet 10 uses automatic nodes. The Mainnet custom-node setting is not reused on Testnet 10.
+
+## Mainnet signing
+
+For Mainnet, the iPhone acts as a watch-only transaction coordinator:
+
+1. Import the public account key from the M5 Stack Core S3.
+2. Synchronize the account and select UTXOs.
+3. Review the transaction and display its animated QR request.
+4. Scan the request with the M5 Stack Core S3.
+5. Review the transaction on its screen and approve signing.
+6. Scan the signed response with the iPhone.
+7. Allow the app to verify the returned transaction and signatures.
+8. Authenticate on the iPhone and broadcast the verified transaction.
+
+The M5 Stack Core S3 is the final review authority for approving a Mainnet transaction. Verify its display before approving.
+
+## Wallet and synchronization
+
+- Import Mainnet watch-only accounts from a `kpub` QR code or pasted `kpub`
+- Create or restore Testnet 10 accounts using 12 recovery words
+- Manage, switch, rename, and locally delete accounts
+- Discover and derive receive and change addresses
+- Synchronize balances, UTXOs, transaction history, and address status
+- Refresh wallet data from node notifications
+- Show cached wallet state while refreshing current data
 - Track sent, received, internal-transfer, pending, and confirmed transactions
 - Display confirmation progress using accepting-block blue scores
-- Inspect and label transactions and UTXOs
-- Show each UTXO's estimated USD value alongside its KAS amount
-- Optionally show a Currency Converter card on the Wallet tab; it is hidden by default and can be enabled under **Settings → Currency**
-- Show a brief loading transition when switching accounts
+- Label transactions and UTXOs
+- Show estimated USD values for UTXOs
+- Optionally show a Currency Converter card on the Wallet tab; it is off by default
+- Export wallet transaction history to CSV
 
-## Receive and address management
+Address discovery is limited to 512 addresses per chain. The app reports when an account reaches this limit.
 
-- Display receive and change addresses as text and QR codes
-- Identify addresses as fresh, used, or temporarily unavailable
-- Open to the earliest known fresh receive address
-- Optionally reopen at the last manually viewed address
-- Browse receive and change addresses in native list views
-- Jump from an address list directly to its QR code
-- Derive additional public addresses when the available pool needs extending
-- Copy wallet values through a local-only pasteboard entry that expires after two minutes
+## Sending
 
-## Sending and air-gapped signing
+The send flow supports:
 
-- Select individual UTXOs or all available inputs, with an eight-input workflow limit
-- Label UTXOs for coin-control workflows
-- Construct exact-amount or send-max transactions
-- Choose a transaction type before entering send details:
-  - **Standard:** up to four destinations and up to one change output
-  - **Privacy:** up to four destinations and two to four change outputs, with manual allocation or an automatic balanced split
-  - **Decoy:** one destination and exactly four change outputs, including one change output matching the destination amount
-- Add multiple destinations in Standard or Privacy sends; each destination and amount appears in review
-- Choose low, normal, priority, or custom fees
-- Automatically focus the numeric custom-fee field
-- Select change addresses, including previously used addresses, with a freshness warning and an option to choose another or continue
-- Allocate multiple change outputs manually or use the automatic balanced split
-- Randomize output order for Privacy and Decoy transactions
-- Review each destination and change address with its amount and estimated USD value, formatted to two decimal places, before signing
-- Review destination amounts, fee, total change, and the number of change addresses before signing
-- Cancel and discard an in-memory transaction session
-- Display animated signing QR frames with play/pause control and a five-second interval
-- Scan signed frames in any order and show real collection progress
-- Control the camera torch from every iPhone QR scanner; it turns off when scanning closes
-- Require Face ID, Touch ID, or device-passcode authorization before broadcast
-- Display the resulting transaction ID and open it in the selected explorer
+- Selecting individual UTXOs or all available inputs, with an eight-input workflow limit
+- Standard, Privacy, and Decoy transaction types
+- Exact-amount and send-max transactions
+- Up to four destinations where supported by the selected transaction type
+- Low, normal, priority, or custom fees
+- One or more change outputs, depending on transaction type
+- Manual or automatic change allocation for supported multi-output sends
+- Output-order randomization for Privacy and Decoy transactions
+- Transaction review showing destinations, change, fees, and estimated values
+- In-memory transaction drafts that are discarded when the flow is cancelled or closed
+- Animated QR signing requests and out-of-order QR response scanning for Mainnet hardware signing
+- Device-owner authentication before broadcasting
 
-## QR and returned-transaction security
+Mainnet sends use the M5 Stack Core S3 signing flow. Testnet 10 sends are signed on the iPhone and are intended for testing.
 
-The current QR protocol uses a versioned multi-frame envelope containing a transfer identifier, message type, frame index, frame count, exact total length, and payload digest. Frames from separate transfers cannot be silently combined. Malformed, conflicting, truncated, and tampered payloads are rejected.
+## Protected Vaults and programmable UTXOs
 
-When a signed transaction returns, the iOS runtime:
+Protected Vaults are currently available **only on Testnet 10**. On Mainnet, the **Create Programmable UTXO** button displays an availability alert; it does not create or fund a Mainnet vault. The **New Time-Locked UTXO** option is a placeholder and is not implemented.
 
-1. Compares its immutable transaction fields with the originally approved transaction.
-2. Treats only expected signature fields as mutable.
-3. Verifies each returned Schnorr signature against the original sighash and expected input key.
-4. Inserts verified signatures into the original approved PSKB.
-5. Broadcasts only that verified result—not the independently scanned object.
+A Testnet 10 Protected Vault can define approved withdrawal addresses, a recovery address, a security delay, and a recovery path. The app supports funding, status refresh, and withdrawal flows. An unapproved withdrawal can enter a delayed stage and require a later transaction to complete; the delay is enforced by the covenant’s on-chain conditions.
 
-Signing drafts are memory-only. Cancelling or leaving the flow discards the session instead of restoring an unfinished transaction after relaunch.
+Vault records are local app data. Use **Export Vault Recovery File** to save the vault records needed to restore them after reinstalling the app or restoring an account. The recovery file is separate from the account’s recovery words and does not replace the 12-word account backup. If vault records are missing, import the account first, then import its vault recovery file.
 
-For standard single-signature sends, the iPhone includes each selected input's exact receive/change derivation path in a compact KSPT v4 signing request. It verifies that the path matches the input script before sending it. Compatible M5 firmware independently derives and checks every input key and any identified change output against the transaction scripts before signing; incorrect hints fail rather than falling back to a bounded address search. Older KSPT v1 transactions remain supported by the M5's legacy signing path. KSPT v4 supports receive and change indices #1–512, and the returned signatures are still verified against the original transaction before broadcast.
+Protected Vaults and their transactions are experimental Testnet 10 functionality. They are not available on Mainnet.
 
-## Transactions and CSV
+## QR and transaction verification
 
-- View sent, received, internal-transfer, pending, and confirmed activity
-- Preserve local broadcast details while network confirmation arrives
-- Add and edit transaction labels
-- Export wallet transactions to CSV with the newest transaction first
-- Include historical USD prices when that data is available
-- Open addresses and transactions in Kaspa.stream or Kaspa Explorer
+For Mainnet hardware signing, the app uses a versioned multi-frame QR envelope with transfer identity, message type, frame numbering, total length, and a payload digest. This helps prevent frames from separate transfers being combined and rejects malformed or inconsistent payloads.
+
+When a signed transaction returns, the app checks it against the transaction originally approved. It verifies the expected signatures and broadcasts the verified transaction data. The app does not restore unfinished signing drafts after relaunch.
 
 ## Portfolio
 
-The Portfolio tab is separate from hardware-wallet signing and supports:
+The Portfolio tab is separate from wallet signing and supports:
 
 - Multiple named, color-coded portfolio accounts
 - Buys, sells, transfers in, and transfers out
 - Holdings, weighted cost basis, activity, and performance calculations
-- Portfolio-value and KAS price charts using bundled and refreshed historical prices
-- Manual transaction creation, inspection, editing, and deletion
+- Portfolio value and KAS price charts
+- Manual transaction entry, inspection, editing, and deletion
 - CSV import with validation, duplicate detection, and a review summary
-- Newest-first portfolio CSV export
-- Open the Currency Converter from the Wallet tab as well as Portfolio
-- Add a transaction directly from the Transactions heading
+- CSV export
 
-## Security and privacy controls
+## Security and local data
 
-- Optional Face ID or Touch ID app lock with immediate, one-minute, or five-minute delay
-- Device-passcode fallback through the iOS authentication framework
-- Mandatory authentication before transaction broadcast
-- Optional hidden app-switcher preview
-- Optional authenticated decoy launch into a functional weather screen
-- Complete iOS file protection for wallet profiles, derived addresses, labels, and transaction caches
-- Protected wallet files excluded from backups
-- Verified migration before legacy wallet data is removed
-- Local-only, two-minute wallet pasteboard entries that do not propagate through Universal Clipboard
-- In-progress signing sessions retained only in memory
+- Optional app lock using Face ID, Touch ID, or the device passcode
+- Configurable app-lock delay and optional hidden app-switcher preview
+- Optional authenticated Decoy Launch into a weather screen
+- Authentication before transaction broadcast and protected operations
+- Protected wallet files use complete iOS file protection and are excluded from backups
+- Testnet 10 recovery words are stored in the iOS Keychain as device-only data
+- In-progress signing drafts are kept in memory
+- Copy operations use a temporary local pasteboard entry
 
-File protection relies on iOS protections while the device is locked. A `kpub`, its derived addresses, balances, and transaction history are public-chain data but remain privacy-sensitive because they can reveal an account's complete activity.
+Mainnet `kpub` data, addresses, balances, and transaction history are public-chain information, but can reveal an account’s activity and should be treated as privacy-sensitive. A Testnet 10 vault recovery file contains vault records and configuration; keep it with the same care as other wallet backup data.
 
-## Appearance and preferences
+Deleting an account removes its local profile and associated Testnet 10 recovery words from the app’s secure storage. Deleting the app removes its local files; do not rely on uninstalling to erase Keychain data. Neither action changes funds or replaces the need for account recovery words and any required vault recovery records.
 
-- System, Light, and Dark themes
-- Configurable KAS decimal places
+## Network and external services
+
+Mainnet can use automatic public Kaspa nodes or a custom Kaspa wRPC endpoint configured under **Settings → Network & Node**. The selected node receives the public addresses needed to synchronize the wallet. Custom nodes must provide wRPC with UTXO indexing enabled.
+
+The app also uses Kaspa public API services for some address and historical-activity checks. Testnet 10 uses Testnet 10 network services and automatic nodes.
+
+Price providers may receive general KAS price requests. They do not need the wallet’s `kpub` to provide market prices. The optional weather screen uses Open-Meteo and sends the location information needed for its weather request.
+
+`ws://` traffic is unencrypted. Use `wss://` when connecting to a custom node over an untrusted network.
+
+## Preferences
+
+Settings include:
+
+- System, Light, and Dark appearance
+- KAS display precision
 - USD or BTC secondary balance display
-- Automatic price selection or CoinGecko/CoinPaprika preference
+- Automatic, CoinGecko, or CoinPaprika price selection
 - Kaspa.stream or Kaspa Explorer links
-- Configurable address-status display
-- Mainnet automatic-node mode or a custom Kaspa wRPC endpoint
-
-## Network behavior
-
-Automatic mode rotates through bundled public Kaspa wRPC endpoints. A custom endpoint can be configured under **Settings → Network & Node** and must expose Kaspa wRPC with UTXO indexing enabled.
-
-Both `ws://` and `wss://` endpoints are accepted. Use `wss://` whenever possible; plaintext `ws://` does not protect traffic from local-network or transit observers.
-
-The selected node receives public addresses required for wallet synchronization. Automatic-mode discovery and history services can also receive queried addresses. In Custom Node mode, public-indexer historical discovery is skipped rather than silently sending the custom wallet's address set to that service; current UTXOs are still synchronized through the selected node. Features unavailable from the custom service may be limited.
-
-CoinGecko and CoinPaprika receive general KAS price requests without the wallet's `kpub` or addresses. The optional weather cover uses Open-Meteo and sends the selected coordinates needed for its forecast request.
+- UTXO card status defaults and address-status display
+- Mainnet automatic-node or custom-node configuration
+- App lock, app-switcher preview, and Decoy Launch settings
 
 ## Requirements
 
-- A Mac with Xcode capable of targeting iOS 17.6 or newer
-- An iPhone or iOS Simulator running iOS 17.6 or newer
-- A physical iPhone for camera QR workflows
-- A compatible air-gapped M5Stack Cores3 hardware device for signing
-- An Apple ID in Xcode when installing a development build on a physical iPhone
+- A Mac with Xcode that supports the project’s iOS 17.6 deployment target
+- An iPhone or iOS Simulator running iOS 17.6 or later
+- A physical iPhone for camera-based QR scanning
+- A compatible, air-gapped M5 Stack Core S3 for Mainnet signing
+- An Apple development team configured in Xcode to install on a physical iPhone
 
-No package manager, Rust toolchain, npm installation, or separate WebAssembly build is required to run the checked-in app. Its compiled runtime is included in the repository. Developers changing that runtime should follow [`Runtime/README.md`](Runtime/README.md).
+The repository includes the JavaScript and WebAssembly runtime needed by the app. Running the Xcode project does not require installing Rust, npm, or a separate website. Rust tooling is needed only when changing and rebuilding the bundled runtime.
 
-## Get the source
+## Build and run
+
+Clone the repository and open the Xcode project:
 
 ```bash
 git clone https://github.com/kas-builder/KasSigner-iOS.git
@@ -170,75 +175,30 @@ cd KasSigner-iOS
 open KasSigner.xcodeproj
 ```
 
-Select the **KasSigner** scheme and an iPhone Simulator or connected iPhone, then press **Command-R**.
+In Xcode, select the **KasSigner** scheme and an iPhone Simulator or connected iPhone, then choose **Run**.
 
-The Simulator cannot exercise the physical camera workflow. Account QR import and signed-transaction scanning should be tested on a physical iPhone unless an explicit local test harness is used.
+To install on a physical iPhone, select the KasSigner app target, open **Signing & Capabilities**, choose your Apple development team, and select the connected device. The repository does not include a provisioning profile or signing certificate.
 
-### Physical iPhone signing
+The Simulator can run the app, but its camera does not exercise the physical QR-scanning workflow. Test camera-based account import and hardware signing on a physical iPhone.
 
-1. Select the KasSigner target in Xcode.
-2. Open **Signing & Capabilities**.
-3. Choose your Apple development team.
-4. Change the bundle identifier if the default is unavailable to your account.
-5. Select the connected iPhone and press **Command-R**.
+## Run tests
 
-The repository does not contain a development-team ID, provisioning profile, or signing certificate.
-
-## Command-line build and tests
+Run the Xcode tests on an available iOS Simulator:
 
 ```bash
-xcodebuild \
+xcodebuild test \
   -project KasSigner.xcodeproj \
   -scheme KasSigner \
-  -configuration Debug \
-  -sdk iphonesimulator \
-  -destination 'generic/platform=iOS Simulator' \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+  -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
-Run the Rust runtime tests:
+The Rust runtime tests can be run with:
 
 ```bash
 cargo test --manifest-path Runtime/kassee/Cargo.toml
 ```
 
-List schemes or inspect build settings:
-
-```bash
-xcodebuild -list -project KasSigner.xcodeproj
-xcodebuild -showBuildSettings -project KasSigner.xcodeproj -scheme KasSigner
-```
-
-## Using KasSigner
-
-1. Export the intended account's public Kaspa key from the hardware signer.
-2. Open **Add Account** on iPhone and scan the `kpub` QR.
-3. Allow initial wallet discovery to finish.
-4. Open **Receive**, or use **Send** to select UTXOs and construct a transaction.
-5. Review the transaction and display its animated signing QR.
-6. Scan the request with the air-gapped device.
-7. Verify the hardware display and approve signing.
-8. Scan the returned frames with the iPhone.
-9. Allow KasSigner to verify the transaction and signatures.
-10. Authenticate, then broadcast.
-
-## Local data and reset behavior
-
-KasSigner stores watch-only wallet state, public addresses, labels, preferences, cached history, and market data locally. Privacy-sensitive wallet state and caches use complete file protection and are excluded from backups. General non-wallet preferences may remain in `UserDefaults`.
-
-Deleting a watch-only account removes its local data from that installation; it does not affect funds or the hardware signer. The same `kpub` can later be reimported and rediscovered. Delete and reinstall the app to reset the entire local installation.
-
-## Known limitations
-
-- KasSigner is beta software and currently targets Kaspa mainnet.
-- It is watch-only and cannot recover funds without the corresponding hardware-held seed or private key.
-- Camera signing requires a physical iPhone.
-- Accounts with extensive history can take longer to discover safely.
-- Discovery is limited to 512 addresses per chain and reports when activity reaches that limit.
-- Custom-node functionality depends on data exposed by the selected wRPC service.
-- `ws://` is intended for controlled local or development use and provides no transport confidentiality.
-- Multisig hardening remains incomplete; multisig is not a supported production workflow.
+The Rust runtime source and rebuild instructions are in [`Runtime/README.md`](Runtime/README.md).
 
 ## Repository layout
 
@@ -247,30 +207,19 @@ KasSigner-iOS/
 ├── KasSigner/
 │   ├── App/                 App entry point
 │   ├── Models/              Wallet, preferences, portfolio, and sync models
-│   ├── Services/            Runtime bridge, pricing, and wallet sync
+│   ├── Services/            Wallet engine, sync, authentication, and pricing
 │   ├── Views/               SwiftUI screens and QR workflows
 │   ├── Resources/Web/       Bundled JavaScript and WebAssembly runtime
 │   └── Assets.xcassets/     App icons and assets
 ├── KasSignerTests/          Swift regression tests
-└── Runtime/kassee/          Rust transaction and QR runtime source
+├── Runtime/kassee/          Rust runtime source
+├── Runtime/README.md        Runtime rebuild instructions
+└── THIRD_PARTY_NOTICES.md   Third-party notices
 ```
 
-## Security guidance
+## Compatibility and licensing
 
-- Never enter a seed phrase or private key into the iOS app.
-- Verify destination, amount, change, and fee on the hardware device.
-- Confirm the imported `kpub` belongs to the intended hardware account.
-- Treat wallet keys, addresses, history, and CSV exports as privacy-sensitive.
-- Prefer a trusted node and encrypted `wss://` transport.
-- Keep an independently verified backup of the hardware-wallet seed.
+- iOS app: [KasSigner-iOS](https://github.com/kas-builder/KasSigner-iOS)
+- Compatible signing firmware: [M5 Stack Core S3 firmware fork](https://github.com/kas-builder/KasSigner-M5Stack-fork-brt)
 
-## Upstream references
-
-- [`kaspanet/rusty-kaspa`](https://github.com/kaspanet/rusty-kaspa) is the protocol and transaction-behavior source of truth.
-- [`azbuky/kaspium_wallet`](https://github.com/azbuky/kaspium_wallet) is a reference for direct subscriptions, lifecycle-aware connections, debounced UTXO updates, affected-address refreshes, and cached wallet state.
-
-## License
-
-KasSigner is licensed under the GNU General Public License version 3. See [LICENSE](LICENSE).
-
-KAS donations: kaspa:qqpzpn5e7enn2ylfdxvlwtm3829gn6j9z9dnnmcsw5arkgnurktty6ulgzkfk 💚
+The project is licensed under GPL-3.0. See [`LICENSE`](LICENSE) and preserve the license and upstream notices associated with bundled runtime code.
