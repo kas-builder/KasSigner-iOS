@@ -200,8 +200,8 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
     }
 
     enum RecoveryPath: String, Codable, CaseIterable, Identifiable {
-        case cancelPendingWithdrawal = "Cancel pending withdrawal only"
         case emergencyAnytime = "Emergency Recovery 24/7"
+        case cancelPendingWithdrawal = "Cancel pending withdrawal only"
 
         var id: Self { self }
 

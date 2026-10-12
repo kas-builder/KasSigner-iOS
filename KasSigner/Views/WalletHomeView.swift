@@ -222,7 +222,7 @@ private struct ProtectedVaultRuleSelection {
     var delayDays = 30
     var delayHours = 0
     var delayMinutes = 0
-    var recoveryPath: RecoveryPath = .cancelPendingWithdrawal
+    var recoveryPath: RecoveryPath = .emergencyAnytime
 }
 
 private func protectedVaultRuleSelection(from draft: ProtectedVaultSetupDraft) -> ProtectedVaultRuleSelection {
@@ -1350,7 +1350,7 @@ private struct ProtectedVaultRulesView: View {
     @State private var delayDays = 30
     @State private var delayHours = 0
     @State private var delayMinutes = 0
-    @State private var recoveryPath = ProtectedVaultRuleSelection.RecoveryPath.cancelPendingWithdrawal
+    @State private var recoveryPath = ProtectedVaultRuleSelection.RecoveryPath.emergencyAnytime
     @State private var recoveryAddress = ProtectedVaultAddressDraft()
     @State private var fundingUTXOs: [WalletUTXO] = []
     @State private var submittedRules: ProtectedVaultRuleSelection?
@@ -1382,7 +1382,7 @@ private struct ProtectedVaultRulesView: View {
         _delayDays = State(initialValue: setupDraft?.delayDays ?? 30)
         _delayHours = State(initialValue: setupDraft?.delayHours ?? 0)
         _delayMinutes = State(initialValue: setupDraft?.delayMinutes ?? 0)
-        _recoveryPath = State(initialValue: setupDraft?.recoveryPath ?? .cancelPendingWithdrawal)
+        _recoveryPath = State(initialValue: setupDraft?.recoveryPath ?? .emergencyAnytime)
         _recoveryAddress = State(initialValue: ProtectedVaultAddressDraft(address: setupDraft?.recoveryAddress ?? ""))
         _fundingUTXOs = State(initialValue: restoredUTXOs)
         _needsUTXOReselection = State(initialValue: needsUTXOReselection)
@@ -1573,7 +1573,7 @@ private struct ProtectedVaultRulesView: View {
             .listRowInsets(EdgeInsets())
             .listRowBackground(Color.clear)
         }
-        .navigationTitle("Rules")
+        .navigationTitle("Vault Rules")
         .navigationBarTitleDisplayMode(.inline)
         .modifier(
             ProtectedVaultDraftExitPrompt(
@@ -1595,7 +1595,7 @@ private struct ProtectedVaultRulesView: View {
         .alert("Recovery Path", isPresented: $showingRecoveryPathInfo) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("Cancel pending withdrawal only: if an unapproved withdrawal has started its security delay, you can redirect the pending funds to the configured recovery address. This option does not provide an immediate recovery route while the vault is active.\n\nEmergency Recovery 24/7: enables a recovery spend from an active vault to the configured recovery address without waiting for the security delay. It can also be used to redirect a pending withdrawal. To sign either recovery transaction, the wallet account that controls the recovery address must be imported in the app.")
+            Text("Emergency Recovery 24/7: enables a recovery spend from an active vault to the configured recovery address without waiting for the security delay. It can also be used to redirect a pending withdrawal. To sign either recovery transaction, the wallet account that controls the recovery address must be imported in the app.\n\nCancel pending withdrawal only: if an unapproved withdrawal has started its security delay, you can redirect the pending funds to the configured recovery address. This option does not provide an immediate recovery route while the vault is active.")
         }
         .alert("Vault Flow Example", isPresented: $showingVaultFlowInfo) {
             Button("OK", role: .cancel) { }
