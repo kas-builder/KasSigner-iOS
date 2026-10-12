@@ -40,8 +40,8 @@ pub(crate) struct ExtPubKey {
 impl ExtPubKey {
     /// Parse a kpub (Kaspa extended public key, base58check encoded)
     pub(crate) fn from_kpub(kpub_str: &str) -> Result<Self, String> {
-        if !kpub_str.starts_with("kpub") {
-            return Err("Must start with 'kpub'".into());
+        if !kpub_str.starts_with("kpub") && !kpub_str.starts_with("ktub") {
+            return Err("Must start with 'kpub' or 'ktub'".into());
         }
 
         let decoded = bs58::decode(kpub_str)
@@ -68,6 +68,10 @@ impl ExtPubKey {
                 "Raw kpub payload must be 78 bytes, got {}",
                 payload.len()
             ));
+        }
+
+        if payload[..4] != [0x03, 0x8f, 0x33, 0x2e] && payload[..4] != [0x03, 0x90, 0xa2, 0x41] {
+            return Err("Unsupported Kaspa extended public key version".into());
         }
 
         let depth = payload[4];
@@ -130,7 +134,7 @@ impl ExtPubKey {
     }
 
     /// Get the x-only (Schnorr) public key bytes (32 bytes)
-    fn x_only_bytes(&self) -> [u8; 32] {
+    pub(crate) fn x_only_bytes(&self) -> [u8; 32] {
         let point = self.key.to_encoded_point(true);
         let compressed = point.as_bytes(); // 33 bytes: [prefix][x]
         let mut x = [0u8; 32];
@@ -145,6 +149,7 @@ impl ExtPubKey {
 pub fn import_kpub(kpub_str: &str, prefix: &str) -> Result<WalletData, String> {
     let xpub = ExtPubKey::from_kpub(kpub_str)?;
 
+    #[cfg(target_arch = "wasm32")]
     web_sys::console::log_1(
         &format!(
             "[KasSee] Parsed kpub at depth {}, prefix={}",
@@ -174,6 +179,7 @@ pub fn import_kpub(kpub_str: &str, prefix: &str) -> Result<WalletData, String> {
         change_addresses.push(addr);
     }
 
+    #[cfg(target_arch = "wasm32")]
     web_sys::console::log_1(
         &format!(
             "[KasSee] Derived {} receive + {} change addresses ({})",

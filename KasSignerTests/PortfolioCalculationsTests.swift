@@ -2,6 +2,501 @@ import CryptoKit
 import XCTest
 @testable import KasSigner
 
+final class ProtectedVaultFundingPlanTests: XCTestCase {
+    private let profileID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+
+    func testApprovedAddressListPersistsAndLegacyDraftsRemainReadable() throws {
+        let original = ProtectedVault(
+            profileID: profileID,
+            amount: 1,
+            approvedAddresses: ["kaspa:first", "kaspa:second"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0
+        )
+        let encoded = try JSONEncoder().encode(original)
+        XCTAssertEqual(try JSONDecoder().decode(ProtectedVault.self, from: encoded).approvedAddresses,
+                       ["kaspa:first", "kaspa:second"])
+
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "approvedAddresses")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacy)
+        XCTAssertEqual(try JSONDecoder().decode(ProtectedVault.self, from: legacyData).approvedAddresses,
+                       ["kaspa:first"])
+    }
+
+    func testFundingSelectionSessionClearsOnlyOnceForSameProfile() {
+        var session = ProtectedVaultFundingSelectionSession()
+
+        XCTAssertTrue(session.begin(profileID: profileID))
+        XCTAssertFalse(session.begin(profileID: profileID))
+        XCTAssertTrue(session.begin(profileID: UUID()))
+    }
+
+    func testVaultStageKeepsCovenantOutputSpendableBesideUnsupportedDeposit() {
+        let original = WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: 0,
+            amount: 250_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: String(repeating: "b", count: 64)
+        )
+        let unsupportedDeposit = WalletUTXO(
+            txID: String(repeating: "c", count: 64),
+            index: 1,
+            amount: 10_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 43,
+            covenantID: nil
+        )
+
+        let outputs = ProtectedVaultStageOutput.classify([original, unsupportedDeposit])
+        let spendable = outputs.filter { $0.canCoverFee(1_000_000) }
+        let unsupported = outputs.filter { !$0.isCovenantTagged }
+
+        XCTAssertEqual(outputs.count, 2)
+        XCTAssertEqual(spendable.map(\.id), [original.id.lowercased()])
+        XCTAssertEqual(spendable.first?.utxo, original)
+        XCTAssertEqual(unsupported.map(\.id), [unsupportedDeposit.id.lowercased()])
+        XCTAssertFalse(unsupported.first?.canCoverFee(1_000_000) ?? true)
+    }
+
+    func testMultipleInputsProduceRequestedFeeAndWalletChange() throws {
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: Decimal(string: "1.25")!),
+            inputs: [
+                utxo(amount: 100_000_000, index: 0),
+                utxo(amount: 50_000_000, index: 1)
+            ],
+            feeSompi: 1_000
+        )
+
+        XCTAssertEqual(plan.depositSompi, 125_000_000)
+        XCTAssertEqual(plan.feeSompi, 1_000)
+        XCTAssertEqual(plan.inputTotalSompi, 150_000_000)
+        XCTAssertEqual(plan.changeSompi, 24_999_000)
+    }
+
+    func testCustomFeeMustFitSelectedInputs() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: 1),
+                inputs: [utxo(amount: 100_000_500)],
+                feeSompi: 1_000
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .insufficientInput)
+        }
+    }
+
+    func testZeroFeeIsRejected() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: 1),
+                inputs: [utxo(amount: 200_000_000)],
+                feeSompi: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .invalidFee)
+        }
+    }
+
+    func testSubSompiDepositIsRejected() {
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingPlan(
+                vault: vault(amount: Decimal(string: "1.000000001")!),
+                inputs: [utxo(amount: 200_000_000)],
+                feeSompi: 1_000
+            )
+        ) { error in
+            XCTAssertEqual(error as? ProtectedVaultFundingPlanError, .invalidDepositAmount)
+        }
+    }
+
+    func testFundingSummaryVerifiesExactInputsDepositChangeAndFee() throws {
+        let inputs = [
+            utxo(amount: 100_000_000, index: 0),
+            utxo(amount: 50_000_000, index: 1)
+        ]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: Decimal(string: "1.25")!),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+
+        let verified = try ProtectedVaultFundingVerifier.verify(
+            summary: summary(
+                inputs: inputs,
+                outputs: [
+                    ("kaspa:vault", 125_000_000),
+                    ("kaspa:change", 24_999_000)
+                ],
+                fee: 1_000
+            ),
+            plan: plan,
+            vaultAddress: "kaspa:vault",
+            expectedChangeAddress: "kaspa:change",
+            requiresExactFee: true
+        )
+
+        XCTAssertEqual(verified.depositSompi, 125_000_000)
+        XCTAssertEqual(verified.feeSompi, 1_000)
+        XCTAssertEqual(verified.changeSompi, 24_999_000)
+        XCTAssertEqual(verified.inputCount, 2)
+    }
+
+    func testFundingSummaryRejectsUnknownOutput() throws {
+        let inputs = [utxo(amount: 150_000_000)]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: 1),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingVerifier.verify(
+                summary: summary(
+                    inputs: inputs,
+                    outputs: [
+                        ("kaspa:vault", 100_000_000),
+                        ("kaspa:attacker", 49_999_000)
+                    ],
+                    fee: 1_000
+                ),
+                plan: plan,
+                vaultAddress: "kaspa:vault",
+                expectedChangeAddress: "kaspa:change",
+                requiresExactFee: true
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProtectedVaultFundingVerificationError,
+                .unknownOutput
+            )
+        }
+    }
+
+    func testFundingSummaryRejectsDifferentSelectedOutpoint() throws {
+        let inputs = [utxo(amount: 150_000_000)]
+        let plan = try ProtectedVaultFundingPlan(
+            vault: vault(amount: 1),
+            inputs: inputs,
+            feeSompi: 1_000
+        )
+        let differentInput = WalletUTXO(
+            txID: String(repeating: "b", count: 64),
+            index: 0,
+            amount: 150_000_000,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: nil
+        )
+
+        XCTAssertThrowsError(
+            try ProtectedVaultFundingVerifier.verify(
+                summary: summary(
+                    inputs: [differentInput],
+                    outputs: [
+                        ("kaspa:vault", 100_000_000),
+                        ("kaspa:change", 49_999_000)
+                    ],
+                    fee: 1_000,
+                    totalInput: 150_000_000
+                ),
+                plan: plan,
+                vaultAddress: "kaspa:vault",
+                expectedChangeAddress: "kaspa:change",
+                requiresExactFee: true
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? ProtectedVaultFundingVerificationError,
+                .inputOutpointMismatch
+            )
+        }
+    }
+
+    func testSignedFundingRequiresUnchangedTransactionAndAllSignatures() throws {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+        let signed = signedSummary(input: input, signatureCount: 1, ready: true)
+
+        XCTAssertNoThrow(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: signed
+            )
+        )
+    }
+
+    func testSignedFundingRejectsMissingSignature() {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+
+        XCTAssertThrowsError(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: unsigned
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SignedProtectedVaultFundingVerificationError,
+                .missingSignatures
+            )
+        }
+    }
+
+    func testSignedFundingRejectsChangedOutput() {
+        let input = utxo(amount: 150_000_000)
+        let unsigned = signedSummary(input: input, signatureCount: 0, ready: false)
+        var changed = signedSummary(input: input, signatureCount: 1, ready: true)
+        changed = PSKTSummary(
+            totalInputSompi: changed.totalInputSompi,
+            totalOutputSompi: 149_998_999,
+            feeSompi: 1_001,
+            inputCount: changed.inputCount,
+            outputCount: changed.outputCount,
+            inputs: changed.inputs,
+            outputs: [PSKTSummaryOutput(
+                address: "kaspa:vault",
+                amountSompi: 149_998_999,
+                scriptHex: "bb"
+            )],
+            finalizeReady: true
+        )
+
+        XCTAssertThrowsError(
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsigned,
+                signed: changed
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? SignedProtectedVaultFundingVerificationError,
+                .transactionChanged
+            )
+        }
+    }
+
+    private func vault(amount: Decimal) -> ProtectedVault {
+        ProtectedVault(
+            profileID: profileID,
+            amount: amount,
+            approvedAddresses: ["kaspa:test"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            covenantIDs: []
+        )
+    }
+
+    private func utxo(amount: UInt64, index: UInt32 = 0) -> WalletUTXO {
+        WalletUTXO(
+            txID: String(repeating: "a", count: 64),
+            index: index,
+            amount: amount,
+            scriptPublicKey: [0],
+            blockDAAScore: 42,
+            covenantID: nil
+        )
+    }
+
+    private func summary(
+        inputs: [WalletUTXO],
+        outputs: [(String, UInt64)],
+        fee: UInt64,
+        totalInput: UInt64? = nil
+    ) -> PSKTSummary {
+        let inputTotal = totalInput ?? inputs.reduce(0) { $0 + $1.amount }
+        let outputTotal = outputs.reduce(0) { $0 + $1.1 }
+        return PSKTSummary(
+            totalInputSompi: inputTotal,
+            totalOutputSompi: outputTotal,
+            feeSompi: fee,
+            inputCount: inputs.count,
+            outputCount: outputs.count,
+            inputs: inputs.map {
+                PSKTSummaryInput(txID: $0.txID, index: $0.index)
+            },
+            outputs: outputs.map {
+                PSKTSummaryOutput(
+                    address: $0.0,
+                    amountSompi: $0.1,
+                    covenantAuthorizingInput: $0.0 == "kaspa:vault" ? 0 : nil,
+                    covenantID: $0.0 == "kaspa:vault"
+                        ? String(repeating: "c", count: 64)
+                        : nil
+                )
+            },
+            transactionVersion: 1
+        )
+    }
+
+    private func signedSummary(
+        input: WalletUTXO,
+        signatureCount: Int,
+        ready: Bool
+    ) -> PSKTSummary {
+        PSKTSummary(
+            totalInputSompi: input.amount,
+            totalOutputSompi: 149_999_000,
+            feeSompi: 1_000,
+            inputCount: 1,
+            outputCount: 1,
+            inputs: [PSKTSummaryInput(
+                txID: input.txID,
+                index: input.index,
+                amountSompi: input.amount,
+                scriptHex: "aa",
+                signaturesPresent: signatureCount
+            )],
+            outputs: [PSKTSummaryOutput(
+                address: "kaspa:vault",
+                amountSompi: 149_999_000,
+                scriptHex: "bb"
+            )],
+            finalizeReady: ready
+        )
+    }
+}
+
+@MainActor
+final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
+    func testRefreshFailureRetainsVerifiedTimestampAndSuccessfulRetryClearsStaleState() throws {
+        let firstCheck = Date(timeIntervalSince1970: 1_800_000_000)
+        let verified = ProtectedVaultRefreshInfo(
+            checkedAt: firstCheck,
+            network: "Testnet 10",
+            nodeLabel: "Automatic Nodes"
+        )
+        var state = ProtectedVaultRefreshState()
+        state.begin(at: firstCheck, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.succeed(with: verified)
+
+        let failedAttempt = firstCheck.addingTimeInterval(60)
+        state.begin(at: failedAttempt, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.fail(message: "Could not refresh on-chain data.")
+
+        XCTAssertTrue(state.isStale)
+        XCTAssertFalse(state.isRefreshing)
+        XCTAssertEqual(state.lastSuccessfulInfo, verified)
+        XCTAssertEqual(state.lastAttemptAt, failedAttempt)
+        XCTAssertEqual(state.errorMessage, "Could not refresh on-chain data.")
+
+        let retryCheck = firstCheck.addingTimeInterval(120)
+        let refreshed = ProtectedVaultRefreshInfo(
+            checkedAt: retryCheck,
+            network: "Testnet 10",
+            nodeLabel: "Automatic Nodes"
+        )
+        state.begin(at: retryCheck, network: "Testnet 10", nodeLabel: "Automatic Nodes")
+        state.succeed(with: refreshed)
+
+        XCTAssertFalse(state.isStale)
+        XCTAssertFalse(state.isRefreshing)
+        XCTAssertNil(state.errorMessage)
+        XCTAssertEqual(state.lastSuccessfulInfo, refreshed)
+    }
+
+    func testRefreshStateRoundTripsForProtectedPersistence() throws {
+        let info = ProtectedVaultRefreshInfo(
+            checkedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            network: "Mainnet",
+            nodeLabel: "example.org:443"
+        )
+        var state = ProtectedVaultRefreshState(lastSuccessfulInfo: info)
+        state.begin(at: info.checkedAt.addingTimeInterval(30), network: "Mainnet", nodeLabel: "example.org:443")
+        state.fail(message: "Could not refresh on-chain data.")
+
+        let data = try JSONEncoder().encode(state)
+        let restored = try JSONDecoder().decode(ProtectedVaultRefreshState.self, from: data)
+
+        XCTAssertEqual(restored, state)
+        XCTAssertTrue(restored.isStale)
+        XCTAssertEqual(restored.lastSuccessfulInfo, info)
+    }
+
+    func testLegacyVaultMigrationAndSameWalletReassociationSurviveRelaunch() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultRecovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultRecovery.\(UUID().uuidString)"))
+        let oldProfile = WalletProfile(name: "Original", kpub: "kpub-recovery-test",
+                                       network: KaspaNetwork.testnet10.rawValue)
+        let vault = ProtectedVault(profileID: oldProfile.id, amount: 1,
+                                   approvedAddresses: ["kaspatest:approved"],
+                                   delayDays: 1, delayHours: 0, delayMinutes: 0)
+        defaults.set(try JSONEncoder().encode([vault]), forKey: "kassigner.protectedVaults.v1")
+
+        let migrated = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertNil(migrated.storageError)
+        XCTAssertEqual(migrated.vaults(for: oldProfile.id).count, 1)
+        XCTAssertTrue(storage.contains(fileName: "protected-vault-state.json"))
+        XCTAssertNil(defaults.data(forKey: "kassigner.protectedVaults.v1"))
+        XCTAssertTrue(migrated.registerWallet(oldProfile))
+
+        let restoredProfile = WalletProfile(name: "Restored", kpub: oldProfile.kpub,
+                                            network: oldProfile.network)
+        XCTAssertTrue(migrated.reassociateVaults(to: restoredProfile))
+        XCTAssertTrue(migrated.vaults(for: oldProfile.id).isEmpty)
+        XCTAssertEqual(migrated.vaults(for: restoredProfile.id).first?.id, vault.id)
+
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.vaults(for: restoredProfile.id).first?.id, vault.id)
+    }
+
+    func testCorruptProtectedVaultFileIsNotReplacedByLegacyData() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultCorrupt-\(UUID().uuidString)", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let file = root.appending(path: "protected-vault-state.json")
+        let corrupt = Data("invalid vault JSON".utf8)
+        try corrupt.write(to: file)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultCorrupt.\(UUID().uuidString)"))
+        let store = ProtectedVaultStore(defaults: defaults,
+                                        protectedStorage: ProtectedWalletStorage(directoryURL: root))
+        XCTAssertNotNil(store.storageError)
+        XCTAssertFalse(store.add(ProtectedVault(profileID: UUID(), amount: 1,
+                                                approvedAddresses: ["kaspatest:approved"],
+                                                delayDays: 1, delayHours: 0, delayMinutes: 0)))
+        XCTAssertEqual(try Data(contentsOf: file), corrupt)
+    }
+
+    func testWalletImportDoesNotPublishProfileWhenProtectedSaveFails() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "WalletSaveFailure-\(UUID().uuidString)")
+        try Data("not a directory".utf8).write(to: root)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "WalletSaveFailure.\(UUID().uuidString)"))
+        let wallet = WalletStore(protectedStorage: ProtectedWalletStorage(directoryURL: root),
+                                 defaults: defaults)
+        let profile = WalletProfile(name: "Must Not Appear", kpub: "kpub-save-failure")
+        XCTAssertFalse(wallet.add(profile))
+        XCTAssertTrue(wallet.profiles.isEmpty)
+        XCTAssertNil(wallet.selectedProfile)
+    }
+
+    func testRecoveryFileRejectsAnotherWallet() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultWrongWallet-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "VaultWrongWallet.\(UUID().uuidString)"))
+        let store = ProtectedVaultStore(defaults: defaults,
+                                        protectedStorage: ProtectedWalletStorage(directoryURL: root))
+        let original = WalletProfile(name: "Original", kpub: "kpub-one",
+                                     network: KaspaNetwork.testnet10.rawValue)
+        let other = WalletProfile(name: "Other", kpub: "kpub-two",
+                                  network: KaspaNetwork.testnet10.rawValue)
+        let document = try store.recoveryDocument(for: original)
+        do {
+            _ = try await store.restoreRecoveryDocument(document, for: other,
+                                                        engine: KasSignerEngine())
+            XCTFail("A vault recovery file must not load into another wallet.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("does not belong"))
+        }
+    }
+}
+
 @MainActor
 final class UTXOBadgePersistenceTests: XCTestCase {
     private func utxo(_ id: String) -> WalletUTXO {
@@ -394,7 +889,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testBroadcastTransactionPublishesImmediately() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let transactionID = String(repeating: "a", count: 64)
 
@@ -629,7 +1136,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testKnownWalletBroadcastPreservesInternalTransferAmountWhenConfirmed() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let internalAddress = "kaspa:internal"
         let transactionID = String(repeating: "b", count: 64)
@@ -725,7 +1244,19 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testAddedUTXOTransactionPublishesImmediately() {
-        let store = WalletStore()
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history", directoryHint: .isDirectory)
+        )
         let profileID = UUID()
         let transactionID = String(repeating: "b", count: 64)
 
@@ -1833,6 +2364,91 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(store.profiles, [profile])
         XCTAssertNotNil(defaults.object(forKey: "kassigner.walletProfiles.v1"))
+    }
+
+    @MainActor
+    func testAccountDeletionJournalContainsNoSeedAndResumesKeychainCleanup() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        var failSeedRemoval = true
+        let store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            removeTestnetSeed: { _ in
+                if failSeedRemoval {
+                    failSeedRemoval = false
+                    throw NSError(domain: "TestSeedRemoval", code: 1)
+                }
+            }
+        )
+        let profile = WalletProfile(
+            name: "Deletion journal test",
+            kpub: "kpub-deletion-journal-test",
+            network: KaspaNetwork.testnet10.rawValue
+        )
+        XCTAssertTrue(store.add(profile))
+
+        XCTAssertEqual(store.deleteAccount(profileID: profile.id), .seedCleanupPending)
+        XCTAssertTrue(store.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertTrue(storage.contains(fileName: "wallet-deletion-intents.json"))
+        let journalData = try Data(
+            contentsOf: root.appending(path: "wallet-deletion-intents.json")
+        )
+        let journalJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: journalData) as? [[String: Any]]
+        )
+        let journalKeys = Set(try XCTUnwrap(journalJSON.first).keys)
+        XCTAssertEqual(journalKeys, Set(["profileID", "network"]))
+
+        let relaunchedStore = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            removeTestnetSeed: { _ in }
+        )
+        XCTAssertTrue(relaunchedStore.resumePendingAccountDeletions())
+        XCTAssertFalse(storage.contains(fileName: "wallet-deletion-intents.json"))
+        XCTAssertFalse(relaunchedStore.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertNil(relaunchedStore.accountDeletionRecoveryMessage)
+    }
+
+    @MainActor
+    func testAccountDeletionRemovesSeedBeforeRetryingFailedProfileWrite() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "KasSignerTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var seedRemovalCount = 0
+        let store = WalletStore(
+            protectedStorage: ProtectedWalletStorage(directoryURL: root),
+            defaults: defaults,
+            removeTestnetSeed: { _ in seedRemovalCount += 1 }
+        )
+        let profile = WalletProfile(
+            name: "Failed deletion test",
+            kpub: "kpub-failed-deletion-test",
+            network: KaspaNetwork.testnet10.rawValue
+        )
+        XCTAssertTrue(store.add(profile))
+
+        let stateURL = root.appending(path: "wallet-state.json")
+        try FileManager.default.removeItem(at: stateURL)
+        try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
+
+        XCTAssertEqual(store.deleteAccount(profileID: profile.id), .profilePersistenceFailed)
+        XCTAssertTrue(store.profiles.contains(where: { $0.id == profile.id }))
+        XCTAssertEqual(seedRemovalCount, 1)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appending(path: "wallet-deletion-intents.json").path
+        ))
     }
 
     @MainActor

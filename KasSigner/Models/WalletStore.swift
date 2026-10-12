@@ -66,6 +66,19 @@ final class ProtectedWalletStorage {
         try? fileManager.removeItem(at: fileURL(fileName))
     }
 
+    @discardableResult
+    func removeAndVerify(fileName: String) -> Bool {
+        let url = fileURL(fileName)
+        do {
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+            return !fileManager.fileExists(atPath: url.path)
+        } catch {
+            return false
+        }
+    }
+
     func contains(fileName: String) -> Bool {
         fileManager.fileExists(atPath: fileURL(fileName).path)
     }
@@ -102,6 +115,18 @@ private struct WalletPersistentState: Codable {
     var changeIndices: [String: Int] = [:]
     var usedChangeAddresses: [String: [String]] = [:]
     var usedReceiveAddresses: [String: [String]] = [:]
+}
+
+private struct WalletDeletionIntent: Codable, Equatable {
+    let profileID: UUID
+    let network: String
+}
+
+enum WalletDeletionResult: Equatable {
+    case deleted
+    case profilePersistenceFailed
+    case seedCleanupPending
+    case journalPersistenceFailed
 }
 
 enum WalletTransactionDirection: String, Codable, Equatable {
@@ -593,6 +618,7 @@ private final class WalletTransactionCache {
 
 @MainActor
 final class WalletStore: ObservableObject {
+    @Published private(set) var activeNetwork: KaspaNetwork = .mainnet
     @Published private(set) var profiles: [WalletProfile] = []
     @Published private(set) var transactions: [WalletTransaction] = []
     @Published private(set) var pendingTransactions: [WalletTransaction] = []
@@ -602,11 +628,17 @@ final class WalletStore: ObservableObject {
         didSet {
             guard !isLoading else { return }
             guard selectedProfileID != pendingImportedProfile?.id else { return }
+            if let selectedProfileID,
+               profiles.contains(where: { $0.id == selectedProfileID && $0.network == activeNetwork.rawValue }) {
+                defaults.set(selectedProfileID.uuidString, forKey: selectionKey(for: activeNetwork))
+            }
             save()
         }
     }
 
     @Published private(set) var pendingImportedProfile: WalletProfile?
+    @Published private(set) var accountDeletionRecoveryMessage: String?
+    @Published private(set) var pendingAccountDeletionIDs: Set<UUID> = []
     private var selectionBeforePendingImport: UUID?
 
     private let storageKey = "kassigner.walletProfiles.v1"
@@ -620,29 +652,60 @@ final class WalletStore: ObservableObject {
     private let protectedStorage: ProtectedWalletStorage
     private let defaults: UserDefaults
     private let transactionCache: WalletTransactionCache
+    private let removeTestnetSeed: (UUID) throws -> Void
     private var persistentState = WalletPersistentState()
     private var isLoading = true
 
     init(
         protectedStorage: ProtectedWalletStorage = .shared,
         defaults: UserDefaults = .standard,
-        transactionCacheDirectoryURL: URL? = nil
+        transactionCacheDirectoryURL: URL? = nil,
+        removeTestnetSeed: @escaping (UUID) throws -> Void = { profileID in
+            try TestnetSeedStore.remove(for: profileID)
+            try TestnetSeedStore.verifyAbsent(for: profileID)
+        }
     ) {
         self.protectedStorage = protectedStorage
         self.defaults = defaults
         transactionCache = WalletTransactionCache(
             directoryURL: transactionCacheDirectoryURL
         )
+        self.removeTestnetSeed = removeTestnetSeed
         load()
+        do {
+            pendingAccountDeletionIDs = Set(try loadDeletionIntents().map(\.profileID))
+        } catch {
+            accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+        }
         isLoading = false
     }
 
     var selectedProfile: WalletProfile? {
-        if selectedProfileID == pendingImportedProfile?.id {
+        if selectedProfileID == pendingImportedProfile?.id,
+           pendingImportedProfile?.network == activeNetwork.rawValue {
             return pendingImportedProfile
         }
-        guard let selectedProfileID else { return profiles.first }
-        return profiles.first(where: { $0.id == selectedProfileID }) ?? profiles.first
+        guard let selectedProfileID else { return activeProfiles.first }
+        return activeProfiles.first(where: { $0.id == selectedProfileID }) ?? activeProfiles.first
+    }
+
+    var activeProfiles: [WalletProfile] {
+        profiles.filter {
+            $0.network == activeNetwork.rawValue
+                && !pendingAccountDeletionIDs.contains($0.id)
+        }
+    }
+
+    func activateNetwork(_ network: KaspaNetwork) {
+        guard activeNetwork != network else { return }
+        activeNetwork = network
+        let storedID = defaults.string(forKey: selectionKey(for: network)).flatMap(UUID.init(uuidString:))
+        selectedProfileID = activeProfiles.first(where: { $0.id == storedID })?.id
+            ?? activeProfiles.first?.id
+    }
+
+    private func selectionKey(for network: KaspaNetwork) -> String {
+        "kassigner.selectedWalletProfile.\(network.rawValue).v1"
     }
 
     func beginPendingImport(_ profile: WalletProfile) {
@@ -651,13 +714,23 @@ final class WalletStore: ObservableObject {
         selectedProfileID = profile.id
     }
 
-    func commitPendingImport(_ profile: WalletProfile) {
-        guard pendingImportedProfile?.id == profile.id else { return }
+    @discardableResult
+    func commitPendingImport(_ profile: WalletProfile) -> Bool {
+        guard pendingImportedProfile?.id == profile.id else { return false }
+        let previousProfiles = profiles
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         profiles.append(profile)
+        selectedProfileID = profile.id
+        guard save() else {
+            profiles = previousProfiles
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
         pendingImportedProfile = nil
         selectionBeforePendingImport = nil
-        selectedProfileID = profile.id
-        save()
+        return true
     }
 
     func discardPendingImport() {
@@ -667,10 +740,19 @@ final class WalletStore: ObservableObject {
         selectionBeforePendingImport = nil
     }
 
-    func add(_ profile: WalletProfile) {
+    @discardableResult
+    func add(_ profile: WalletProfile) -> Bool {
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         profiles.append(profile)
         selectedProfileID = profile.id
-        save()
+        guard save() else {
+            profiles.removeAll { $0.id == profile.id }
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
+        return true
     }
 
     @discardableResult
@@ -775,6 +857,19 @@ final class WalletStore: ObservableObject {
         }
 
         profiles[profileIndex].nextChangeIndex = index + 1
+        save()
+        return true
+    }
+
+    @discardableResult
+    func reserveReceiveAddress(profileID: UUID, index: Int) -> Bool {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+              index == profiles[profileIndex].nextReceiveIndex
+        else {
+            return false
+        }
+
+        profiles[profileIndex].nextReceiveIndex = index + 1
         save()
         return true
     }
@@ -1042,7 +1137,11 @@ final class WalletStore: ObservableObject {
         transactionRevision &+= 1
     }
 
-    func remove(at offsets: IndexSet) {
+    @discardableResult
+    func remove(at offsets: IndexSet) -> Bool {
+        let previousProfiles = profiles
+        let previousSelectedID = selectedProfileID
+        let previousState = persistentState
         let removedProfileIDs = offsets.compactMap { index in
             profiles.indices.contains(index) ? profiles[index].id : nil
         }
@@ -1053,20 +1152,173 @@ final class WalletStore: ObservableObject {
             persistentState.changeIndices.removeValue(forKey: key)
             persistentState.usedChangeAddresses.removeValue(forKey: key)
             persistentState.usedReceiveAddresses.removeValue(forKey: key)
-            transactionCache.remove(profileID: profileID)
-            TransactionGraphCache.shared.remove(profileID: profileID)
         }
-
-        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
-
-        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
-        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
 
         profiles.remove(atOffsets: offsets)
         if let selectedProfileID, !profiles.contains(where: { $0.id == selectedProfileID }) {
             self.selectedProfileID = profiles.first?.id
         }
-        save()
+        guard persistProtectedState() else {
+            profiles = previousProfiles
+            selectedProfileID = previousSelectedID
+            persistentState = previousState
+            return false
+        }
+        for profileID in removedProfileIDs {
+            transactionCache.remove(profileID: profileID)
+            TransactionGraphCache.shared.remove(profileID: profileID)
+        }
+        sendSessions.removeAll { removedProfileIDs.contains($0.profileID) }
+        transactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        pendingTransactions.removeAll { removedProfileIDs.contains($0.profileID) }
+        return true
+    }
+
+    @discardableResult
+    func deleteAccount(
+        profileID: UUID,
+        cleanup: (UUID) -> Void = { _ in }
+    ) -> WalletDeletionResult {
+        guard let profile = profiles.first(where: { $0.id == profileID }) else {
+            return .deleted
+        }
+        var intents: [WalletDeletionIntent]
+        do {
+            intents = try loadDeletionIntents()
+        } catch {
+            accountDeletionRecoveryMessage = "Account deletion could not start because its recovery record could not be read. No account data was changed."
+            return .journalPersistenceFailed
+        }
+        if let existingIntent = intents.first(where: { $0.profileID == profileID }) {
+            guard existingIntent.network == profile.network else {
+                accountDeletionRecoveryMessage = "The account deletion record does not match this account. No further account data was changed."
+                return .journalPersistenceFailed
+            }
+            return finishAccountDeletion(
+                existingIntent,
+                intents: intents,
+                cleanup: cleanup
+            )
+        }
+
+        let previousIntents = intents
+        let intent = WalletDeletionIntent(profileID: profileID, network: profile.network)
+        intents.append(intent)
+        guard saveDeletionIntents(intents) else {
+            // Preserve earlier pending deletions. A failed read-after-write
+            // can still leave the new intent on disk, so restore the prior
+            // journal and verify that restoration before changing the account.
+            if !saveDeletionIntents(previousIntents) {
+                if let persistedIntents = try? loadDeletionIntents() {
+                    pendingAccountDeletionIDs = Set(persistedIntents.map(\.profileID))
+                }
+                accountDeletionRecoveryMessage = "The deletion record could not be verified or cleared. Account deletion may resume when the app is reopened."
+            } else {
+                accountDeletionRecoveryMessage = "The deletion record could not be saved. The account and its recovery words were left unchanged."
+            }
+            return .journalPersistenceFailed
+        }
+        return finishAccountDeletion(intent, intents: intents, cleanup: cleanup)
+    }
+
+    @discardableResult
+    func resumePendingAccountDeletions(
+        cleanup: (UUID) -> Void = { _ in }
+    ) -> Bool {
+        let intents: [WalletDeletionIntent]
+        do {
+            intents = try loadDeletionIntents()
+        } catch {
+            accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+            return false
+        }
+        guard !intents.isEmpty else {
+            pendingAccountDeletionIDs = []
+            accountDeletionRecoveryMessage = nil
+            return true
+        }
+        for intent in intents {
+            let currentIntents: [WalletDeletionIntent]
+            do {
+                currentIntents = try loadDeletionIntents()
+            } catch {
+                accountDeletionRecoveryMessage = "An account deletion recovery record could not be read. Account cleanup is paused; contact support before importing or deleting this account again."
+                return false
+            }
+            guard finishAccountDeletion(intent, intents: currentIntents, cleanup: cleanup) == .deleted else {
+                return false
+            }
+        }
+        accountDeletionRecoveryMessage = nil
+        return true
+    }
+
+    private static let deletionJournalFileName = "wallet-deletion-intents.json"
+
+    private func loadDeletionIntents() throws -> [WalletDeletionIntent] {
+        let intents = try protectedStorage.loadIfPresent(
+            [WalletDeletionIntent].self,
+            fileName: Self.deletionJournalFileName
+        ) ?? []
+        guard Set(intents.map(\.profileID)).count == intents.count,
+              intents.allSatisfy({
+                  $0.network == KaspaNetwork.mainnet.rawValue
+                      || $0.network == KaspaNetwork.testnet10.rawValue
+              }) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        return intents
+    }
+
+    private func saveDeletionIntents(_ intents: [WalletDeletionIntent]) -> Bool {
+        let didSave: Bool
+        if intents.isEmpty {
+            didSave = protectedStorage.removeAndVerify(fileName: Self.deletionJournalFileName)
+        } else {
+            didSave = protectedStorage.save(intents, fileName: Self.deletionJournalFileName)
+        }
+        if didSave {
+            pendingAccountDeletionIDs = Set(intents.map(\.profileID))
+        }
+        return didSave
+    }
+
+    private func finishAccountDeletion(
+        _ intent: WalletDeletionIntent,
+        intents: [WalletDeletionIntent],
+        cleanup: (UUID) -> Void
+    ) -> WalletDeletionResult {
+        if let profile = profiles.first(where: { $0.id == intent.profileID }),
+           profile.network != intent.network {
+            accountDeletionRecoveryMessage = "The account deletion record does not match this account. No further account data was changed."
+            return .journalPersistenceFailed
+        }
+        // Remove and verify the signer secret before committing profile
+        // deletion. The durable intent lets a relaunch finish the profile
+        // removal if the app stops between these steps.
+        if intent.network == KaspaNetwork.testnet10.rawValue {
+            do {
+                try removeTestnetSeed(intent.profileID)
+            } catch {
+                accountDeletionRecoveryMessage = "The account is hidden from active wallets because its Testnet recovery words could not yet be removed from Keychain. Deletion will retry when the app is reopened."
+                return .seedCleanupPending
+            }
+        }
+
+        if let index = profiles.firstIndex(where: { $0.id == intent.profileID }),
+           !remove(at: IndexSet(integer: index)) {
+            accountDeletionRecoveryMessage = "The Testnet recovery words were removed, but the account profile could not yet be saved as deleted. It is hidden from active wallets while deletion retries."
+            return .profilePersistenceFailed
+        }
+
+        cleanup(intent.profileID)
+        let remaining = intents.filter { $0.profileID != intent.profileID }
+        guard saveDeletionIntents(remaining) else {
+            accountDeletionRecoveryMessage = "Account data was removed, but its deletion record could not be cleared. Cleanup will be verified again when the app is reopened."
+            return .journalPersistenceFailed
+        }
+        accountDeletionRecoveryMessage = nil
+        return .deleted
     }
 
     private func load() {
@@ -1155,7 +1407,9 @@ final class WalletStore: ObservableObject {
         persistentState.profiles = profiles
         persistentState.selectedProfileID = selectedProfileID
         let didSaveWalletState = persistProtectedState()
-        _ = persistTransactionCache()
+        if didSaveWalletState {
+            _ = persistTransactionCache()
+        }
         return didSaveWalletState
     }
 

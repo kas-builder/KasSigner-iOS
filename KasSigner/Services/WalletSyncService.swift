@@ -181,9 +181,11 @@ private enum TransactionHistoryError: LocalizedError {
 struct TransactionHistoryClient: Sendable {
     private let baseURL = URL(string: "https://api.kaspa.org")!
 
-    func virtualBlueScore() async throws -> UInt64 {
+    func virtualBlueScore(network: KaspaNetwork = .mainnet) async throws -> UInt64 {
+        let scoreBaseURL = network == .testnet10
+            ? URL(string: "https://api-tn10.kaspa.org")! : baseURL
         let request = URLRequest(
-            url: baseURL.appending(path: "info/virtual-chain-blue-score")
+            url: scoreBaseURL.appending(path: "info/virtual-chain-blue-score")
         )
         let (data, _) = try await data(for: request)
         return try JSONDecoder().decode(
@@ -305,12 +307,20 @@ struct TransactionHistoryClient: Sendable {
         id: String,
         for profile: WalletProfile
     ) async throws -> WalletTransaction? {
-        guard profile.network.lowercased() == "mainnet" else { return nil }
+        let transactionBaseURL: URL
+        switch profile.network.lowercased() {
+        case KaspaNetwork.mainnet.rawValue:
+            transactionBaseURL = baseURL
+        case KaspaNetwork.testnet10.rawValue:
+            transactionBaseURL = URL(string: "https://api-tn10.kaspa.org")!
+        default:
+            return nil
+        }
         let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedID.isEmpty else { return nil }
 
         var components = URLComponents(
-            url: baseURL.appending(path: "transactions").appending(path: normalizedID),
+            url: transactionBaseURL.appending(path: "transactions").appending(path: normalizedID),
             resolvingAgainstBaseURL: false
         )!
         components.queryItems = [
@@ -938,6 +948,7 @@ final class TransactionGraphCache {
 @MainActor
 final class WalletSyncService: ObservableObject {
     static let cachedVirtualBlueScoreKey = "kassigner.mainnetVirtualBlueScore.v1"
+    static let cachedTestnetVirtualBlueScoreKey = "kassigner.testnet10VirtualBlueScore.v1"
 
     enum AddressDiscoveryPolicy {
         case lightweight
@@ -1121,6 +1132,7 @@ final class WalletSyncService: ObservableObject {
     private var virtualBlueScoreRefreshInFlight = false
     private var lastVirtualBlueScoreAttempt: Date?
     private var latestObservedVirtualBlueScore: UInt64?
+    private var activeNetwork: KaspaNetwork = .mainnet
     private var lastVirtualBlueScorePersistenceAt: Date?
     private let transactionHistoryClient = TransactionHistoryClient()
     private let defaults: UserDefaults
@@ -1129,10 +1141,10 @@ final class WalletSyncService: ObservableObject {
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "org.kassigner.KasSigner.network-monitor")
 
-    func preload(profile: WalletProfile) {
-        guard activeProfileID != profile.id else { return }
+    func preload(profile: WalletProfile?) {
+        guard activeProfileID != profile?.id || (profile == nil && snapshot != nil) else { return }
 
-        if initialDiscoveryCheckpoint?.profile.id != profile.id {
+        if initialDiscoveryCheckpoint?.profile.id != profile?.id {
             initialDiscoveryCheckpoint = nil
         }
         activeProfileGeneration &+= 1
@@ -1153,7 +1165,12 @@ final class WalletSyncService: ObservableObject {
         transactionHistoryProfilesInFlight.removeAll()
         isRefreshingTransactionHistory = false
         transactionHistoryProgress = nil
-        activeProfileID = profile.id
+        activeProfileID = profile?.id
+        activeNetwork = profile?.network == KaspaNetwork.testnet10.rawValue ? .testnet10 : .mainnet
+        let scoreCacheKey = activeNetwork == .testnet10
+            ? Self.cachedTestnetVirtualBlueScoreKey : Self.cachedVirtualBlueScoreKey
+        virtualBlueScore = defaults.string(forKey: scoreCacheKey).flatMap(UInt64.init)
+        latestObservedVirtualBlueScore = nil
         lastRefreshAttempt = nil
         transactionHistoryError = nil
         transactionHistoryUpdatedAt = nil
@@ -1165,7 +1182,7 @@ final class WalletSyncService: ObservableObject {
         lastVirtualBlueScoreAttempt = nil
         state = isNetworkAvailable ? .idle : .failed("No internet connection.")
 
-        snapshot = WalletSnapshotCache.shared.load(profileID: profile.id)
+        snapshot = profile.flatMap { WalletSnapshotCache.shared.load(profileID: $0.id) }
     }
 
     func clearDiscoveryNotice() {
@@ -1209,7 +1226,7 @@ final class WalletSyncService: ObservableObject {
             historicalDiscoveryError = "Historical address coverage is available for mainnet accounts only."
             return
         }
-        guard preferences.nodeMode == .automatic else {
+        guard preferences.activeNodeMode == .automatic else {
             historicalDiscoveryError = "Historical address coverage needs Automatic Nodes. Current UTXOs can still refresh."
             return
         }
@@ -1310,8 +1327,13 @@ final class WalletSyncService: ObservableObject {
         lastVirtualBlueScoreAttempt = Date()
         virtualBlueScoreRefreshInFlight = true
 
+        let requestedNetwork = activeNetwork
         do {
-            let fetchedScore = try await transactionHistoryClient.virtualBlueScore()
+            let fetchedScore = try await transactionHistoryClient.virtualBlueScore(network: requestedNetwork)
+            guard activeNetwork == requestedNetwork else {
+                virtualBlueScoreRefreshInFlight = false
+                return
+            }
             rememberVirtualBlueScore(fetchedScore)
         } catch {
             // Keep the last node-driven score when a transient request fails.
@@ -1323,7 +1345,9 @@ final class WalletSyncService: ObservableObject {
     func rememberVirtualBlueScore(_ score: UInt64) {
         guard score > (virtualBlueScore ?? 0) else { return }
         virtualBlueScore = score
-        defaults.set(String(score), forKey: Self.cachedVirtualBlueScoreKey)
+        let cacheKey = activeNetwork == .testnet10
+            ? Self.cachedTestnetVirtualBlueScoreKey : Self.cachedVirtualBlueScoreKey
+        defaults.set(String(score), forKey: cacheKey)
     }
 
     func observeVirtualBlueScore(_ score: UInt64) {
@@ -1419,8 +1443,8 @@ final class WalletSyncService: ObservableObject {
             preferences: preferences,
             force: force,
             minimumInterval: minimumInterval,
-            includeTransactionHistory: includeTransactionHistory,
-            forceTransactionHistory: forceTransactionHistory,
+            includeTransactionHistory: includeTransactionHistory && profile.network == "mainnet",
+            forceTransactionHistory: forceTransactionHistory && profile.network == "mainnet",
             keepTransactionProgressThroughReconciliation: keepTransactionProgressThroughReconciliation,
             addressDiscoveryPolicy: addressDiscoveryPolicy,
             onWalletReady: onWalletReady.map { [$0] } ?? []
@@ -1498,6 +1522,34 @@ final class WalletSyncService: ObservableObject {
         await task.value
     }
 
+    func refreshAfterBroadcast(
+        profileID: UUID,
+        walletStore: WalletStore,
+        protectedVaultStore: ProtectedVaultStore,
+        engine: KasSignerEngine,
+        preferences: AppPreferences
+    ) async {
+        guard let profile = walletStore.profiles.first(where: { $0.id == profileID }),
+              walletStore.selectedProfileID == profileID else { return }
+        await refresh(
+            profile: profile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true,
+            includeTransactionHistory: false
+        )
+        await reconcilePendingTransactions(
+            profile: walletStore.profiles.first(where: { $0.id == profileID }) ?? profile,
+            walletStore: walletStore
+        )
+        await protectedVaultStore.refreshAllOnChain(
+            profileID: profileID,
+            engine: engine,
+            preferences: preferences
+        )
+    }
+
     private func performRefresh(
         profile: WalletProfile,
         walletStore: WalletStore,
@@ -1570,7 +1622,7 @@ final class WalletSyncService: ObservableObject {
             let shouldRunComprehensiveDiscovery = beganWithInitialDiscovery
                 || addressDiscoveryPolicy == .comprehensive
 
-            if beganWithInitialDiscovery && preferences.nodeMode == .custom {
+            if beganWithInitialDiscovery && preferences.activeNodeMode == .custom {
                 state = .failed("Complete discovery requires Automatic Nodes.")
                 initialDiscoveryProgress = nil
                 initialDiscoveryError = "Complete historical discovery needs the public address indexer. Cancel this import, select Automatic Nodes in Settings, then import again."
@@ -1578,7 +1630,7 @@ final class WalletSyncService: ObservableObject {
             }
 
             if shouldRunComprehensiveDiscovery,
-               preferences.nodeMode == .automatic,
+               preferences.activeNodeMode == .automatic,
                resumableCheckpoint == nil {
                 do {
                     profileToSync = try await discoverWalletHistory(
@@ -1637,9 +1689,17 @@ final class WalletSyncService: ObservableObject {
             if beganWithInitialDiscovery {
                 completedProfile.requiresInitialDiscovery = false
                 if walletStore.pendingImportedProfile?.id == completedProfile.id {
-                    walletStore.commitPendingImport(completedProfile)
+                    guard walletStore.commitPendingImport(completedProfile) else {
+                        throw KasSignerEngine.EngineError.javascript(
+                            "The imported account could not be saved. Check device storage and retry."
+                        )
+                    }
                 } else {
-                    walletStore.update(completedProfile)
+                    guard walletStore.update(completedProfile) else {
+                        throw KasSignerEngine.EngineError.javascript(
+                            "The updated account could not be saved. Check device storage and retry."
+                        )
+                    }
                 }
                 initialDiscoveryProgress = DiscoveryProgress(
                     title: "Wallet ready",
@@ -1649,7 +1709,7 @@ final class WalletSyncService: ObservableObject {
             }
 
             let shouldRefreshTransactionHistory = includeTransactionHistory
-                && (!beganWithInitialDiscovery || preferences.nodeMode == .automatic)
+                && (!beganWithInitialDiscovery || preferences.activeNodeMode == .automatic)
             if shouldRefreshTransactionHistory,
                keepTransactionProgressThroughReconciliation {
                 prepareTransactionHistoryProgress(profileID: profile.id)
@@ -2380,7 +2440,10 @@ final class WalletSyncService: ObservableObject {
         engine: KasSignerEngine,
         preferences: AppPreferences
     ) async throws -> (WalletSyncPayload, WalletProfile) {
-        let freshAddressBuffer = 50
+        // Testnet hot wallets only need enough prederived change addresses for
+        // the largest send type. Avoid expanding every account to the mainnet
+        // discovery buffer before its first network refresh can complete.
+        let freshAddressBuffer = profile.network == KaspaNetwork.testnet10.rawValue ? 8 : 50
         let maximumAddressesPerChain = 512
         var current = profile
 
@@ -2491,8 +2554,8 @@ final class WalletSyncService: ObservableObject {
             return "No internet connection."
         }
 
-        if preferences.nodeMode == .custom {
-            if preferences.customNodeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if preferences.activeNodeMode == .custom {
+            if preferences.activeCustomNodeURL.isEmpty {
                 return "Enter a custom Kaspa node URL in Settings."
             }
             if message.contains("wss://") || message.contains("ws://") {

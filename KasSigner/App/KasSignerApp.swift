@@ -3,6 +3,7 @@ import SwiftData
 
 @main
 struct KasSignerApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var walletStore = WalletStore()
     @StateObject private var engine = KasSignerEngine()
     @StateObject private var preferences = AppPreferences()
@@ -12,6 +13,7 @@ struct KasSignerApp: App {
     @StateObject private var priceService = PriceService.shared
     @StateObject private var appLockService = AppLockService()
     @StateObject private var copyFeedbackCenter = CopyFeedbackCenter()
+    @StateObject private var protectedVaultStore = ProtectedVaultStore()
 
     var body: some Scene {
         WindowGroup {
@@ -39,10 +41,30 @@ struct KasSignerApp: App {
             .environmentObject(priceService)
             .environmentObject(appLockService)
             .environmentObject(copyFeedbackCenter)
+            .environmentObject(protectedVaultStore)
             .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
             .task {
+                _ = walletStore.resumePendingAccountDeletions { profileID in
+                    WalletSnapshotCache.shared.remove(profileID: profileID)
+                    coinControlStore.removeData(profileID: profileID)
+                }
+                for profile in walletStore.profiles {
+                    _ = protectedVaultStore.registerWallet(profile)
+                }
                 await priceService.prepareHistoricalPrices()
                 await priceService.refreshHistoricalPricesIfNeeded()
+            }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                _ = walletStore.resumePendingAccountDeletions { profileID in
+                    WalletSnapshotCache.shared.remove(profileID: profileID)
+                    coinControlStore.removeData(profileID: profileID)
+                }
+            }
+            .onChange(of: walletStore.profiles) { _, profiles in
+                for profile in profiles {
+                    _ = protectedVaultStore.registerWallet(profile)
+                }
             }
         }
     }

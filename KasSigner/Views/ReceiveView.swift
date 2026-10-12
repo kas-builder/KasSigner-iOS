@@ -41,11 +41,16 @@ actor AddressUsageChecker {
             }
         }
 
-        guard address.hasPrefix("kaspa:") else {
+        let apiBase: String
+        if address.hasPrefix("kaspa:") {
+            apiBase = "https://api.kaspa.org"
+        } else if address.hasPrefix("kaspatest:") {
+            apiBase = "https://api-tn10.kaspa.org"
+        } else {
             throw AddressUsageError.invalidAddress
         }
 
-        let url = URL(string: "https://api.kaspa.org")!
+        let url = URL(string: apiBase)!
             .appending(path: "addresses")
             .appending(path: address)
             .appending(path: "transactions-count")
@@ -339,6 +344,7 @@ struct ReceiveView: View {
         .sheet(isPresented: $showingAddressPicker) {
             AddressNavigationPickerView(
                 profileID: profile.id,
+                showsAddressStatus: preferences.addressStatusDisplayMode.isEnabled,
                 chain: addressChain,
                 addresses: currentAddresses,
                 selectedIndex: $selectedAddressIndex
@@ -493,11 +499,12 @@ struct ReceiveView: View {
     }
 
     private var balanceText: String {
-        guard let balance = syncService.snapshot?.balance.totalKas else { return "— KAS" }
+        let symbol = preferences.network.currencySymbol
+        guard let balance = syncService.snapshot?.balance.totalKas else { return "— \(symbol)" }
         return KasBalanceFormatter.string(
             from: balance,
             decimalPlaces: preferences.kasBalanceDecimalPlaces
-        ) + " KAS"
+        ) + " \(symbol)"
     }
 
     private var qrImage: UIImage? {
@@ -589,8 +596,20 @@ struct ReceiveView: View {
         }
 
         do {
-            let historicallyActive = try await TransactionHistoryClient()
-                .activeAddresses(in: addresses)
+            let historicallyActive: Set<String>
+            if preferences.network == .testnet10 {
+                var active = Set<String>()
+                for address in addresses {
+                    let status = try await AddressUsageChecker.shared.status(
+                        for: address, forceRefresh: forceRefresh
+                    )
+                    if status == .used { active.insert(address.lowercased()) }
+                }
+                historicallyActive = active
+            } else {
+                historicallyActive = try await TransactionHistoryClient()
+                    .activeAddresses(in: addresses)
+            }
             try Task.checkCancellation()
             guard !addressWasManuallySelected else { return }
 
@@ -709,6 +728,7 @@ private struct AddressNavigationPickerView: View {
     @EnvironmentObject private var walletStore: WalletStore
 
     let profileID: UUID
+    let showsAddressStatus: Bool
     let chain: AddressChain
     let addresses: [String]
     @Binding var selectedIndex: Int
@@ -726,6 +746,7 @@ private struct AddressNavigationPickerView: View {
                         index: index,
                         address: address,
                         isSelected: index == selectedIndex,
+                        showsAddressStatus: showsAddressStatus,
                         status: status(for: address)
                     ) {
                         select(index)
@@ -746,9 +767,20 @@ private struct AddressNavigationPickerView: View {
                 }
             }
             .task(id: addresses.count) {
+                guard showsAddressStatus else { return }
                 do {
-                    historicallyActive = try await TransactionHistoryClient()
-                        .activeAddresses(in: addresses)
+                    if addresses.first?.hasPrefix("kaspatest:") == true {
+                        var active = Set<String>()
+                        for address in addresses {
+                            if try await AddressUsageChecker.shared.status(for: address) == .used {
+                                active.insert(address.lowercased())
+                            }
+                        }
+                        historicallyActive = active
+                    } else {
+                        historicallyActive = try await TransactionHistoryClient()
+                            .activeAddresses(in: addresses)
+                    }
                     activityLookupFailed = false
                 } catch is CancellationError {
                     return
@@ -775,6 +807,7 @@ private struct AddressNavigationSelectionRow: View {
     let index: Int
     let address: String
     let isSelected: Bool
+    let showsAddressStatus: Bool
     let status: AddressUsageStatus
     let select: () -> Void
 
@@ -793,7 +826,9 @@ private struct AddressNavigationSelectionRow: View {
                         .truncationMode(.middle)
                 }
                 Spacer()
-                statusView
+                if showsAddressStatus {
+                    statusView
+                }
             }
             .padding(.horizontal, 13)
             .padding(.vertical, 12)

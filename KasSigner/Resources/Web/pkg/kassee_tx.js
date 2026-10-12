@@ -2450,6 +2450,149 @@ export function create_oracle_mb_publish(wallet_json, oracle_address, redeem_scr
 }
 
 /**
+ * Build the one-input/one-output approved-destination spend for a funded
+ * Protected Vault. The destination output remains authorized by the input's
+ * covenant id, as required by OP_AUTH_OUTPUT_* in the redeem script.
+ * @param {string} utxo_json
+ * @param {string} redeem_script_hex
+ * @param {string} approved_address
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_protected_vault_approved_spend_pskb(utxo_json, redeem_script_hex, approved_address, fee_sompi) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(redeem_script_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(approved_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.create_protected_vault_approved_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, fee_sompi);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Build an unsigned Protected Vault genesis PSKB from an exact wallet-input set.
+ * Output 0 is covenant-tagged and output 1, when present, is ordinary wallet change.
+ * @param {string} wallet_json
+ * @param {string} vault_address
+ * @param {bigint} amount_sompi
+ * @param {bigint} fee_sompi
+ * @param {string} utxos_json
+ * @returns {Promise<string>}
+ */
+export function create_protected_vault_funding_pskb_with_utxos(wallet_json, vault_address, amount_sompi, fee_sompi, utxos_json) {
+    const ptr0 = passStringToWasm0(wallet_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(vault_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ptr2 = passStringToWasm0(utxos_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len2 = WASM_VECTOR_LEN;
+    const ret = wasm.create_protected_vault_funding_pskb_with_utxos(ptr0, len0, ptr1, len1, amount_sompi, fee_sompi, ptr2, len2);
+    return ret;
+}
+
+/**
+ * Spend a destination-committed pending output after CSV, or cancel it with
+ * the independent recovery key immediately.
+ * @param {string} utxo_json
+ * @param {string} owner_pubkey_hex
+ * @param {string} recovery_address
+ * @param {string} committed_destination_address
+ * @param {bigint} delay_daa
+ * @param {string} path
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_protected_vault_v2_pending_spend_pskb(utxo_json, owner_pubkey_hex, recovery_address, committed_destination_address, delay_daa, path, fee_sompi) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(committed_destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.create_protected_vault_v2_pending_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, delay_daa, ptr4, len4, fee_sompi);
+        var ptr6 = ret[0];
+        var len6 = ret[1];
+        if (ret[3]) {
+            ptr6 = 0; len6 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred7_0 = ptr6;
+        deferred7_1 = len6;
+        return getStringFromWasm0(ptr6, len6);
+    } finally {
+        wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
+ * Construct one Testnet-10 V2 vault transition. Rebuild the committed script
+ * from the complete rule set before accepting the UTXO; the caller cannot
+ * substitute a redeem script or an output that bypasses those rules.
+ * @param {string} utxo_json
+ * @param {string} owner_pubkey_hex
+ * @param {string} approved_addresses_json
+ * @param {string} recovery_address
+ * @param {string} destination_address
+ * @param {bigint} delay_daa
+ * @param {boolean} emergency_anytime
+ * @param {string} path
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_protected_vault_v2_spend_pskb(utxo_json, owner_pubkey_hex, approved_addresses_json, recovery_address, destination_address, delay_daa, emergency_anytime, path, fee_sompi) {
+    let deferred8_0;
+    let deferred8_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ret = wasm.create_protected_vault_v2_spend_pskb(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, delay_daa, emergency_anytime, ptr5, len5, fee_sompi);
+        var ptr7 = ret[0];
+        var len7 = ret[1];
+        if (ret[3]) {
+            ptr7 = 0; len7 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred8_0 = ptr7;
+        deferred8_1 = len7;
+        return getStringFromWasm0(ptr7, len7);
+    } finally {
+        wasm.__wbindgen_free(deferred8_0, deferred8_1, 1);
+    }
+}
+
+/**
  * Build unsigned KSPT from wallet, destination, amount, fee → return hex
  * @param {string} wallet_json
  * @param {string} dest_address
@@ -2690,6 +2833,145 @@ export function derive_covenant_payload_key(kpub_str) {
 }
 
 /**
+ * @param {string} owner_pubkey_hex
+ * @param {string} destination_address
+ * @param {string} recovery_address
+ * @param {bigint} delay_daa
+ * @returns {string}
+ */
+export function derive_protected_vault_pending_with_recovery(owner_pubkey_hex, destination_address, recovery_address, delay_daa) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_pending_with_recovery(ptr0, len0, ptr1, len1, ptr2, len2, delay_daa);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Derive the deterministic Protected Vault V1 descriptor for an M5-signable
+ * receive key at account path /0/index. This is derivation only: no transaction
+ * is created, signed, or broadcast.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} approved_address
+ * @param {bigint} delay_daa
+ * @returns {string}
+ */
+export function derive_protected_vault_v1(kpub_str, receive_index, approved_address, delay_daa) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(approved_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_v1(ptr0, len0, receive_index, ptr1, len1, delay_daa);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Derive a vault whose immediate path accepts any one of the committed
+ * mainnet P2PK destinations. The address list is fixed in the redeem script.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} approved_addresses_json
+ * @param {bigint} delay_daa
+ * @param {string} network
+ * @returns {string}
+ */
+export function derive_protected_vault_with_destinations(kpub_str, receive_index, approved_addresses_json, delay_daa, network) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_with_destinations(ptr0, len0, receive_index, ptr1, len1, delay_daa, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Derive the recovery-aware V2 vault. All destination scripts, the recovery
+ * key, and the selected recovery mode are committed into the P2SH address.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} approved_addresses_json
+ * @param {string} recovery_address
+ * @param {bigint} delay_daa
+ * @param {boolean} emergency_anytime
+ * @param {string} network
+ * @returns {string}
+ */
+export function derive_protected_vault_with_recovery(kpub_str, receive_index, approved_addresses_json, recovery_address, delay_daa, emergency_anytime, network) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(approved_addresses_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(recovery_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_protected_vault_with_recovery(ptr0, len0, receive_index, ptr1, len1, ptr2, len2, delay_daa, emergency_anytime, ptr3, len3);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
  * Encode a 32-byte x-only pubkey (hex) as a Kaspa P2PK address
  * Optional network parameter (defaults to mainnet)
  * @param {string} pubkey_hex
@@ -2914,6 +3196,28 @@ export function generate_qr_svg_text(text) {
         return getStringFromWasm0(ptr2, len2);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * @returns {string}
+ */
+export function generate_testnet10_wallet() {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.generate_testnet10_wallet();
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
 }
 
@@ -3385,10 +3689,65 @@ export function pskt_verify_and_merge_signed_kspt(signed_kspt_hex, original_rela
 }
 
 /**
+ * @param {string} wire_hex
+ * @returns {boolean}
+ */
+export function pskt_verify_protected_vault_approved_signature(wire_hex) {
+    const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.pskt_verify_protected_vault_approved_signature(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
+ * Verify every standard P2PK input signature in a signed PSKB against the
+ * exact Kaspa SIGHASH_ALL digest committed by that transaction.
+ * @param {string} wire_hex
+ * @returns {boolean}
+ */
+export function pskt_verify_standard_signatures(wire_hex) {
+    const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.pskt_verify_standard_signatures(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] !== 0;
+}
+
+/**
  * Reset multi-frame decoder state
  */
 export function reset_qr_decoder() {
     wasm.reset_qr_decoder();
+}
+
+/**
+ * @param {string} mnemonic
+ * @returns {string}
+ */
+export function restore_testnet10_wallet(mnemonic) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.restore_testnet10_wallet(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
 }
 
 /**
@@ -3529,6 +3888,64 @@ export function sha256_hash(input_hex) {
         return getStringFromWasm0(ptr2, len2);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * @param {string} wire_hex
+ * @param {string} mnemonic
+ * @returns {string}
+ */
+export function sign_testnet10_funding_pskb(wire_hex, mnemonic) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sign_testnet10_funding_pskb(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * @param {string} wire_hex
+ * @param {string} mnemonic
+ * @param {number} chain
+ * @param {number} index
+ * @returns {string}
+ */
+export function sign_testnet10_vault_v2_pskb(wire_hex, mnemonic, chain, index) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sign_testnet10_vault_v2_pskb(ptr0, len0, ptr1, len1, chain, index);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
 }
 
@@ -4359,22 +4776,22 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 137, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 240, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 499, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 512, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_a36ba44a4de80ab___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 137, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 240, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 136, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 239, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_);
             return ret;
         },

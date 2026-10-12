@@ -272,6 +272,9 @@ pub struct OutputSummary {
     /// Decoded Kaspa address when the script is a recognized P2PK/P2SH
     /// form — saves the JS side from reimplementing address encoding.
     pub address: Option<String>,
+    /// Consensus covenant binding carried by this output, when present.
+    pub covenant_authorizing_input: Option<u16>,
+    pub covenant_id: Option<String>,
 }
 
 /// Everything the UI needs to render a PSKB review screen.
@@ -327,6 +330,610 @@ pub fn parse_summary(wire_hex: &str, network_prefix: &str) -> Result<PsktSummary
     };
 
     parse_pskt_object(&pskt_obj, format, network_prefix)
+}
+
+/// Cryptographically verify every standard P2PK signature in a PSKB.
+/// This is intentionally narrow: Protected Vault initial funding has ordinary
+/// wallet P2PK inputs and no covenant-bound outputs. Anything else fails closed.
+pub fn verify_standard_p2pk_signatures(wire_hex: &str) -> Result<(), String> {
+    verify_pskb_signatures(wire_hex, false)
+}
+
+/// Sign a standard funding PSKB using a Testnet-10 Gen1 account. Only wallet-owned
+/// P2PK inputs with explicit receive/change derivation paths are accepted.
+pub fn sign_testnet10_standard_pskb(wire_hex: &str, mnemonic: &str) -> Result<String, String> {
+    if detect_format_hex(wire_hex) != PsktFormat::Pskb {
+        return Err("Expected a single-transaction PSKB".into());
+    }
+    let wire = hex::decode(wire_hex).map_err(|e| format!("outer hex: {e}"))?;
+    let json_bytes = hex::decode(&wire[4..]).map_err(|e| format!("inner hex: {e}"))?;
+    let mut root: Value =
+        serde_json::from_slice(&json_bytes).map_err(|e| format!("JSON parse: {e}"))?;
+    let pskt = root
+        .as_array_mut()
+        .and_then(|a| (a.len() == 1).then(|| &mut a[0]))
+        .ok_or("PSKB must contain exactly one transaction")?;
+    let global = pskt.get("global").ok_or("Missing transaction global")?;
+    let tx_version = global
+        .get("txVersion")
+        .and_then(Value::as_u64)
+        .ok_or("Missing transaction version")?;
+    if tx_version > 1 {
+        return Err("Unsupported Testnet funding transaction version".into());
+    }
+    let inputs = pskt
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or("Missing inputs")?;
+    let outputs = pskt
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or("Missing outputs")?;
+    if inputs.is_empty() || outputs.is_empty() {
+        return Err("Transaction must have inputs and outputs".into());
+    }
+
+    let mut outpoints = Vec::with_capacity(inputs.len());
+    let mut sequences = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let op = input.get("previousOutpoint").ok_or("Missing outpoint")?;
+        let txid: [u8; 32] = hex::decode(
+            op.get("transactionId")
+                .and_then(Value::as_str)
+                .ok_or("Missing txid")?,
+        )
+        .map_err(|e| format!("Invalid txid: {e}"))?
+        .try_into()
+        .map_err(|_| "Transaction id must be 32 bytes")?;
+        let index = op
+            .get("index")
+            .and_then(Value::as_u64)
+            .ok_or("Missing outpoint index")? as u32;
+        let sequence = input.get("sequence").and_then(Value::as_u64).unwrap_or(0);
+        let sigops = input.get("sigOpCount").and_then(Value::as_u64).unwrap_or(1) as u8;
+        let utxo = input.get("utxoEntry").ok_or("Missing UTXO")?;
+        let amount = utxo
+            .get("amount")
+            .and_then(Value::as_u64)
+            .ok_or("Missing UTXO amount")?;
+        let (spk_version, spk) = parse_spk_hex(
+            utxo.get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("Missing input script")?,
+        )?;
+        if spk_version != 0 || spk.len() != 34 || spk[0] != 0x20 || spk[33] != 0xac {
+            return Err("Hot signing requires standard P2PK inputs".into());
+        }
+        let path = input
+            .get("proprietaries")
+            .and_then(|p| p.get("kasSignerDerivation"))
+            .ok_or("Input is missing its wallet derivation path")?;
+        let chain = match path.get("chain").and_then(Value::as_str) {
+            Some("receive") => 0,
+            Some("change") => 1,
+            _ => return Err("Unsupported wallet derivation chain".into()),
+        };
+        let child_index = path
+            .get("index")
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or("Invalid wallet derivation index")?;
+        outpoints.push((txid, index, sequence, sigops));
+        sequences.push((spk_version, spk, amount, chain, child_index));
+    }
+    let mut sighash_outputs = Vec::with_capacity(outputs.len());
+    for output in outputs {
+        let amount = output
+            .get("amount")
+            .and_then(Value::as_u64)
+            .ok_or("Missing output amount")?;
+        let (version, spk) = parse_spk_hex(
+            output
+                .get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("Missing output script")?,
+        )?;
+        let covenant = if let Some(binding) = output.get("covenantBinding").filter(|v| !v.is_null())
+        {
+            let authorizing_input = binding
+                .get("authorizingInput")
+                .and_then(Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or("Invalid covenant authorizing input")?;
+            let id: [u8; 32] = hex::decode(
+                binding
+                    .get("covenantId")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing covenant id")?,
+            )
+            .map_err(|e| format!("Invalid covenant id: {e}"))?
+            .try_into()
+            .map_err(|_| "Covenant id must be 32 bytes")?;
+            Some((authorizing_input, id))
+        } else {
+            None
+        };
+        sighash_outputs.push(crate::rpc::SighashOutput {
+            value: amount,
+            spk_version: version,
+            spk_script: spk,
+            covenant,
+        });
+    }
+    let input_tuples = outpoints
+        .iter()
+        .map(|(txid, index, sequence, sigops)| (txid, *index, *sequence, *sigops))
+        .collect::<Vec<_>>();
+    let pskt_inputs = pskt
+        .get_mut("inputs")
+        .and_then(Value::as_array_mut)
+        .ok_or("Missing inputs")?;
+    for (position, input) in pskt_inputs.iter_mut().enumerate() {
+        let (spk_version, spk, amount, chain, child_index) = &sequences[position];
+        let secret = crate::testnet_hot_wallet::private_key_for(mnemonic, *chain, *child_index)?;
+        let signing_key =
+            k256::SecretKey::from_slice(&secret).map_err(|_| "Invalid private key")?;
+        let compressed = signing_key.public_key().to_sec1_bytes();
+        if compressed[1..33] != spk[1..33] {
+            return Err(format!(
+                "Input {position} does not belong to this Testnet wallet"
+            ));
+        }
+        use k256::elliptic_curve::bigint::U256;
+        use k256::elliptic_curve::ops::Reduce;
+        let scalar = <k256::Scalar as Reduce<U256>>::reduce_bytes((&secret).into());
+        let sighash = crate::rpc::compute_sighash_all(
+            tx_version as u16,
+            &input_tuples,
+            position,
+            *spk_version,
+            spk,
+            *amount,
+            &sighash_outputs,
+            0,
+            &[],
+            &[0u8; 20],
+            0,
+        );
+        let signature = crate::adaptor::bip340_sign(&scalar, &sighash)?;
+        let key = format!("02{}", hex::encode(&spk[1..33]));
+        let partials = input
+            .get_mut("partialSigs")
+            .and_then(Value::as_object_mut)
+            .ok_or("Missing partialSigs")?;
+        if !partials.is_empty() {
+            return Err("Refusing to overwrite an existing signature".into());
+        }
+        partials.insert(key, serde_json::json!({"schnorr": hex::encode(signature)}));
+    }
+    let json = serde_json::to_vec(&root).map_err(|e| e.to_string())?;
+    let mut encoded = b"PSKB".to_vec();
+    encoded.extend_from_slice(hex::encode(json).as_bytes());
+    let signed = hex::encode(encoded);
+    verify_standard_p2pk_signatures(&signed)?;
+    Ok(signed)
+}
+
+/// Sign one V2 vault or pending input using a Testnet-10 account seed. The
+/// requested derivation must match the exact x-only key committed in the PSKB.
+pub fn sign_testnet10_vault_v2_pskb(
+    wire_hex: &str,
+    mnemonic: &str,
+    chain: u32,
+    index: u32,
+) -> Result<String, String> {
+    if chain > 1 {
+        return Err("Unsupported Testnet signing chain".into());
+    }
+    if detect_format_hex(wire_hex) != PsktFormat::Pskb {
+        return Err("Expected a single-transaction vault PSKB".into());
+    }
+    let wire = hex::decode(wire_hex).map_err(|e| format!("Outer hex: {e}"))?;
+    let json = hex::decode(&wire[4..]).map_err(|e| format!("Inner hex: {e}"))?;
+    let mut root: Value = serde_json::from_slice(&json).map_err(|e| format!("PSKB JSON: {e}"))?;
+    let pskt = root
+        .as_array_mut()
+        .and_then(|a| (a.len() == 1).then(|| &mut a[0]))
+        .ok_or("Vault PSKB must contain exactly one transaction")?;
+    let global = pskt.get("global").ok_or("Missing global")?;
+    let version = global
+        .get("txVersion")
+        .and_then(Value::as_u64)
+        .ok_or("Missing version")?;
+    if version != 1 {
+        return Err("Vault V2 requires transaction version 1".into());
+    }
+    let inputs = pskt
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or("Missing inputs")?;
+    let outputs = pskt
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or("Missing outputs")?;
+    if inputs.len() != 1 || outputs.len() != 1 {
+        return Err("Vault V2 requires one input and one output".into());
+    }
+    let input = &inputs[0];
+    let path = input
+        .get("proprietaries")
+        .and_then(|v| v.get("protectedVaultV2Path"))
+        .and_then(Value::as_str)
+        .ok_or("Missing vault path")?;
+    if !matches!(
+        path,
+        "approved" | "beginDelay" | "emergency" | "mature" | "cancel"
+    ) {
+        return Err("Unsupported vault path".into());
+    }
+    let signer = hex::decode(
+        input
+            .get("proprietaries")
+            .and_then(|v| v.get("protectedVaultV2Signer"))
+            .and_then(Value::as_str)
+            .ok_or("Missing expected signer")?,
+    )
+    .map_err(|e| format!("Expected signer: {e}"))?;
+    if signer.len() != 32 {
+        return Err("Expected signer must be x-only".into());
+    }
+    let redeem = hex::decode(
+        input
+            .get("redeemScript")
+            .and_then(Value::as_str)
+            .ok_or("Missing vault script")?,
+    )
+    .map_err(|e| format!("Vault script: {e}"))?;
+    if redeem.is_empty() || redeem.len() > 520 {
+        return Err("Invalid vault script length".into());
+    }
+    let utxo = input.get("utxoEntry").ok_or("Missing vault UTXO")?;
+    let amount = utxo
+        .get("amount")
+        .and_then(Value::as_u64)
+        .ok_or("Missing vault amount")?;
+    let (spk_version, spk) = parse_spk_hex(
+        utxo.get("scriptPublicKey")
+            .and_then(Value::as_str)
+            .ok_or("Missing vault input script")?,
+    )?;
+    if spk_version != 0 || spk != crate::kspt::protected_vault_p2sh_script(&redeem) {
+        return Err("Vault script does not match the input P2SH".into());
+    }
+    let outpoint = input.get("previousOutpoint").ok_or("Missing outpoint")?;
+    let txid: [u8; 32] = hex::decode(
+        outpoint
+            .get("transactionId")
+            .and_then(Value::as_str)
+            .ok_or("Missing txid")?,
+    )
+    .map_err(|e| format!("Vault txid: {e}"))?
+    .try_into()
+    .map_err(|_| "Vault txid must be 32 bytes")?;
+    let outpoint_index = outpoint
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or("Missing output index")? as u32;
+    let sequence = input.get("sequence").and_then(Value::as_u64).unwrap_or(0);
+    let sigops = input.get("sigOpCount").and_then(Value::as_u64).unwrap_or(1) as u8;
+    let output = &outputs[0];
+    let output_amount = output
+        .get("amount")
+        .and_then(Value::as_u64)
+        .ok_or("Missing output amount")?;
+    if output_amount >= amount
+        || amount - output_amount > crate::kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI
+    {
+        return Err("Vault fee exceeds the script limit".into());
+    }
+    let (output_version, output_spk) = parse_spk_hex(
+        output
+            .get("scriptPublicKey")
+            .and_then(Value::as_str)
+            .ok_or("Missing output script")?,
+    )?;
+    let binding = output
+        .get("covenantBinding")
+        .ok_or("Vault output is missing covenant binding")?;
+    if binding.get("authorizingInput").and_then(Value::as_u64) != Some(0) {
+        return Err("Vault output has the wrong authorizing input".into());
+    }
+    let covenant_id: [u8; 32] = hex::decode(
+        binding
+            .get("covenantId")
+            .and_then(Value::as_str)
+            .ok_or("Missing covenant id")?,
+    )
+    .map_err(|e| format!("Covenant id: {e}"))?
+    .try_into()
+    .map_err(|_| "Covenant id must be 32 bytes")?;
+    let secret = crate::testnet_hot_wallet::private_key_for(mnemonic, chain, index)?;
+    let signing_key = k256::SecretKey::from_slice(&secret).map_err(|_| "Invalid signing key")?;
+    let public = signing_key.public_key().to_sec1_bytes();
+    if public[1..33] != signer {
+        return Err("Selected Testnet key does not match the vault path".into());
+    }
+    use k256::elliptic_curve::bigint::U256;
+    use k256::elliptic_curve::ops::Reduce;
+    let scalar = <k256::Scalar as Reduce<U256>>::reduce_bytes((&secret).into());
+    let inputs_for_hash = vec![(&txid, outpoint_index, sequence, sigops)];
+    let outputs_for_hash = vec![crate::rpc::SighashOutput {
+        value: output_amount,
+        spk_version: output_version,
+        spk_script: output_spk,
+        covenant: Some((0, covenant_id)),
+    }];
+    let sighash = crate::rpc::compute_sighash_all(
+        1,
+        &inputs_for_hash,
+        0,
+        spk_version,
+        &spk,
+        amount,
+        &outputs_for_hash,
+        0,
+        &[],
+        &[0u8; 20],
+        0,
+    );
+    let signature = crate::adaptor::bip340_sign(&scalar, &sighash)?;
+    let signer_bytes: [u8; 32] = signer
+        .as_slice()
+        .try_into()
+        .map_err(|_| "Bad vault signer")?;
+    if !crate::adaptor::bip340_verify(&signer_bytes, &sighash, &signature)? {
+        return Err("Vault signature failed local verification".into());
+    }
+    let key = format!("02{}", hex::encode(&signer));
+    let partials = pskt
+        .get_mut("inputs")
+        .and_then(Value::as_array_mut)
+        .and_then(|a| a.get_mut(0))
+        .and_then(|v| v.get_mut("partialSigs"))
+        .and_then(Value::as_object_mut)
+        .ok_or("Missing partial signatures")?;
+    if !partials.is_empty() {
+        return Err("Refusing to overwrite a vault signature".into());
+    }
+    partials.insert(
+        key,
+        serde_json::json!({ "schnorr": hex::encode(signature) }),
+    );
+    let json = serde_json::to_vec(&root).map_err(|e| e.to_string())?;
+    let mut encoded = b"PSKB".to_vec();
+    encoded.extend_from_slice(hex::encode(json).as_bytes());
+    Ok(hex::encode(encoded))
+}
+
+pub fn verify_protected_vault_approved_signature(wire_hex: &str) -> Result<(), String> {
+    verify_pskb_signatures(wire_hex, true)
+}
+
+fn verify_pskb_signatures(wire_hex: &str, protected_vault_approved: bool) -> Result<(), String> {
+    let format = detect_format_hex(wire_hex);
+    if format == PsktFormat::Unknown {
+        return Err("Not a PSKT/PSKB payload".into());
+    }
+    let wire = hex::decode(wire_hex).map_err(|e| format!("outer hex: {}", e))?;
+    let json_bytes = hex::decode(wire.get(4..).ok_or("payload too short")?)
+        .map_err(|e| format!("inner hex: {}", e))?;
+    let root: Value =
+        serde_json::from_slice(&json_bytes).map_err(|e| format!("JSON parse: {}", e))?;
+    let pskt = match format {
+        PsktFormat::Pskb => root
+            .as_array()
+            .and_then(|a| (a.len() == 1).then(|| &a[0]))
+            .ok_or("PSKB must contain exactly one transaction")?,
+        PsktFormat::PsktSingle => &root,
+        PsktFormat::Unknown => unreachable!(),
+    };
+    let global = pskt
+        .get("global")
+        .and_then(Value::as_object)
+        .ok_or("missing global")?;
+    let tx_version = global
+        .get("txVersion")
+        .and_then(Value::as_u64)
+        .ok_or("missing txVersion")? as u16;
+    let inputs = pskt
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or("missing inputs")?;
+    let outputs = pskt
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or("missing outputs")?;
+    if inputs.is_empty() {
+        return Err("no inputs".into());
+    }
+
+    let params = || {
+        blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(b"TransactionSigningHash")
+            .to_state()
+    };
+    let finish = |state: blake2b_simd::State| -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(state.finalize().as_bytes());
+        out
+    };
+    let parse_input =
+        |input: &Value| -> Result<(Vec<u8>, u32, u64, u64, u8, u16, Vec<u8>), String> {
+            let op = input.get("previousOutpoint").ok_or("missing outpoint")?;
+            let txid = hex::decode(
+                op.get("transactionId")
+                    .and_then(Value::as_str)
+                    .ok_or("missing txid")?,
+            )
+            .map_err(|e| format!("txid hex: {}", e))?;
+            if txid.len() != 32 {
+                return Err("txid not 32 bytes".into());
+            }
+            let index = op
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("missing index")? as u32;
+            let sequence = input.get("sequence").and_then(Value::as_u64).unwrap_or(0);
+            let sigop = input.get("sigOpCount").and_then(Value::as_u64).unwrap_or(1) as u8;
+            let utxo = input.get("utxoEntry").ok_or("missing utxoEntry")?;
+            let amount = utxo
+                .get("amount")
+                .and_then(Value::as_u64)
+                .ok_or("missing amount")?;
+            let (version, script) = parse_spk_hex(
+                utxo.get("scriptPublicKey")
+                    .and_then(Value::as_str)
+                    .ok_or("missing input script")?,
+            )?;
+            Ok((txid, index, amount, sequence, sigop, version, script))
+        };
+    let parsed_inputs = inputs
+        .iter()
+        .map(parse_input)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut prev = params();
+    let mut seq = params();
+    let mut sigops = params();
+    for (txid, index, _, sequence, sigop, _, _) in &parsed_inputs {
+        prev.update(txid);
+        prev.update(&index.to_le_bytes());
+        seq.update(&sequence.to_le_bytes());
+        sigops.update(&[*sigop]);
+    }
+    let prev_hash = finish(prev);
+    let seq_hash = finish(seq);
+    let sigops_hash = finish(sigops);
+
+    let mut out_state = params();
+    for output in outputs {
+        let amount = output
+            .get("amount")
+            .and_then(Value::as_u64)
+            .ok_or("missing output amount")?;
+        let (version, script) = parse_spk_hex(
+            output
+                .get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("missing output script")?,
+        )?;
+        out_state.update(&amount.to_le_bytes());
+        out_state.update(&version.to_le_bytes());
+        out_state.update(&(script.len() as u64).to_le_bytes());
+        out_state.update(&script);
+        if tx_version >= 1 {
+            match output.get("covenantBinding") {
+                Some(Value::Object(binding)) => {
+                    let auth = binding
+                        .get("authorizingInput")
+                        .and_then(Value::as_u64)
+                        .ok_or("missing covenant authorizing input")?;
+                    let id = hex::decode(
+                        binding
+                            .get("covenantId")
+                            .and_then(Value::as_str)
+                            .ok_or("missing covenant id")?,
+                    )
+                    .map_err(|e| format!("covenant id hex: {}", e))?;
+                    if auth > u16::MAX as u64 || id.len() != 32 {
+                        return Err("invalid covenant binding".into());
+                    }
+                    out_state.update(&[1]);
+                    out_state.update(&(auth as u16).to_le_bytes());
+                    out_state.update(&id);
+                }
+                Some(Value::Null) | None => {
+                    out_state.update(&[0]);
+                }
+                Some(_) => return Err("invalid covenant binding object".into()),
+            }
+        }
+    }
+    let outputs_hash = finish(out_state);
+
+    for (input_index, input) in inputs.iter().enumerate() {
+        let (txid, index, amount, sequence, sigop, spk_version, script) =
+            &parsed_inputs[input_index];
+        let signing_pubkey = if protected_vault_approved {
+            if inputs.len() != 1 || outputs.len() != 1 {
+                return Err(
+                    "Protected Vault approved spend must have one input and one output".into(),
+                );
+            }
+            let redeem_hex = input
+                .get("redeemScript")
+                .and_then(Value::as_str)
+                .ok_or("Protected Vault input is missing its redeem script")?;
+            let redeem =
+                hex::decode(redeem_hex).map_err(|e| format!("redeem script hex: {}", e))?;
+            if redeem.len() < 34
+                || redeem[0] != 0x20
+                || redeem[33] != 0xad
+                || crate::kspt::protected_vault_p2sh_script(&redeem) != *script
+            {
+                return Err("Protected Vault redeem script does not match the input".into());
+            }
+            redeem[1..33].to_vec()
+        } else {
+            if script.len() != 34 || script[0] != 0x20 || script[33] != 0xac {
+                return Err(format!("input[{}] is not standard P2PK", input_index));
+            }
+            script[1..33].to_vec()
+        };
+        let expected_key = format!("02{}", hex::encode(&signing_pubkey));
+        let partials = input
+            .get("partialSigs")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("input[{}] missing partialSigs", input_index))?;
+        if partials.len() != 1 || !partials.contains_key(&expected_key) {
+            return Err(format!(
+                "input[{}] signature key does not match its P2PK script",
+                input_index
+            ));
+        }
+        let sig_hex = partials[&expected_key]
+            .get("schnorr")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("input[{}] missing Schnorr signature", input_index))?;
+        let sig_vec = hex::decode(sig_hex).map_err(|e| format!("signature hex: {}", e))?;
+        let sig: [u8; 64] = sig_vec
+            .try_into()
+            .map_err(|_| "signature must be 64 bytes")?;
+
+        let mut h = params();
+        h.update(&tx_version.to_le_bytes());
+        h.update(&prev_hash);
+        h.update(&seq_hash);
+        if tx_version < 1 {
+            h.update(&sigops_hash);
+        }
+        h.update(txid);
+        h.update(&index.to_le_bytes());
+        h.update(&spk_version.to_le_bytes());
+        h.update(&(script.len() as u64).to_le_bytes());
+        h.update(script);
+        h.update(&amount.to_le_bytes());
+        h.update(&sequence.to_le_bytes());
+        if tx_version < 1 {
+            h.update(&[*sigop]);
+        }
+        h.update(&outputs_hash);
+        h.update(&0u64.to_le_bytes());
+        h.update(&[0u8; 20]);
+        h.update(&0u64.to_le_bytes());
+        h.update(&[0u8; 32]);
+        h.update(&[0x01]);
+        let sighash = finish(h);
+        let pubkey: [u8; 32] = signing_pubkey.try_into().unwrap();
+        if !crate::adaptor::bip340_verify(&pubkey, &sighash, &sig)? {
+            return Err(format!(
+                "input[{}] has an invalid M5 signature",
+                input_index
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_pskt_object(
@@ -498,6 +1105,30 @@ fn parse_output_summary(out: &Value, network_prefix: &str) -> Result<OutputSumma
         .ok_or_else(|| "missing scriptPublicKey".to_string())?;
     let (_spk_version, spk_script) = parse_spk_hex(spk_full)?;
     let (kind, address) = classify_output_script(&spk_script, network_prefix);
+    let (covenant_authorizing_input, covenant_id) = match obj.get("covenantBinding") {
+        Some(Value::Object(binding)) => {
+            let authorizing_input = binding
+                .get("authorizingInput")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "covenant binding missing authorizing input".to_string())?;
+            let covenant_id = binding
+                .get("covenantId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "covenant binding missing covenant id".to_string())?;
+            if authorizing_input > u16::MAX as u64
+                || covenant_id.len() != 64
+                || !covenant_id.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("invalid covenant binding".into());
+            }
+            (
+                Some(authorizing_input as u16),
+                Some(covenant_id.to_ascii_lowercase()),
+            )
+        }
+        Some(Value::Null) | None => (None, None),
+        Some(_) => return Err("covenant binding is not an object".into()),
+    };
 
     Ok(OutputSummary {
         amount_sompi,
@@ -505,6 +1136,8 @@ fn parse_output_summary(out: &Value, network_prefix: &str) -> Result<OutputSumma
         script_kind: kind,
         script_hex: hex::encode(&spk_script),
         address,
+        covenant_authorizing_input,
+        covenant_id,
     })
 }
 
@@ -817,20 +1450,44 @@ pub fn finalize_to_kspt_hex(wire_hex: &str) -> Result<String, String> {
 /// continue through the existing v3 partial-signature relay.
 fn relay_standard_send_v4(obj: &serde_json::Map<String, Value>) -> Result<String, String> {
     let global = obj.get("global").ok_or("missing global")?;
-    let inputs = obj.get("inputs").and_then(Value::as_array).ok_or("missing inputs")?;
-    let outputs = obj.get("outputs").and_then(Value::as_array).ok_or("missing outputs")?;
+    let inputs = obj
+        .get("inputs")
+        .and_then(Value::as_array)
+        .ok_or("missing inputs")?;
+    let outputs = obj
+        .get("outputs")
+        .and_then(Value::as_array)
+        .ok_or("missing outputs")?;
     if inputs.is_empty() || inputs.len() > 8 || outputs.is_empty() || outputs.len() > 8 {
         return Err("KSPT v4 supports 1–8 inputs and 1–8 outputs".into());
     }
-    let tx_version = u16::try_from(global.get("txVersion").and_then(Value::as_u64)
-        .ok_or("missing txVersion")?).map_err(|_| "invalid txVersion")?;
-    let payload = hex::decode(global.get("txPayload").and_then(Value::as_str).unwrap_or(""))
-        .map_err(|e| format!("bad payload: {e}"))?;
-    if payload.len() > 128 { return Err("KSPT v4 payload too long".into()); }
-    let subnet = hex::decode(global.get("subnetworkId").and_then(Value::as_str)
-        .unwrap_or("0000000000000000000000000000000000000000"))
-        .map_err(|e| format!("bad subnetwork: {e}"))?;
-    if subnet.len() != 20 { return Err("KSPT v4 subnetwork must be 20 bytes".into()); }
+    let tx_version = u16::try_from(
+        global
+            .get("txVersion")
+            .and_then(Value::as_u64)
+            .ok_or("missing txVersion")?,
+    )
+    .map_err(|_| "invalid txVersion")?;
+    let payload = hex::decode(
+        global
+            .get("txPayload")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    )
+    .map_err(|e| format!("bad payload: {e}"))?;
+    if payload.len() > 128 {
+        return Err("KSPT v4 payload too long".into());
+    }
+    let subnet = hex::decode(
+        global
+            .get("subnetworkId")
+            .and_then(Value::as_str)
+            .unwrap_or("0000000000000000000000000000000000000000"),
+    )
+    .map_err(|e| format!("bad subnetwork: {e}"))?;
+    if subnet.len() != 20 {
+        return Err("KSPT v4 subnetwork must be 20 bytes".into());
+    }
     let mut buf = Vec::with_capacity(512);
     buf.extend_from_slice(b"KSPT");
     buf.push(0x04);
@@ -838,57 +1495,111 @@ fn relay_standard_send_v4(obj: &serde_json::Map<String, Value>) -> Result<String
     buf.extend_from_slice(&tx_version.to_le_bytes());
     buf.push(inputs.len() as u8);
     buf.push(outputs.len() as u8);
-    buf.extend_from_slice(&global.get("fallbackLockTime").and_then(Value::as_u64)
-        .unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(
+        &global
+            .get("fallbackLockTime")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&subnet);
-    buf.extend_from_slice(&global.get("gas").and_then(Value::as_u64)
-        .unwrap_or(0).to_le_bytes());
+    buf.extend_from_slice(
+        &global
+            .get("gas")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
     buf.extend_from_slice(&(payload.len() as u16).to_le_bytes());
     buf.extend_from_slice(&payload);
 
     for (position, input) in inputs.iter().enumerate() {
         if input.get("redeemScript").is_some_and(|v| !v.is_null())
-            || input.get("partialSigs").and_then(Value::as_object)
-                .is_some_and(|sigs| !sigs.is_empty()) {
+            || input
+                .get("partialSigs")
+                .and_then(Value::as_object)
+                .is_some_and(|sigs| !sigs.is_empty())
+        {
             return Err(format!("input {position} is not an unsigned P2PK input"));
         }
         let utxo = input.get("utxoEntry").ok_or("missing utxoEntry")?;
-        let outpoint = input.get("previousOutpoint").ok_or("missing previousOutpoint")?;
-        let tx_id = hex::decode(outpoint.get("transactionId").and_then(Value::as_str)
-            .ok_or("missing transactionId")?).map_err(|e| format!("bad tx id: {e}"))?;
-        if tx_id.len() != 32 { return Err("transactionId must be 32 bytes".into()); }
-        let prev_index = u32::try_from(outpoint.get("index").and_then(Value::as_u64)
-            .ok_or("missing outpoint index")?).map_err(|_| "outpoint index overflow")?;
-        let (spk_version, spk) = parse_spk_hex(utxo.get("scriptPublicKey")
-            .and_then(Value::as_str).ok_or("missing input script")?)?;
+        let outpoint = input
+            .get("previousOutpoint")
+            .ok_or("missing previousOutpoint")?;
+        let tx_id = hex::decode(
+            outpoint
+                .get("transactionId")
+                .and_then(Value::as_str)
+                .ok_or("missing transactionId")?,
+        )
+        .map_err(|e| format!("bad tx id: {e}"))?;
+        if tx_id.len() != 32 {
+            return Err("transactionId must be 32 bytes".into());
+        }
+        let prev_index = u32::try_from(
+            outpoint
+                .get("index")
+                .and_then(Value::as_u64)
+                .ok_or("missing outpoint index")?,
+        )
+        .map_err(|_| "outpoint index overflow")?;
+        let (spk_version, spk) = parse_spk_hex(
+            utxo.get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("missing input script")?,
+        )?;
         if spk_version != 0 || spk.len() != 34 || spk[0] != 0x20 || spk[33] != 0xac {
             return Err(format!("input {position} is not P2PK"));
         }
         let hint = encode_v4_derivation_hint(input, false)?;
         buf.extend_from_slice(&tx_id);
         buf.extend_from_slice(&prev_index.to_le_bytes());
-        buf.extend_from_slice(&utxo.get("amount").and_then(Value::as_u64)
-            .ok_or("missing input amount")?.to_le_bytes());
-        buf.extend_from_slice(&input.get("sequence").and_then(Value::as_u64)
-            .unwrap_or(0).to_le_bytes());
-        buf.push(u8::try_from(input.get("sigOpCount").and_then(Value::as_u64)
-            .unwrap_or(1)).map_err(|_| "sigOpCount overflow")?);
+        buf.extend_from_slice(
+            &utxo
+                .get("amount")
+                .and_then(Value::as_u64)
+                .ok_or("missing input amount")?
+                .to_le_bytes(),
+        );
+        buf.extend_from_slice(
+            &input
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .to_le_bytes(),
+        );
+        buf.push(
+            u8::try_from(input.get("sigOpCount").and_then(Value::as_u64).unwrap_or(1))
+                .map_err(|_| "sigOpCount overflow")?,
+        );
         buf.extend_from_slice(&spk_version.to_le_bytes());
         push_spk_len(&mut buf, spk.len());
         buf.extend_from_slice(&spk);
         buf.extend_from_slice(&hint.to_le_bytes());
     }
     for (position, output) in outputs.iter().enumerate() {
-        let (spk_version, spk) = parse_spk_hex(output.get("scriptPublicKey")
-            .and_then(Value::as_str).ok_or("missing output script")?)?;
+        let (spk_version, spk) = parse_spk_hex(
+            output
+                .get("scriptPublicKey")
+                .and_then(Value::as_str)
+                .ok_or("missing output script")?,
+        )?;
         let hint = encode_v4_derivation_hint(output, true)?;
-        if hint != 0xffff && (spk_version != 0 || spk.len() != 34
-            || spk[0] != 0x20 || spk[33] != 0xac) {
+        if hint != 0xffff
+            && (spk_version != 0 || spk.len() != 34 || spk[0] != 0x20 || spk[33] != 0xac)
+        {
             return Err(format!("change output {position} is not P2PK"));
         }
-        if spk.len() > 64 { return Err("KSPT v4 output script too long".into()); }
-        buf.extend_from_slice(&output.get("amount").and_then(Value::as_u64)
-            .ok_or("missing output amount")?.to_le_bytes());
+        if spk.len() > 64 {
+            return Err("KSPT v4 output script too long".into());
+        }
+        buf.extend_from_slice(
+            &output
+                .get("amount")
+                .and_then(Value::as_u64)
+                .ok_or("missing output amount")?
+                .to_le_bytes(),
+        );
         buf.extend_from_slice(&spk_version.to_le_bytes());
         push_spk_len(&mut buf, spk.len());
         buf.extend_from_slice(&spk);
@@ -898,14 +1609,27 @@ fn relay_standard_send_v4(obj: &serde_json::Map<String, Value>) -> Result<String
 }
 
 fn encode_v4_derivation_hint(value: &Value, output: bool) -> Result<u16, String> {
-    let path = value.get("proprietaries")
+    let path = value
+        .get("proprietaries")
         .and_then(|p| p.get("kasSignerDerivation"));
     let Some(path) = path else {
-        return if output { Ok(0xffff) } else { Err("input has no derivation path".into()) };
+        return if output {
+            Ok(0xffff)
+        } else {
+            Err("input has no derivation path".into())
+        };
     };
-    let chain = path.get("chain").and_then(Value::as_str).ok_or("missing derivation chain")?;
-    let index = path.get("index").and_then(Value::as_u64).ok_or("missing derivation index")?;
-    if index > 511 { return Err("derivation index exceeds M5 v4 range".into()); }
+    let chain = path
+        .get("chain")
+        .and_then(Value::as_str)
+        .ok_or("missing derivation chain")?;
+    let index = path
+        .get("index")
+        .and_then(Value::as_u64)
+        .ok_or("missing derivation index")?;
+    if index > 511 {
+        return Err("derivation index exceeds M5 v4 range".into());
+    }
     let chain_bit = match chain {
         "receive" if !output => 0,
         "change" => 0x8000,
@@ -1206,10 +1930,13 @@ pub fn relay_pskb_as_kspt_v2_hex(wire_hex: &str) -> Result<String, String> {
     let obj = pskt
         .as_object()
         .ok_or_else(|| "PSKT not object".to_string())?;
-    if obj.get("global")
+    if obj
+        .get("global")
         .and_then(|g| g.get("proprietaries"))
         .and_then(|p| p.get("kasSignerKSPTV4"))
-        .and_then(Value::as_bool) == Some(true) {
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
         return relay_standard_send_v4(obj);
     }
 
@@ -1787,6 +2514,22 @@ pub async fn finalize_and_broadcast(wire_hex: &str, ws_url: &str) -> Result<Stri
 /// Build one consensus-layer `ConsensusInput` from a PSKT input object,
 /// assembling the final `sig_script` directly from partial sigs + the
 /// redeem script (for P2SH) or the single Schnorr sig (for P2PK).
+#[cfg(feature = "protected-vault-verification")]
+pub fn finalized_v2_sigscript_native(wire_hex: &str) -> Result<Vec<u8>, String> {
+    let wire = hex::decode(wire_hex).map_err(|e| format!("Outer hex: {e}"))?;
+    let body = hex::decode(wire.get(4..).ok_or("PSKB is too short")?)
+        .map_err(|e| format!("Inner hex: {e}"))?;
+    let root: Value = serde_json::from_slice(&body).map_err(|e| e.to_string())?;
+    let input = root
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|pskt| pskt.get("inputs"))
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .ok_or("Missing vault input")?;
+    build_consensus_input(input, false, false, &None, &None, false).map(|input| input.sig_script)
+}
+
 #[allow(clippy::unnecessary_unwrap)]
 fn build_consensus_input(
     inp: &Value,
@@ -1867,6 +2610,7 @@ fn build_consensus_input(
         } else {
             (&rs[..], 0usize)
         };
+        #[cfg(target_arch = "wasm32")]
         web_sys::console::log_1(&format!(
             "[KasSee] build_consensus_input: is_p2sh=true, redeem_len={}, first_byte=0x{:02x}, salt_offset={}, partial_keys={}",
             rs.len(), rs_body.first().copied().unwrap_or(0), salt_offset, partial_map.len()
@@ -1901,7 +2645,35 @@ fn build_consensus_input(
             .and_then(|p| p.get("oracleMbConsumer"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        if omb_publish {
+        let protected_vault_approved = obj
+            .get("proprietaries")
+            .and_then(|v| v.as_object())
+            .and_then(|p| p.get("protectedVaultApproved"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let protected_vault_v2_path = obj
+            .get("proprietaries")
+            .and_then(|v| v.get("protectedVaultV2Path"))
+            .and_then(Value::as_str);
+        if let Some(path) = protected_vault_v2_path {
+            build_protected_vault_v2_sig_script(
+                rs,
+                &partial_map,
+                path,
+                obj.get("proprietaries")
+                    .and_then(|v| v.get("protectedVaultV2Signer"))
+                    .and_then(Value::as_str)
+                    .ok_or("Vault signer key is missing")?,
+                obj.get("proprietaries")
+                    .and_then(|v| v.get("protectedVaultV2Destination"))
+                    .and_then(Value::as_str),
+            )?
+        } else if protected_vault_approved {
+            if partial_map.is_empty() {
+                return Err("Protected Vault approved spend requires an M5 signature".into());
+            }
+            build_protected_vault_approved_sig_script(rs, &partial_map)?
+        } else if omb_publish {
             let seal = obj
                 .get("proprietaries")
                 .and_then(|v| v.as_object())
@@ -2769,6 +3541,179 @@ fn build_p2sh_multisig_sig_script(
     push_redeem_script(&mut sig_script, redeem)?;
 
     Ok(sig_script)
+}
+
+/// Assemble the exact stack required by Protected Vault V1's approved branch.
+/// The redeem script begins with CHECKSIGVERIFY and only then consumes OP_TRUE,
+/// so the selector must be below the signature on the initial stack:
+/// `OP_TRUE <push signature||SIGHASH_ALL> <push redeem_script>`.
+fn build_protected_vault_approved_sig_script(
+    redeem: &[u8],
+    partial_map: &serde_json::Map<String, Value>,
+) -> Result<Vec<u8>, String> {
+    let (_pk_hex, sig_val) = partial_map
+        .iter()
+        .next()
+        .ok_or_else(|| "Protected Vault input has no signature".to_string())?;
+    let sig_hex = sig_val
+        .get("schnorr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "partial sig missing schnorr variant".to_string())?;
+    if sig_hex.len() != 128 {
+        return Err(format!(
+            "bad Protected Vault signature length: {}",
+            sig_hex.len()
+        ));
+    }
+    let mut signature = hex::decode(sig_hex).map_err(|e| format!("signature hex: {}", e))?;
+    signature.push(0x01);
+
+    let mut script = Vec::with_capacity(redeem.len() + signature.len() + 8);
+    script.push(0x51);
+    push_data_sigscript(&mut script, &signature);
+    push_redeem_script(&mut script, redeem)?;
+    Ok(script)
+}
+
+fn build_protected_vault_v2_sig_script(
+    redeem: &[u8],
+    partial_map: &serde_json::Map<String, Value>,
+    path: &str,
+    signer_hex: &str,
+    delayed_destination: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    if partial_map.len() != 1 {
+        return Err("Vault V2 requires exactly one signature".into());
+    }
+    let expected_key = format!("02{signer_hex}");
+    let signature_hex = partial_map
+        .get(&expected_key)
+        .and_then(|v| v.get("schnorr"))
+        .and_then(Value::as_str)
+        .ok_or("Vault V2 signature key does not match the committed signer")?;
+    let mut signature = hex::decode(signature_hex).map_err(|e| format!("Vault signature: {e}"))?;
+    if signature.len() != 64 {
+        return Err("Vault V2 signature must be 64 bytes".into());
+    }
+    signature.push(0x01);
+    let mut script = Vec::with_capacity(redeem.len() + 128);
+    match path {
+        "approved" => script.push(0x51),
+        "beginDelay" => {
+            let destination = delayed_destination.ok_or("Delayed destination is missing")?;
+            if !destination.starts_with("kaspatest:") {
+                return Err("Wrong delayed destination network".into());
+            }
+            let destination_script = crate::address::address_to_script_pubkey(destination)?;
+            if destination_script.len() != 34
+                || destination_script[0] != 0x20
+                || destination_script[33] != 0xac
+            {
+                return Err("Delayed destination must be P2PK".into());
+            }
+            let mut versioned = vec![0, 0];
+            versioned.extend_from_slice(&destination_script);
+            push_data_sigscript(&mut script, &versioned);
+            script.push(0x00);
+        }
+        "emergency" | "mature" | "cancel" => {}
+        _ => return Err("Unknown Vault V2 path".into()),
+    }
+    push_data_sigscript(&mut script, &signature);
+    match path {
+        "approved" | "beginDelay" => {
+            // Emergency-enabled vaults start with an outer recovery selector.
+            // Detect the exact script form generated by the V2 builder.
+            if redeem.first() == Some(&0x63) {
+                script.push(0x00);
+            }
+        }
+        "emergency" | "cancel" => script.push(0x51),
+        "mature" => script.push(0x00),
+        _ => unreachable!(),
+    }
+    push_redeem_script(&mut script, redeem)?;
+    Ok(script)
+}
+
+#[cfg(test)]
+mod protected_vault_finalizer_tests {
+    use super::*;
+
+    #[test]
+    fn approved_witness_places_selector_below_signature() {
+        let redeem = vec![0x20; 80];
+        let mut partials = serde_json::Map::new();
+        partials.insert(
+            format!("02{}", "11".repeat(32)),
+            serde_json::json!({ "schnorr": "22".repeat(64) }),
+        );
+
+        let script = build_protected_vault_approved_sig_script(&redeem, &partials).unwrap();
+        assert_eq!(script[0], 0x51);
+        assert_eq!(script[1], 65);
+        assert_eq!(&script[2..66], &[0x22; 64]);
+        assert_eq!(script[66], 0x01);
+        assert_eq!(script[67], 76); // OP_PUSHDATA1 for the 80-byte redeem script
+        assert_eq!(script[68], 80);
+        assert_eq!(&script[69..], redeem.as_slice());
+    }
+
+    #[test]
+    fn v2_witness_layouts_match_the_consensus_branch_stacks() {
+        let owner = "11".repeat(32);
+        let mut partials = serde_json::Map::new();
+        partials.insert(
+            format!("02{owner}"),
+            serde_json::json!({ "schnorr": "22".repeat(64) }),
+        );
+        let ordinary = vec![0x20; 80];
+        let emergency = {
+            let mut script = ordinary.clone();
+            script[0] = 0x63;
+            script
+        };
+        let approved =
+            build_protected_vault_v2_sig_script(&ordinary, &partials, "approved", &owner, None)
+                .unwrap();
+        assert_eq!(&approved[..3], &[0x51, 65, 0x22]);
+        let approved_emergency =
+            build_protected_vault_v2_sig_script(&emergency, &partials, "approved", &owner, None)
+                .unwrap();
+        assert_eq!(&approved_emergency[..3], &[0x51, 65, 0x22]);
+        assert_eq!(approved_emergency[66], 0x01);
+        assert_eq!(approved_emergency[67], 0x00);
+        let emergency_spend =
+            build_protected_vault_v2_sig_script(&emergency, &partials, "emergency", &owner, None)
+                .unwrap();
+        assert_eq!(emergency_spend[0], 65);
+        assert_eq!(emergency_spend[65], 0x01);
+        assert_eq!(emergency_spend[66], 0x51);
+        let mature =
+            build_protected_vault_v2_sig_script(&ordinary, &partials, "mature", &owner, None)
+                .unwrap();
+        let cancel =
+            build_protected_vault_v2_sig_script(&ordinary, &partials, "cancel", &owner, None)
+                .unwrap();
+        assert_eq!(mature[65], 0x01);
+        assert_eq!(mature[66], 0x00);
+        assert_eq!(cancel[66], 0x51);
+        let destination = crate::address::encode_p2pk_address(&[9u8; 32], "kaspatest");
+        let delayed = build_protected_vault_v2_sig_script(
+            &emergency,
+            &partials,
+            "beginDelay",
+            &owner,
+            Some(&destination),
+        )
+        .unwrap();
+        assert_eq!(delayed[0], 36);
+        assert_eq!(&delayed[1..4], &[0, 0, 0x20]);
+        assert_eq!(delayed[37], 0x00);
+        assert_eq!(delayed[38], 65);
+        assert_eq!(delayed[103], 0x01);
+        assert_eq!(delayed[104], 0x00);
+    }
 }
 
 /// Assemble the final sig_script for a covenant P2SH input (owner spend).
@@ -4393,7 +5338,9 @@ fn parse_kspt_v4_unsigned(data: &[u8]) -> Result<ParsedKsptTransaction, String> 
         return Err("not an unsigned KSPT v4 relay".into());
     }
     let flags = r.u8()?;
-    if flags != 0 { return Err("unsupported KSPT v4 flags".into()); }
+    if flags != 0 {
+        return Err("unsupported KSPT v4 flags".into());
+    }
     let tx_version = r.u16_le()?;
     let input_count = r.u8()? as usize;
     let output_count = r.u8()? as usize;
@@ -4405,7 +5352,9 @@ fn parse_kspt_v4_unsigned(data: &[u8]) -> Result<ParsedKsptTransaction, String> 
     subnetwork_id.copy_from_slice(r.bytes(20)?);
     let gas = r.u64_le()?;
     let payload_len = r.u16_le()? as usize;
-    if payload_len > 128 { return Err("KSPT v4 payload too long".into()); }
+    if payload_len > 128 {
+        return Err("KSPT v4 payload too long".into());
+    }
     let payload = r.bytes(payload_len)?.to_vec();
     let mut inputs = Vec::with_capacity(input_count);
     for _ in 0..input_count {
@@ -4423,8 +5372,13 @@ fn parse_kspt_v4_unsigned(data: &[u8]) -> Result<ParsedKsptTransaction, String> 
             return Err("invalid KSPT v4 input hint".into());
         }
         inputs.push(KsptInputIdentity {
-            previous_transaction_id, previous_output_index, amount, sequence,
-            sig_op_count, script_public_key_version, script_public_key,
+            previous_transaction_id,
+            previous_output_index,
+            amount,
+            sequence,
+            sig_op_count,
+            script_public_key_version,
+            script_public_key,
             redeem_script: Vec::new(),
         });
     }
@@ -4438,14 +5392,27 @@ fn parse_kspt_v4_unsigned(data: &[u8]) -> Result<ParsedKsptTransaction, String> 
         if hint != 0xffff && (hint & 0x7e00 != 0 || hint & 0x8000 == 0) {
             return Err("invalid KSPT v4 output hint".into());
         }
-        outputs.push(KsptOutputIdentity { amount, script_public_key_version, script_public_key });
+        outputs.push(KsptOutputIdentity {
+            amount,
+            script_public_key_version,
+            script_public_key,
+        });
     }
-    if !r.remaining().is_empty() { return Err("unexpected KSPT v4 trailing bytes".into()); }
+    if !r.remaining().is_empty() {
+        return Err("unexpected KSPT v4 trailing bytes".into());
+    }
     Ok(ParsedKsptTransaction {
         flags,
         identity: KsptTransactionIdentity {
-            wire_version: 0x04, tx_version, locktime, subnetwork_id, gas,
-            payload, inputs, outputs, trailer: Vec::new(),
+            wire_version: 0x04,
+            tx_version,
+            locktime,
+            subnetwork_id,
+            gas,
+            payload,
+            inputs,
+            outputs,
+            trailer: Vec::new(),
         },
         signatures: vec![Vec::new(); input_count],
     })
@@ -5134,8 +6101,7 @@ mod signed_return_tests {
         let wire = hex::decode(pskb).unwrap();
         let mut root: Value = serde_json::from_slice(&hex::decode(&wire[4..]).unwrap()).unwrap();
         let transaction = &mut root.as_array_mut().unwrap()[0];
-        transaction["global"]["proprietaries"] =
-            serde_json::json!({ "kasSignerKSPTV4": true });
+        transaction["global"]["proprietaries"] = serde_json::json!({ "kasSignerKSPTV4": true });
         transaction["inputs"][0]["proprietaries"] = serde_json::json!({
             "kasSignerDerivation": { "chain": "change", "index": 511 }
         });
@@ -5188,8 +6154,11 @@ mod signed_return_tests {
         let mut relay_bytes = hex::decode(&relay).unwrap();
         *relay_bytes.last_mut().unwrap() ^= 1;
         let tampered_relay = hex::encode(relay_bytes);
-        assert!(verify_and_merge_signed_kspt_into_pskb(&signed, &tampered_relay, &pskb)
-            .unwrap_err().contains("does not match the PSKB"));
+        assert!(
+            verify_and_merge_signed_kspt_into_pskb(&signed, &tampered_relay, &pskb)
+                .unwrap_err()
+                .contains("does not match the PSKB")
+        );
     }
 
     fn sign_transaction(

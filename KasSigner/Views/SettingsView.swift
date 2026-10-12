@@ -1,10 +1,13 @@
 import SwiftUI
 import UIKit
+import LocalAuthentication
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let onWalletSelected: ((WalletProfile) -> Void)?
 
     @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
@@ -17,6 +20,13 @@ struct SettingsView: View {
     @State private var renameDraft = ""
     @State private var profilePendingDeletion: WalletProfile?
     @State private var showingAccountReorder = false
+    @State private var revealedTestnetWords: String?
+    @State private var seedRevealError: String?
+    @State private var vaultRecoveryDocument: ProtectedVaultRecoveryDocument?
+    @State private var vaultRecoveryProfile: WalletProfile?
+    @State private var showingVaultExport = false
+    @State private var showingVaultImport = false
+    @State private var vaultRecoveryMessage: String?
 
     init(onWalletSelected: ((WalletProfile) -> Void)? = nil) {
         self.onWalletSelected = onWalletSelected
@@ -24,10 +34,22 @@ struct SettingsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                if !walletStore.profiles.isEmpty {
+            settingsList
+        }
+    }
+
+    private var settingsList: some View {
+        List {
+                if let recoveryMessage = walletStore.accountDeletionRecoveryMessage {
+                    Section("Account cleanup") {
+                        Label(recoveryMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                }
+
+                if !walletStore.activeProfiles.isEmpty {
                     Section("Accounts") {
-                        ForEach(walletStore.profiles) { profile in
+                        ForEach(walletStore.activeProfiles) { profile in
                             Button {
                                 if let onWalletSelected {
                                     onWalletSelected(profile)
@@ -39,7 +61,8 @@ struct SettingsView: View {
                                 HStack {
                                     VStack(alignment: .leading) {
                                         Text(profile.name)
-                                        Text("Watch-only account")
+                                        Text(profile.network == KaspaNetwork.testnet10.rawValue
+                                             ? "Testnet 10 account" : "Watch-only account")
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
@@ -70,6 +93,16 @@ struct SettingsView: View {
                                         Text("Copy kpub")
                                     } icon: {
                                         Image(uiImage: primaryMenuIcon("doc.on.doc"))
+                                    }
+                                }
+
+                                if profile.network == KaspaNetwork.testnet10.rawValue {
+                                    Button("Export Vault Recovery File") {
+                                        exportVaultRecoveryFile(for: profile)
+                                    }
+                                    Button("Import Vault Recovery File") {
+                                        vaultRecoveryProfile = profile
+                                        showingVaultImport = true
                                     }
                                 }
 
@@ -138,37 +171,45 @@ struct SettingsView: View {
                 } header: {
                     Text("Preferences")
                 } footer: {
-                    Text("Checks each displayed receive address using the public Kaspa API to determine whether it is fresh or has been used.")
+                    Text("Checks each displayed receive address using the selected network's public API to determine whether it is fresh or has been used.")
                 }
 
                 Section {
-                    LabeledContent("Kaspa Network", value: "Mainnet")
-
-                    Menu {
-                        ForEach(NodeConnectionMode.allCases) { mode in
-                            Button {
-                                preferences.nodeMode = mode
-                            } label: {
-                                if preferences.nodeMode == mode {
-                                    Label(mode.title, systemImage: "checkmark")
-                                } else {
-                                    Text(mode.title)
-                                }
-                            }
+                    Picker("Kaspa Network", selection: $preferences.network) {
+                        ForEach(KaspaNetwork.allCases) { network in
+                            Text(network.title).tag(network)
                         }
-                    } label: {
-                        HStack {
-                            Text(preferences.nodeMode.title)
-                                .foregroundStyle(.tint)
-                            Spacer()
-                            Image(systemName: "chevron.up.chevron.down")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tint)
-                        }
-                        .contentShape(Rectangle())
                     }
 
-                    if preferences.nodeMode == .custom {
+                    if preferences.network == .mainnet {
+                        Menu {
+                            ForEach(NodeConnectionMode.allCases) { mode in
+                                Button {
+                                    preferences.nodeMode = mode
+                                } label: {
+                                    if preferences.nodeMode == mode {
+                                        Label(mode.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(mode.title)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack {
+                                Text(preferences.nodeMode.title)
+                                    .foregroundStyle(.tint)
+                                Spacer()
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                    } else {
+                        LabeledContent("Node", value: "Automatic Testnet 10")
+                    }
+
+                    if preferences.activeNodeMode == .custom {
                         TextField("wss://your-node.example", text: $preferences.customNodeURL)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -179,9 +220,22 @@ struct SettingsView: View {
                 } header: {
                     Text("Network & Node")
                 } footer: {
-                    if preferences.nodeMode == .automatic {
+                    if preferences.activeNodeMode == .automatic {
                     } else {
                         Text("Connect directly to your own Kaspa node. Wallet access requires a public ws:// or wss:// wRPC endpoint with UTXO indexing enabled.")
+                    }
+                }
+
+                if preferences.network == .testnet10,
+                   let profile = walletStore.selectedProfile {
+                    Section {
+                        Button("Show Recovery Words") {
+                            Task { await revealTestnetWords(for: profile) }
+                        }
+                    } header: {
+                        Text("Testnet 10 Wallet")
+                    } footer: {
+                        Text("This account signs Testnet 10 transactions on this iPhone. Keep its recovery words private.")
                     }
                 }
 
@@ -237,6 +291,22 @@ struct SettingsView: View {
                     }
                 }
             }
+            .sheet(isPresented: Binding(
+                get: { revealedTestnetWords != nil },
+                set: { if !$0 { revealedTestnetWords = nil } }
+            )) {
+                TestnetRecoveryWordsView(words: revealedTestnetWords ?? "") {
+                    revealedTestnetWords = nil
+                }
+            }
+            .alert("Account Status", isPresented: Binding(
+                get: { seedRevealError != nil },
+                set: { if !$0 { seedRevealError = nil } }
+            )) {
+                Button("OK", role: .cancel) { seedRevealError = nil }
+            } message: {
+                Text(seedRevealError ?? "")
+            }
             .alert("Rename Account", isPresented: renameAlertIsPresented) {
                 TextField("Account name", text: $renameDraft)
                     .textInputAutocapitalization(.words)
@@ -281,7 +351,10 @@ struct SettingsView: View {
             } message: { profile in
                 Text(
                     "This removes “\(profile.name)” from this iPhone. "
-                        + "It does not affect funds or the KasSigner device."
+                        + "It does not affect funds or the KasSigner device. "
+                        + (protectedVaultStore.vaults(for: profile.id).isEmpty
+                           ? ""
+                           : "This account has saved vaults. Keep your recovery words and export their vault records before deleting it.")
                 )
             }
             .alert("Address Derivation Failed", isPresented: Binding(
@@ -292,7 +365,27 @@ struct SettingsView: View {
             } message: {
                 Text(derivationError ?? "Unknown error")
             }
-        }
+            .fileExporter(isPresented: $showingVaultExport,
+                          document: vaultRecoveryDocument,
+                          contentType: .json,
+                          defaultFilename: "KasSigner-Vault-Recovery") { result in
+                if case .failure(let error) = result {
+                    vaultRecoveryMessage = "Could not export the vault recovery file: \(error.localizedDescription)"
+                }
+                vaultRecoveryDocument = nil
+            }
+            .fileImporter(isPresented: $showingVaultImport,
+                          allowedContentTypes: [.json]) { result in
+                Task { await importVaultRecoveryFile(result) }
+            }
+            .alert("Vault Recovery", isPresented: Binding(
+                get: { vaultRecoveryMessage != nil },
+                set: { if !$0 { vaultRecoveryMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) { vaultRecoveryMessage = nil }
+            } message: {
+                Text(vaultRecoveryMessage ?? "")
+            }
     }
 
     private var renameAlertIsPresented: Binding<Bool> {
@@ -390,18 +483,68 @@ struct SettingsView: View {
         copyFeedbackCenter.showCopied(profile.kpub, label: "kpub")
     }
 
+    private func exportVaultRecoveryFile(for profile: WalletProfile) {
+        do {
+            vaultRecoveryDocument = try protectedVaultStore.recoveryDocument(for: profile)
+            showingVaultExport = true
+        } catch {
+            vaultRecoveryMessage = "Could not prepare the vault recovery file: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func importVaultRecoveryFile(_ result: Result<URL, Error>) async {
+        guard let profile = vaultRecoveryProfile else { return }
+        defer { vaultRecoveryProfile = nil }
+        do {
+            let url = try result.get()
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let document = ProtectedVaultRecoveryDocument(data: try Data(contentsOf: url))
+            let imported = try await protectedVaultStore.restoreRecoveryDocument(
+                document, for: profile, engine: engine
+            )
+            vaultRecoveryMessage = imported == 0
+                ? "All vault records in this file are already present."
+                : "Restored \(imported) vault record\(imported == 1 ? "" : "s"). Refresh the wallet to verify current on-chain status."
+        } catch {
+            vaultRecoveryMessage = "Vault recovery failed: \(error.localizedDescription)"
+        }
+    }
+
     private func deleteProfile(_ profile: WalletProfile) {
-        guard let index = walletStore.profiles.firstIndex(where: { $0.id == profile.id }) else {
+        guard walletStore.profiles.contains(where: { $0.id == profile.id }) else {
+            return
+        }
+
+        guard protectedVaultStore.registerWallet(profile) else {
+            seedRevealError = "Vault records could not be saved. Account deletion was canceled."
+            profilePendingDeletion = nil
             return
         }
 
         let wasSelected = walletStore.selectedProfile?.id == profile.id
-        WalletSnapshotCache.shared.remove(profileID: profile.id)
-        coinControlStore.removeData(profileID: profile.id)
-        walletStore.remove(at: IndexSet(integer: index))
+        let result = walletStore.deleteAccount(profileID: profile.id) { removedProfileID in
+            WalletSnapshotCache.shared.remove(profileID: removedProfileID)
+            coinControlStore.removeData(profileID: removedProfileID)
+        }
 
-        if wasSelected {
+        if wasSelected && !walletStore.profiles.contains(where: { $0.id == profile.id }) {
             syncService.reset()
+        }
+
+        switch result {
+        case .deleted:
+            break
+        case .profilePersistenceFailed:
+            seedRevealError = profile.network == KaspaNetwork.testnet10.rawValue
+                ? "The Testnet recovery words were removed, but the account profile could not yet be saved as deleted. The account is hidden from active wallets while deletion retries."
+                : "The account could not yet be saved as deleted. It is hidden from active wallets while deletion retries."
+        case .seedCleanupPending:
+            seedRevealError = "The account is hidden from active wallets because its Testnet recovery words could not yet be removed from Keychain. Deletion will retry when the app is reopened."
+        case .journalPersistenceFailed:
+            seedRevealError = walletStore.accountDeletionRecoveryMessage
+                ?? "Account deletion could not be fully verified. Check the account list before trying again."
         }
 
         profilePendingDeletion = nil
@@ -420,6 +563,69 @@ struct SettingsView: View {
             await refreshSelectedAccount()
         } catch {
             derivationError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func revealTestnetWords(for profile: WalletProfile) async {
+        guard profile.network == KaspaNetwork.testnet10.rawValue else { return }
+        let context = LAContext()
+        var policyError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &policyError) else {
+            seedRevealError = policyError?.localizedDescription ?? "Face ID or device passcode is unavailable."
+            return
+        }
+        do {
+            let authorized = try await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Show Testnet 10 recovery words"
+            )
+            guard authorized else { return }
+            revealedTestnetWords = try TestnetSeedStore.load(for: profile.id)
+        } catch {
+            seedRevealError = error.localizedDescription
+        }
+    }
+}
+
+private struct TestnetRecoveryWordsView: View {
+    let words: String
+    let onDismiss: () -> Void
+    @State private var didCopy = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Testnet 10 recovery words")
+                        .font(.title2.bold())
+                    Text(words)
+                        .font(.body.monospaced())
+                        .textSelection(.enabled)
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    Button {
+                        PrivatePasteboard.copy(words)
+                        didCopy = true
+                    } label: {
+                        Label(didCopy ? "Copied to clipboard" : "Copy all 12 words", systemImage: didCopy ? "checkmark" : "doc.on.doc")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SubtlePressButtonStyle())
+                    .padding()
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))
+                    .sensoryFeedback(.success, trigger: didCopy)
+                }
+                .padding()
+            }
+            .navigationTitle("Recovery Words")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onDismiss)
+                }
+            }
         }
     }
 }
@@ -479,7 +685,7 @@ private struct OtherSettingsView: View {
             } header: {
                 Text("Secondary Currency")
             } footer: {
-                Text("Price the displayed KAS balance in USD or BTC.")
+                Text("Price the displayed \(preferences.network.currencySymbol) balance in USD or BTC.")
             }
 
             Section {

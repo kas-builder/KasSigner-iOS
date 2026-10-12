@@ -37,10 +37,11 @@ final class KaspaLiveRPCService: ObservableObject {
     func configure(
         profile: WalletProfile,
         nodeURL: String,
-        engine: KasSignerEngine
+        engine: KasSignerEngine,
+        additionalAddresses: [String] = []
     ) async {
         let addresses = Array(Set(
-            profile.receiveAddresses + profile.changeAddresses
+            profile.receiveAddresses + profile.changeAddresses + additionalAddresses
         )).sorted()
 
         guard let url = URL(string: nodeURL),

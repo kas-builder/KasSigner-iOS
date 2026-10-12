@@ -18,6 +18,9 @@ categories = ["cryptography::cryptocurrencies", "wasm"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+protected-vault-verification = []
+
 [dependencies]
 # WASM bindings
 wasm-bindgen = "0.2"
