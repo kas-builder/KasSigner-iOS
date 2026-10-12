@@ -533,16 +533,8 @@
       },
 
       deriveProtectedVault(kpub, receiveIndex, approvedAddresses, recoveryAddress, delayDAA, emergencyAnytime, network = "mainnet") {
-        if (network !== "testnet-10") {
-          return JSON.parse(
-            transactionModule.derive_protected_vault_with_destinations(
-              String(kpub).trim(),
-              Number(receiveIndex),
-              JSON.stringify(approvedAddresses.map(address => String(address).trim())),
-              BigInt(String(delayDAA)),
-              String(network)
-            )
-          );
+        if (String(network) !== "testnet-10") {
+          throw new Error("Protected Vaults are not yet available on Mainnet.");
         }
         return JSON.parse(
           transactionModule.derive_protected_vault_with_recovery(

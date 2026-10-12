@@ -299,6 +299,29 @@ private struct ProtectedVaultDraftExitPrompt: ViewModifier {
 }
 
 struct WalletHomeView: View {
+    private enum WalletHomeAlert {
+        case timeLockedPlaceholder
+        case mainnetProgrammableUTXO
+
+        var title: String {
+            switch self {
+            case .timeLockedPlaceholder:
+                return "Not Built Yet"
+            case .mainnetProgrammableUTXO:
+                return "Not Built on Mainnet"
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .timeLockedPlaceholder:
+                return "Time-Locked UTXOs are not built yet."
+            case .mainnetProgrammableUTXO:
+                return "Programmable UTXOs and Protected Vaults are not yet available on Mainnet."
+            }
+        }
+    }
+
     private enum VaultListItem: Identifiable {
         case vault(ProtectedVault)
         case setupDraft(ProtectedVaultSetupDraft)
@@ -343,7 +366,7 @@ struct WalletHomeView: View {
     @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @State private var showingAddWallet = false
-    @State private var showingTimeLockedUTXOPlaceholder = false
+    @State private var walletHomeAlert: WalletHomeAlert?
     @State private var showingSecondaryCurrency = false
     @State private var showingCurrencyConverter = false
     @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
@@ -404,10 +427,16 @@ struct WalletHomeView: View {
                 )
                 .presentationDragIndicator(.visible)
             }
-            .alert("Not Built Yet", isPresented: $showingTimeLockedUTXOPlaceholder) {
+            .alert(
+                walletHomeAlert?.title ?? "",
+                isPresented: Binding(
+                    get: { walletHomeAlert != nil },
+                    set: { if !$0 { walletHomeAlert = nil } }
+                )
+            ) {
                 Button("OK", role: .cancel) { }
             } message: {
-                Text("Time-Locked UTXOs are not built yet.")
+                Text(walletHomeAlert?.message ?? "")
             }
             .task {
                 async let walletRefresh: Void = refreshSelectedWallet(force: false)
@@ -428,17 +457,25 @@ struct WalletHomeView: View {
                     }
                 case .programmableUTXOTypes(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
-                        programmableUTXOTypeSelection(profile)
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            programmableUTXOTypeSelection(profile)
+                        } else {
+                            mainnetVaultUnavailableView
+                        }
                     } else {
                         unavailableAccountView
                     }
                 case .protectedVaultRules(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
-                        ProtectedVaultRulesView(profile: profile) { vault, selectedUTXOs, feeSelection in
-                            protectedVaultFundingSelections[vault.id] = selectedUTXOs
-                            protectedVaultFundingFeeSelections[vault.id] = feeSelection
-                            protectedVaultDraftsAwaitingFunding[vault.id] = vault
-                            navigationPath.append(WalletRoute.reviewVaultFunding(vault.id))
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            ProtectedVaultRulesView(profile: profile) { vault, selectedUTXOs, feeSelection in
+                                protectedVaultFundingSelections[vault.id] = selectedUTXOs
+                                protectedVaultFundingFeeSelections[vault.id] = feeSelection
+                                protectedVaultDraftsAwaitingFunding[vault.id] = vault
+                                navigationPath.append(WalletRoute.reviewVaultFunding(vault.id))
+                            }
+                        } else {
+                            mainnetVaultUnavailableView
                         }
                     } else {
                         unavailableAccountView
@@ -446,91 +483,101 @@ struct WalletHomeView: View {
                 case .protectedVaultSetupDraft(let draftID):
                     if let draft = protectedVaultStore.setupDraft(id: draftID),
                        let profile = walletStore.profiles.first(where: { $0.id == draft.profileID }) {
-                        ProtectedVaultSetupDraftResumeView(draft: draft, profile: profile) { vault, selectedUTXOs, feeSelection in
-                            protectedVaultFundingSelections[vault.id] = selectedUTXOs
-                            protectedVaultFundingFeeSelections[vault.id] = feeSelection
-                            protectedVaultDraftsAwaitingFunding[vault.id] = vault
-                            navigationPath.append(WalletRoute.reviewVaultFunding(vault.id))
-                        }
-                        .onAppear {
-                            protectedVaultStore.recordOpened(id: draft.id, profileID: profile.id)
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            ProtectedVaultSetupDraftResumeView(draft: draft, profile: profile) { vault, selectedUTXOs, feeSelection in
+                                protectedVaultFundingSelections[vault.id] = selectedUTXOs
+                                protectedVaultFundingFeeSelections[vault.id] = feeSelection
+                                protectedVaultDraftsAwaitingFunding[vault.id] = vault
+                                navigationPath.append(WalletRoute.reviewVaultFunding(vault.id))
+                            }
+                            .onAppear {
+                                protectedVaultStore.recordOpened(id: draft.id, profileID: profile.id)
+                            }
+                        } else {
+                            mainnetVaultUnavailableView
                         }
                     } else {
                         ContentUnavailableView("Draft Unavailable", systemImage: "doc.text.magnifyingglass")
                     }
                 case .protectedVaultDetail(let vaultID):
-                    if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }) {
-                        Group {
-                            if preferences.network == .testnet10,
-                               vault.status == .pendingWithdrawal {
-                                TestnetProtectedVaultSpendView(vaultID: vaultID)
-                            } else {
-                                ProtectedVaultDetailView(vault: vault) {
-                                    navigationPath.append(WalletRoute.fundProtectedVault(vaultID))
+                    if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }),
+                       let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }) {
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            Group {
+                                if vault.status == .pendingWithdrawal {
+                                    TestnetProtectedVaultSpendView(vaultID: vaultID)
+                                } else {
+                                    ProtectedVaultDetailView(vault: vault) {
+                                        navigationPath.append(WalletRoute.fundProtectedVault(vaultID))
+                                    }
                                 }
                             }
-                        }
-                        .onAppear {
-                            protectedVaultStore.recordOpened(id: vault.id, profileID: vault.profileID)
+                            .onAppear {
+                                protectedVaultStore.recordOpened(id: vault.id, profileID: vault.profileID)
+                            }
+                        } else {
+                            mainnetVaultUnavailableView
                         }
                     } else {
-                        ContentUnavailableView(
-                            "Vault Unavailable",
-                            systemImage: "lock.slash"
-                        )
+                        ContentUnavailableView("Vault Unavailable", systemImage: "lock.slash")
                     }
                 case .fundProtectedVault(let vaultID):
                     if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }),
                        let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }) {
-                        if vault.status == .localDraft {
-                            VaultFundingUTXOSelectionView(
-                                vault: vault,
-                                profile: profile,
-                                initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
-                                    ?? ProtectedVaultFundingFeeSelection()
-                            )
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            if vault.status == .localDraft {
+                                VaultFundingUTXOSelectionView(
+                                    vault: vault,
+                                    profile: profile,
+                                    initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
+                                        ?? ProtectedVaultFundingFeeSelection()
+                                )
+                            } else {
+                                FundProtectedVaultView(
+                                    vault: vault,
+                                    profile: profile,
+                                    selectedUTXOs: protectedVaultFundingSelections[vaultID],
+                                    initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
+                                        ?? ProtectedVaultFundingFeeSelection()
+                                )
+                            }
                         } else {
-                            FundProtectedVaultView(
-                                vault: vault,
-                                profile: profile,
-                                selectedUTXOs: protectedVaultFundingSelections[vaultID],
-                                initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
-                                    ?? ProtectedVaultFundingFeeSelection()
-                            )
+                            mainnetVaultUnavailableView
                         }
                     } else {
-                        ContentUnavailableView(
-                            "Vault Unavailable",
-                            systemImage: "lock.slash"
-                        )
+                        ContentUnavailableView("Vault Unavailable", systemImage: "lock.slash")
                     }
                 case .reviewVaultFunding(let vaultID):
                     if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID })
                         ?? protectedVaultDraftsAwaitingFunding[vaultID],
                        let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }),
                        let selectedUTXOs = protectedVaultFundingSelections[vaultID] {
-                        ReviewVaultFundingView(
-                            vault: vault,
-                            profile: profile,
-                            selectedUTXOs: selectedUTXOs,
-                            initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
-                                ?? ProtectedVaultFundingFeeSelection(),
-                            onDraftBuilt: { builtVault in
-                                if !protectedVaultStore.vaults.contains(where: { $0.id == builtVault.id }) {
-                                    guard let index = builtVault.ownerDerivationIndex,
-                                          walletStore.reserveReceiveAddress(
-                                            profileID: builtVault.profileID,
-                                            index: index
-                                          ) else { return false }
-                                    guard protectedVaultStore.add(builtVault) else {
-                                        return false
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            ReviewVaultFundingView(
+                                vault: vault,
+                                profile: profile,
+                                selectedUTXOs: selectedUTXOs,
+                                initialFeeSelection: protectedVaultFundingFeeSelections[vaultID]
+                                    ?? ProtectedVaultFundingFeeSelection(),
+                                onDraftBuilt: { builtVault in
+                                    if !protectedVaultStore.vaults.contains(where: { $0.id == builtVault.id }) {
+                                        guard let index = builtVault.ownerDerivationIndex,
+                                              walletStore.reserveReceiveAddress(
+                                                profileID: builtVault.profileID,
+                                                index: index
+                                              ) else { return false }
+                                        guard protectedVaultStore.add(builtVault) else {
+                                            return false
+                                        }
                                     }
+                                    protectedVaultStore.removeSetupDraft(id: builtVault.id)
+                                    protectedVaultDraftsAwaitingFunding.removeValue(forKey: builtVault.id)
+                                    return true
                                 }
-                                protectedVaultStore.removeSetupDraft(id: builtVault.id)
-                                protectedVaultDraftsAwaitingFunding.removeValue(forKey: builtVault.id)
-                                return true
-                            }
-                        )
+                            )
+                        } else {
+                            mainnetVaultUnavailableView
+                        }
                     } else {
                         ContentUnavailableView(
                             "Funding Selection Unavailable",
@@ -650,7 +697,11 @@ struct WalletHomeView: View {
                 }
 
                 Button {
-                    navigationPath.append(WalletRoute.programmableUTXOTypes(profile.id))
+                    if profile.network == KaspaNetwork.testnet10.rawValue {
+                        navigationPath.append(WalletRoute.programmableUTXOTypes(profile.id))
+                    } else {
+                        walletHomeAlert = .mainnetProgrammableUTXO
+                    }
                 } label: {
                     Text("Create Programmable UTXO")
                         .font(.headline)
@@ -794,6 +845,14 @@ struct WalletHomeView: View {
         }
     }
 
+    private var mainnetVaultUnavailableView: some View {
+        ContentUnavailableView(
+            "Not Built on Mainnet",
+            systemImage: "lock.shield",
+            description: Text("Programmable UTXOs and Protected Vaults are not yet available on Mainnet.")
+        )
+    }
+
     private func programmableUTXOTypeSelection(_ profile: WalletProfile) -> some View {
         List {
             if let storageError = protectedVaultStore.storageError {
@@ -804,7 +863,7 @@ struct WalletHomeView: View {
             }
             Section("Types") {
                 Button {
-                    showingTimeLockedUTXOPlaceholder = true
+                    walletHomeAlert = .timeLockedPlaceholder
                 } label: {
                     Label {
                         Text("New Time-Locked UTXO")
@@ -3206,11 +3265,7 @@ private struct ProtectedVaultDetailView: View {
         .task { await refreshVault() }
         .refreshable { await refreshVault() }
         .navigationDestination(isPresented: $showingSend) {
-            if preferences.network == .testnet10 {
-                TestnetProtectedVaultSpendView(vaultID: vault.id)
-            } else {
-                ProtectedVaultSendView(vault: vault)
-            }
+            TestnetProtectedVaultSpendView(vaultID: vault.id)
         }
         .navigationDestination(isPresented: $showingConsensusDetails) {
             ProtectedVaultConsensusDetailsView(

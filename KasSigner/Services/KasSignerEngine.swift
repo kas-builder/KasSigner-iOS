@@ -669,6 +669,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
         emergencyAnytime: Bool,
         delayDAA: UInt64
     ) async throws -> ProtectedVaultDescriptor {
+        guard profile.network == KaspaNetwork.testnet10.rawValue else {
+            throw EngineError.javascript(
+                "Protected Vaults are not yet available on Mainnet."
+            )
+        }
         try await ensureReady()
 
         let result = try await webView.callAsyncJavaScript(
@@ -904,6 +909,11 @@ final class KasSignerEngine: NSObject, ObservableObject {
         amountSompi: UInt64,
         feeSompi: UInt64
     ) async throws -> String {
+        guard profile.network == KaspaNetwork.testnet10.rawValue else {
+            throw EngineError.javascript(
+                "Protected Vaults are not yet available on Mainnet."
+            )
+        }
         try await ensureReady()
         let wallet: [String: Any] = [
             "kpub": profile.kpub,
