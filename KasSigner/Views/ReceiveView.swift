@@ -598,14 +598,8 @@ struct ReceiveView: View {
         do {
             let historicallyActive: Set<String>
             if preferences.network == .testnet10 {
-                var active = Set<String>()
-                for address in addresses {
-                    let status = try await AddressUsageChecker.shared.status(
-                        for: address, forceRefresh: forceRefresh
-                    )
-                    if status == .used { active.insert(address.lowercased()) }
-                }
-                historicallyActive = active
+                historicallyActive = try await Testnet10AddressActivityClient()
+                    .activeAddresses(in: addresses)
             } else {
                 historicallyActive = try await TransactionHistoryClient()
                     .activeAddresses(in: addresses)
@@ -770,13 +764,8 @@ private struct AddressNavigationPickerView: View {
                 guard showsAddressStatus else { return }
                 do {
                     if addresses.first?.hasPrefix("kaspatest:") == true {
-                        var active = Set<String>()
-                        for address in addresses {
-                            if try await AddressUsageChecker.shared.status(for: address) == .used {
-                                active.insert(address.lowercased())
-                            }
-                        }
-                        historicallyActive = active
+                        historicallyActive = try await Testnet10AddressActivityClient()
+                            .activeAddresses(in: addresses)
                     } else {
                         historicallyActive = try await TransactionHistoryClient()
                             .activeAddresses(in: addresses)

@@ -1,6 +1,61 @@
 import CryptoKit
+import Foundation
 import XCTest
 @testable import KasSigner
+
+final class Testnet10AddressActivityClientTests: XCTestCase {
+    func testBatchRequestsUseTestnet10EndpointAndChunkAt250Addresses() throws {
+        let addresses = (0..<251).map { "kaspatest:address-\($0)" }
+        let requests = try Testnet10AddressActivityClient.requests(for: addresses)
+        XCTAssertEqual(requests.count, 2)
+        XCTAssertEqual(requests.map(\.httpMethod), ["POST", "POST"])
+        XCTAssertEqual(requests.compactMap(\.url?.host), [
+            "api-tn10.kaspa.org",
+            "api-tn10.kaspa.org"
+        ])
+        XCTAssertEqual(requests.compactMap(\.url?.path), [
+            "/addresses/active",
+            "/addresses/active"
+        ])
+        let payloads = try requests.compactMap(\.httpBody).map {
+            try JSONDecoder().decode(TestnetAddressActivityRequestBody.self, from: $0)
+        }
+        XCTAssertEqual(payloads.map { $0.addresses.count }, [250, 1])
+        XCTAssertEqual(payloads[0].addresses, Array(addresses.prefix(250)))
+        XCTAssertEqual(payloads[1].addresses, [addresses[250]])
+    }
+
+    func testEmptyAddressListProducesNoRequests() throws {
+        XCTAssertTrue(try Testnet10AddressActivityClient.requests(for: []).isEmpty)
+    }
+
+    func testResponseParserReturnsActiveAddressesCaseInsensitively() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            ["address": "KASPATEST:USED", "active": true],
+            ["address": "kaspatest:fresh", "active": false]
+        ])
+
+        XCTAssertEqual(
+            try Testnet10AddressActivityClient.activeAddresses(from: data),
+            ["kaspatest:used"]
+        )
+    }
+
+    func testNonSuccessResponseThrows() throws {
+        let response = HTTPURLResponse(
+            url: URL(string: "https://api-tn10.kaspa.org/addresses/active")!,
+            statusCode: 503,
+            httpVersion: "HTTP/1.1",
+            headerFields: nil
+        )!
+
+        XCTAssertThrowsError(try Testnet10AddressActivityClient.validate(response))
+    }
+}
+
+private struct TestnetAddressActivityRequestBody: Decodable {
+    let addresses: [String]
+}
 
 final class ProtectedVaultFundingPlanTests: XCTestCase {
     private let profileID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!

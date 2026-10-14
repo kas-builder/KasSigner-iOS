@@ -154,6 +154,57 @@ private struct ActiveAddressResponse: Decodable {
     let active: Bool
 }
 
+/// Testnet 10-only activity lookup, kept separate from Mainnet's transaction-history client.
+struct Testnet10AddressActivityClient {
+    private let baseURL = URL(string: "https://api-tn10.kaspa.org")!
+
+    func activeAddresses(in addresses: [String]) async throws -> Set<String> {
+        var active = Set<String>()
+        for request in try Self.requests(for: addresses, baseURL: baseURL) {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try Self.validate(response)
+            active.formUnion(try Self.activeAddresses(from: data))
+        }
+        return active
+    }
+
+    static func requests(for addresses: [String]) throws -> [URLRequest] {
+        try requests(
+            for: addresses,
+            baseURL: URL(string: "https://api-tn10.kaspa.org")!
+        )
+    }
+
+    static func activeAddresses(from data: Data) throws -> Set<String> {
+        let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: data)
+        return Set(entries.filter(\.active).map { $0.address.lowercased() })
+    }
+
+    static func validate(_ response: URLResponse) throws {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200..<300).contains(httpResponse.statusCode) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+    }
+
+    private static func requests(
+        for addresses: [String],
+        baseURL: URL
+    ) throws -> [URLRequest] {
+        try stride(from: 0, to: addresses.count, by: 250).map { start in
+            let end = min(start + 250, addresses.count)
+            var request = URLRequest(url: baseURL.appending(path: "addresses/active"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 20
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(
+                ActiveAddressRequest(addresses: Array(addresses[start..<end]))
+            )
+            return request
+        }
+    }
+}
+
 private struct TransactionSearchRequest: Encodable {
     let transactionIds: [String]
 }
