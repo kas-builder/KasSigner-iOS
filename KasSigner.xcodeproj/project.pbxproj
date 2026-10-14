@@ -41,6 +41,7 @@
 		F50000000000000000000001 /* KasSigner/Services/HistoricalPriceCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */; };
 		F50000000000000000000002 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */; };
 		F60000000000000000000001 /* KasSigner/Models/PortfolioCSVImporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */; };
+		F70000000000000000000001 /* KasSignerTests/WalletStoreUpdateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70000000000000000000002 /* KasSignerTests/WalletStoreUpdateTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -90,6 +91,7 @@
 		F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Services/HistoricalPriceCache.swift; sourceTree = "<group>"; };
 		F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */ = {isa = PBXFileReference; lastKnownFileType = text; path = KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv; sourceTree = "<group>"; };
 		F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSigner/Models/PortfolioCSVImporter.swift; sourceTree = "<group>"; };
+		F70000000000000000000002 /* KasSignerTests/WalletStoreUpdateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KasSignerTests/WalletStoreUpdateTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -131,6 +133,7 @@
 				F30000000000000000000002 /* KasSigner/Models/PortfolioCalculations.swift */,
 				F60000000000000000000002 /* KasSigner/Models/PortfolioCSVImporter.swift */,
 				F40000000000000000000002 /* KasSignerTests/PortfolioCalculationsTests.swift */,
+				F70000000000000000000002 /* KasSignerTests/WalletStoreUpdateTests.swift */,
 				F50000000000000000000003 /* KasSigner/Services/HistoricalPriceCache.swift */,
 				F50000000000000000000004 /* KasSigner/Resources/PriceHistory/KaspaDailyUSD.csv */,
 				0424D32272095A5F93D8BB20 /* KasSigner/Services/KasSignerEngine.swift */,
@@ -299,6 +302,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F40000000000000000000001 /* KasSignerTests/PortfolioCalculationsTests.swift in Sources */,
+				F70000000000000000000001 /* KasSignerTests/WalletStoreUpdateTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

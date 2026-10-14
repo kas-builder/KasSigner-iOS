@@ -758,8 +758,15 @@ final class WalletStore: ObservableObject {
     @discardableResult
     func update(_ profile: WalletProfile) -> Bool {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
+        let previousProfile = profiles[index]
+        let previousState = persistentState
         profiles[index] = profile
-        return save()
+        guard save() else {
+            profiles[index] = previousProfile
+            persistentState = previousState
+            return false
+        }
+        return true
     }
 
     func moveProfiles(from source: IndexSet, to destination: Int) {

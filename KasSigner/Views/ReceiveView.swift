@@ -95,7 +95,8 @@ struct ReceiveView: View {
     let profile: WalletProfile
 
     @State private var isGeneratingAddress = false
-    @State private var generationError: String?
+    @State private var addressErrorMessage: String?
+    @State private var addressErrorTitle = "Unable to Generate Address"
     @State private var selectedAddressIndex = 0
     @State private var addressUsageStatus: AddressUsageStatus = .checking
     @State private var addressWasManuallySelected = false
@@ -356,17 +357,17 @@ struct ReceiveView: View {
             .environmentObject(walletStore)
         }
         .alert(
-            "Unable to Generate Address",
+            addressErrorTitle,
             isPresented: Binding(
-                get: { generationError != nil },
-                set: { if !$0 { generationError = nil } }
+                get: { addressErrorMessage != nil },
+                set: { if !$0 { addressErrorMessage = nil } }
             )
         ) {
             Button("OK", role: .cancel) {
-                generationError = nil
+                addressErrorMessage = nil
             }
         } message: {
-            Text(generationError ?? "")
+            Text(addressErrorMessage ?? "")
         }
         .alert("Change Address Copied", isPresented: $showingChangeAddressWarning) {
             Button("OK", role: .cancel) {}
@@ -521,7 +522,8 @@ struct ReceiveView: View {
         guard !isGeneratingAddress else { return }
 
         isGeneratingAddress = true
-        generationError = nil
+        addressErrorTitle = "Unable to Generate Address"
+        addressErrorMessage = nil
         defer { isGeneratingAddress = false }
 
         do {
@@ -565,7 +567,7 @@ struct ReceiveView: View {
                     : updated.changeAddresses.count
             )
         } catch {
-            generationError = error.localizedDescription
+            addressErrorMessage = error.localizedDescription
         }
     }
 
@@ -615,11 +617,15 @@ struct ReceiveView: View {
                     )
             }) else { return }
 
-            selectedAddressIndex = earliestFreshIndex
-            addressUsageStatus = .fresh
             var updatedProfile = activeProfile
             updatedProfile.earliestFreshReceiveIndex = earliestFreshIndex
-            walletStore.update(updatedProfile)
+            guard walletStore.update(updatedProfile) else {
+                addressErrorTitle = "Unable to Save Address"
+                addressErrorMessage = "KasSigner couldn't save the fresh receive-address choice. Your current address was kept. Please try again."
+                return
+            }
+            selectedAddressIndex = earliestFreshIndex
+            addressUsageStatus = .fresh
         } catch is CancellationError {
             return
         } catch {
