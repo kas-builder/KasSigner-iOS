@@ -2130,6 +2130,7 @@ private struct VerifiedTransactionReviewView: View {
     @State private var testnetErrorMessage: String?
     @State private var testnetTransactionID: String?
     @State private var showingBroadcastSuccess = false
+    @State private var finishSendFlowAfterSuccessDismissal = false
 
     private let accentColor = Color(
         red: 0.20,
@@ -2170,11 +2171,18 @@ private struct VerifiedTransactionReviewView: View {
                 }
             )
         }
-        .fullScreenCover(isPresented: $showingBroadcastSuccess) {
+        .fullScreenCover(
+            isPresented: $showingBroadcastSuccess,
+            onDismiss: {
+                guard finishSendFlowAfterSuccessDismissal else { return }
+                finishSendFlowAfterSuccessDismissal = false
+                onComplete()
+            }
+        ) {
             if let testnetTransactionID {
                 BroadcastSuccessView(transactionID: testnetTransactionID) {
+                    finishSendFlowAfterSuccessDismissal = true
                     showingBroadcastSuccess = false
-                    onComplete()
                 }
             }
         }
