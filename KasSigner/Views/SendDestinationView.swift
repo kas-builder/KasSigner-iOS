@@ -26,6 +26,7 @@ struct SendDestinationView: View {
     let transactionType: SendTransactionType
     let sessionID: UUID
     @Binding var showingSendFlow: Bool
+    var onTestnetBroadcast: ((String) -> Void)? = nil
 
     @State private var destinationAddress = ""
     @State private var amountText = ""
@@ -565,6 +566,7 @@ struct SendDestinationView: View {
         .navigationDestination(item: $verifiedReview) { review in
             VerifiedTransactionReviewView(
                 review: review,
+                onTestnetBroadcast: onTestnetBroadcast,
                 onComplete: {
                     verifiedReview = nil
                     showingSendFlow = false
@@ -2115,6 +2117,7 @@ extension VerifiedTransactionReview {
 
 private struct VerifiedTransactionReviewView: View {
     let review: VerifiedTransactionReview
+    var onTestnetBroadcast: ((String) -> Void)? = nil
     let onComplete: () -> Void
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var engine: KasSignerEngine
@@ -2430,7 +2433,11 @@ private struct VerifiedTransactionReviewView: View {
                 testnetErrorMessage = "Broadcast succeeded, but the local change-address state was not saved. Refresh before sending again."
                 return
             }
-            showingBroadcastSuccess = true
+            if let onTestnetBroadcast {
+                onTestnetBroadcast(txid)
+            } else {
+                showingBroadcastSuccess = true
+            }
             await syncService.refresh(profile: profile, walletStore: walletStore,
                 engine: engine, preferences: preferences, force: true,
                 includeTransactionHistory: false)
@@ -3374,7 +3381,12 @@ struct BroadcastSuccessView: View {
     @EnvironmentObject private var preferences: AppPreferences
     let transactionID: String
     var localRecordWarning: String? = nil
+    var fadesOnDone = false
+    var onDoneStarted: () -> Void = {}
     let onDone: () -> Void
+    @State private var isFadingOut = false
+
+    private let dismissalAnimationDuration = 0.25
 
     var body: some View {
         NavigationStack {
@@ -3450,15 +3462,31 @@ struct BroadcastSuccessView: View {
                 Spacer()
 
                 Button("OK") {
-                    onDone()
+                    guard fadesOnDone else {
+                        onDone()
+                        return
+                    }
+                    onDoneStarted()
+                    isFadingOut = true
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(250))
+                        onDone()
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .frame(maxWidth: .infinity)
+                .disabled(isFadingOut)
             }
             .padding(20)
             .navigationBarBackButtonHidden(true)
         }
+        .opacity(isFadingOut ? 0 : 1)
+        .animation(
+            fadesOnDone ? .easeInOut(duration: dismissalAnimationDuration) : nil,
+            value: isFadingOut
+        )
+        .presentationBackground(fadesOnDone ? .clear : Color(.systemBackground))
     }
 }
 

@@ -306,6 +306,11 @@ struct WalletHomeView: View {
         let localRecordWarning: String?
     }
 
+    private struct TestnetBroadcastReceipt: Identifiable {
+        let id = UUID()
+        let transactionID: String
+    }
+
     private enum WalletHomeAlert {
         case timeLockedPlaceholder
         case mainnetProgrammableUTXO
@@ -366,6 +371,7 @@ struct WalletHomeView: View {
 
     @State private var navigationPath = NavigationPath()
     @State private var vaultBroadcastReceipt: VaultBroadcastReceipt?
+    @State private var testnetBroadcastReceipt: TestnetBroadcastReceipt?
     @State private var showingSendFlow = false
     @State private var protectedVaultFundingSelections: [UUID: [WalletUTXO]] = [:]
     @State private var protectedVaultFundingFeeSelections: [UUID: ProtectedVaultFundingFeeSelection] = [:]
@@ -644,6 +650,14 @@ struct WalletHomeView: View {
                 }
             }
         }
+        .fullScreenCover(item: $testnetBroadcastReceipt) { receipt in
+            BroadcastSuccessView(
+                transactionID: receipt.transactionID,
+                fadesOnDone: true,
+                onDoneStarted: { showingSendFlow = false },
+                onDone: { testnetBroadcastReceipt = nil }
+            )
+        }
         .onChange(of: walletStore.selectedProfileID) { oldValue, newValue in
             guard oldValue != newValue else { return }
             showingSendFlow = false
@@ -663,6 +677,11 @@ struct WalletHomeView: View {
             transactionID: transactionID,
             localRecordWarning: warning
         )
+    }
+
+    private func presentTestnetBroadcast(transactionID: String) {
+        guard preferences.network == .testnet10 else { return }
+        testnetBroadcastReceipt = TestnetBroadcastReceipt(transactionID: transactionID)
     }
 
     private func hasSavedVaultTransaction(_ transactionID: String, vaultID: UUID) -> Bool {
@@ -920,7 +939,8 @@ struct WalletHomeView: View {
         .navigationDestination(isPresented: $showingSendFlow) {
             SendTransactionTypeSelectionView(
                 profile: profile,
-                showingSendFlow: $showingSendFlow
+                showingSendFlow: $showingSendFlow,
+                onTestnetBroadcast: presentTestnetBroadcast
             )
         }
         .onChange(of: showingSendFlow) { _, isShowing in
@@ -5673,6 +5693,7 @@ private enum VaultFundingFeeChoice: String, CaseIterable, Identifiable {
 struct SendTransactionTypeSelectionView: View {
     let profile: WalletProfile
     @Binding var showingSendFlow: Bool
+    var onTestnetBroadcast: ((String) -> Void)? = nil
 
     @State private var selectedType: SendTransactionType = .standard
     @State private var showingUTXOSelection = false
@@ -5734,7 +5755,8 @@ struct SendTransactionTypeSelectionView: View {
                 profile: profile,
                 transactionType: selectedType,
                 clearSelectionOnAppear: true,
-                showingSendFlow: $showingSendFlow
+                showingSendFlow: $showingSendFlow,
+                onTestnetBroadcast: onTestnetBroadcast
             )
         }
     }
@@ -5843,6 +5865,7 @@ struct SendUTXOSelectionView: View {
     let transactionType: SendTransactionType
     let clearSelectionOnAppear: Bool
     @Binding var showingSendFlow: Bool
+    var onTestnetBroadcast: ((String) -> Void)? = nil
     var protectedVaultSelection: (([WalletUTXO]) -> Void)? = nil
     var initialProtectedVaultUTXOs: [WalletUTXO] = []
 
@@ -5854,7 +5877,6 @@ struct SendUTXOSelectionView: View {
     @State private var showingUTXOSelectionLimit = false
     @State private var showingSessionError = false
     @State private var showingDestination = false
-    @State private var showingTestnetDestination = false
     @State private var activeSessionID: UUID?
     @State private var activeSession: SendSession?
 
@@ -5930,27 +5952,9 @@ struct SendUTXOSelectionView: View {
                     selectedUTXOs: session.selectedUTXOs,
                     transactionType: session.transactionType,
                     sessionID: activeSessionID,
-                    showingSendFlow: $showingSendFlow
+                    showingSendFlow: $showingSendFlow,
+                    onTestnetBroadcast: onTestnetBroadcast
                 )
-            }
-        }
-        .fullScreenCover(isPresented: $showingTestnetDestination) {
-            if let activeSessionID,
-               let session = activeSession {
-                NavigationStack {
-                    SendDestinationView(
-                        profile: profile,
-                        selectedUTXOs: session.selectedUTXOs,
-                        transactionType: session.transactionType,
-                        sessionID: activeSessionID,
-                        showingSendFlow: $showingSendFlow
-                    )
-                }
-            }
-        }
-        .onChange(of: showingSendFlow) { _, isShowing in
-            if !isShowing {
-                showingTestnetDestination = false
             }
         }
         .onAppear {
@@ -5999,11 +6003,7 @@ struct SendUTXOSelectionView: View {
         }
         activeSessionID = session.id
         activeSession = session
-        if profile.network == KaspaNetwork.testnet10.rawValue {
-            showingTestnetDestination = true
-        } else {
-            showingDestination = true
-        }
+        showingDestination = true
     }
 
     private var utxos: [WalletUTXO] {

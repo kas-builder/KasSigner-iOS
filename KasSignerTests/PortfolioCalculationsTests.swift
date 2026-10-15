@@ -3,6 +3,59 @@ import Foundation
 import XCTest
 @testable import KasSigner
 
+@MainActor
+private final class IsolatedWalletStoreFixture {
+    let rootURL: URL
+    let suiteName: String
+    let defaults: UserDefaults
+    let storage: ProtectedWalletStorage
+    let store: WalletStore
+
+    init() throws {
+        rootURL = FileManager.default.temporaryDirectory
+            .appending(path: "KasSignerWalletTest-\(UUID().uuidString)", directoryHint: .isDirectory)
+        suiteName = "KasSignerWalletTest.\(UUID().uuidString)"
+        defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        storage = ProtectedWalletStorage(directoryURL: rootURL)
+        store = WalletStore(
+            protectedStorage: storage,
+            defaults: defaults,
+            transactionCacheDirectoryURL: rootURL.appending(
+                path: "history",
+                directoryHint: .isDirectory
+            ),
+            removeTestnetSeed: { _ in }
+        )
+    }
+
+    func cleanUp() {
+        defaults.removePersistentDomain(forName: suiteName)
+        try? FileManager.default.removeItem(at: rootURL)
+    }
+}
+
+final class IsolatedWalletStoreFixtureTests: XCTestCase {
+    @MainActor
+    func testFixtureWritesOnlyToItsTemporaryStorage() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+
+        XCTAssertNotEqual(
+            fixture.storage.directoryURL,
+            ProtectedWalletStorage.shared.directoryURL
+        )
+        XCTAssertNotEqual(fixture.suiteName, Bundle.main.bundleIdentifier)
+
+        XCTAssertTrue(fixture.store.add(WalletProfile(
+            name: "Isolated Fixture Test",
+            kpub: "kpub-isolated-fixture-test"
+        )))
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: fixture.rootURL.appending(path: "wallet-state.json").path
+        ))
+    }
+}
+
 final class Testnet10AddressActivityClientTests: XCTestCase {
     func testBatchRequestsUseTestnet10EndpointAndChunkAt250Addresses() throws {
         let addresses = (0..<251).map { "kaspatest:address-\($0)" }
@@ -976,8 +1029,10 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
-    func testOutOfOrderChangeAddressIsMarkedUsedWithoutMovingCursorBackward() {
-        let store = WalletStore()
+    func testOutOfOrderChangeAddressIsMarkedUsedWithoutMovingCursorBackward() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profileID = UUID()
         let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
         store.add(
@@ -1013,8 +1068,10 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
-    func testNonContiguousChangeAddressesAreAllMarkedUsedAndAdvanceCursor() {
-        let store = WalletStore()
+    func testNonContiguousChangeAddressesAreAllMarkedUsedAndAdvanceCursor() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profileID = UUID()
         let changeAddresses = (0..<6).map { "kaspa:change-\($0)" }
         store.add(
@@ -1049,8 +1106,10 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
-    func testInvalidChangeIndexRejectsBroadcastRecordWithoutPartialMarking() {
-        let store = WalletStore()
+    func testInvalidChangeIndexRejectsBroadcastRecordWithoutPartialMarking() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profileID = UUID()
         let changeAddresses = (0..<3).map { "kaspa:change-\($0)" }
         store.add(
@@ -1159,8 +1218,10 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
-    func testBroadcastToOwnedReceiveAddressMarksItUsedImmediately() {
-        let store = WalletStore()
+    func testBroadcastToOwnedReceiveAddressMarksItUsedImmediately() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profileID = UUID()
         let receiveAddress = "kaspa:owned-receive-address"
         store.add(
@@ -1251,8 +1312,10 @@ final class PortfolioCalculationsTests: XCTestCase {
     }
 
     @MainActor
-    func testLocallyBroadcastTransferToUncachedWalletAddressBecomesInternalWhenConfirmed() {
-        let store = WalletStore()
+    func testLocallyBroadcastTransferToUncachedWalletAddressBecomesInternalWhenConfirmed() throws {
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profileID = UUID()
         let transactionID = String(repeating: "c", count: 64)
         let profile = WalletProfile(
@@ -2565,7 +2628,9 @@ final class PortfolioCalculationsTests: XCTestCase {
 
     @MainActor
     func testSendSessionTransactionTypesSelectRequiredFreshChangeAddresses() throws {
-        let store = WalletStore()
+        let fixture = try IsolatedWalletStoreFixture()
+        defer { fixture.cleanUp() }
+        let store = fixture.store
         let profile = WalletProfile(
             name: "Mode Wallet",
             kpub: "kpub-mode-test",
