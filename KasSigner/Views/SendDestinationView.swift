@@ -4128,38 +4128,20 @@ private struct ChangeAllocationView: View {
         index: Int
     ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                Text(changeOutputTitle(index: index, count: outputs.count))
-                    .font(.title3.weight(.semibold))
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top) {
+                    changeOutputTitleView(index: index)
+                        .fixedSize(horizontal: true, vertical: false)
 
-                Spacer(minLength: 12)
+                    Spacer(minLength: 8)
 
-                VStack(alignment: .trailing, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 5) {
-                        if transactionType == .decoy && index == 0 {
-                            Text(formatPlainKas(output.amountSompi))
-                                .font(.subheadline.weight(.semibold).monospacedDigit())
-                                .accessibilityLabel("Decoy amount matches destination amount")
-                        } else {
-                            TextField("0", text: amountBinding(at: index))
-                                .keyboardType(.decimalPad)
-                                .font(.subheadline.weight(.semibold).monospacedDigit())
-                                .multilineTextAlignment(.trailing)
-                                .frame(
-                                    width: amountFieldWidth(at: index),
-                                    alignment: .trailing
-                                )
-                        }
+                    outputAmountDetails(output, index: index, alignment: .trailing)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
 
-                        Text(preferences.network.currencySymbol)
-                            .font(.subheadline.weight(.semibold).monospacedDigit())
-                    }
-
-                    if let usdValue = formatUSD(output.amountSompi) {
-                        Text(usdValue)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
+                VStack(alignment: .leading, spacing: 6) {
+                    changeOutputTitleView(index: index)
+                    outputAmountDetails(output, index: index, alignment: .leading)
                 }
             }
 
@@ -4183,6 +4165,47 @@ private struct ChangeAllocationView: View {
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 15, style: .continuous)
         )
+    }
+
+    private func changeOutputTitleView(index: Int) -> some View {
+        Text(changeOutputTitle(index: index, count: outputs.count))
+            .font(.title3.weight(.semibold))
+    }
+
+    private func outputAmountDetails(
+        _ output: PlannedChangeOutput,
+        index: Int,
+        alignment: HorizontalAlignment
+    ) -> some View {
+        VStack(alignment: alignment, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                if transactionType == .decoy && index == 0 {
+                    Text(formatPlainKas(output.amountSompi))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .accessibilityLabel("Decoy amount matches destination amount")
+                } else {
+                    TextField("0", text: amountBinding(at: index))
+                        .keyboardType(.decimalPad)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                        .multilineTextAlignment(.trailing)
+                        .frame(
+                            width: amountFieldWidth(at: index),
+                            alignment: .trailing
+                        )
+                }
+
+                Text(preferences.network.currencySymbol)
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            if let usdValue = formatUSD(output.amountSompi) {
+                Text(usdValue)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
     }
 
     private func changeOutputTitle(index: Int, count: Int) -> String {
