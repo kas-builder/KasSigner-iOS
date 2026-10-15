@@ -406,7 +406,9 @@ struct RootView: View {
             WalletTabContextMenu(
                 profiles: walletStore.activeProfiles,
                 selectedProfileID: walletStore.selectedProfileID,
+                selectedNetwork: preferences.network,
                 onSelect: selectWallet,
+                onSelectNetwork: { preferences.network = $0 },
                 onAddWallet: {
                     selectedTab = .wallet
                     showingAddWallet = true
@@ -1082,14 +1084,18 @@ struct RootView: View {
 private struct WalletTabContextMenu: UIViewControllerRepresentable {
     let profiles: [WalletProfile]
     let selectedProfileID: UUID?
+    let selectedNetwork: KaspaNetwork
     let onSelect: (WalletProfile) -> Void
+    let onSelectNetwork: (KaspaNetwork) -> Void
     let onAddWallet: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             profiles: profiles,
             selectedProfileID: selectedProfileID,
+            selectedNetwork: selectedNetwork,
             onSelect: onSelect,
+            onSelectNetwork: onSelectNetwork,
             onAddWallet: onAddWallet
         )
     }
@@ -1108,7 +1114,9 @@ private struct WalletTabContextMenu: UIViewControllerRepresentable {
     ) {
         context.coordinator.profiles = profiles
         context.coordinator.selectedProfileID = selectedProfileID
+        context.coordinator.selectedNetwork = selectedNetwork
         context.coordinator.onSelect = onSelect
+        context.coordinator.onSelectNetwork = onSelectNetwork
         context.coordinator.onAddWallet = onAddWallet
         uiViewController.findTabBar()
     }
@@ -1150,21 +1158,29 @@ private struct WalletTabContextMenu: UIViewControllerRepresentable {
     final class Coordinator: NSObject, UIContextMenuInteractionDelegate {
         var profiles: [WalletProfile]
         var selectedProfileID: UUID?
+        var selectedNetwork: KaspaNetwork
         var onSelect: (WalletProfile) -> Void
+        var onSelectNetwork: (KaspaNetwork) -> Void
         var onAddWallet: () -> Void
 
         private weak var installedWalletControl: UIControl?
-        private var interaction: UIContextMenuInteraction?
+        private weak var installedSettingsControl: UIControl?
+        private var walletInteraction: UIContextMenuInteraction?
+        private var settingsInteraction: UIContextMenuInteraction?
 
         init(
             profiles: [WalletProfile],
             selectedProfileID: UUID?,
+            selectedNetwork: KaspaNetwork,
             onSelect: @escaping (WalletProfile) -> Void,
+            onSelectNetwork: @escaping (KaspaNetwork) -> Void,
             onAddWallet: @escaping () -> Void
         ) {
             self.profiles = profiles
             self.selectedProfileID = selectedProfileID
+            self.selectedNetwork = selectedNetwork
             self.onSelect = onSelect
+            self.onSelectNetwork = onSelectNetwork
             self.onAddWallet = onAddWallet
         }
 
@@ -1175,16 +1191,27 @@ private struct WalletTabContextMenu: UIViewControllerRepresentable {
                 .sorted { $0.frame.minX < $1.frame.minX }
 
             guard let walletControl = itemControls.first,
-                  installedWalletControl !== walletControl else { return }
+                  let settingsControl = itemControls.last else { return }
 
-            if let installedWalletControl, let interaction {
-                installedWalletControl.removeInteraction(interaction)
+            if installedWalletControl !== walletControl {
+                if let installedWalletControl, let walletInteraction {
+                    installedWalletControl.removeInteraction(walletInteraction)
+                }
+                let interaction = UIContextMenuInteraction(delegate: self)
+                walletControl.addInteraction(interaction)
+                installedWalletControl = walletControl
+                walletInteraction = interaction
             }
 
-            let interaction = UIContextMenuInteraction(delegate: self)
-            walletControl.addInteraction(interaction)
-            installedWalletControl = walletControl
-            self.interaction = interaction
+            if installedSettingsControl !== settingsControl {
+                if let installedSettingsControl, let settingsInteraction {
+                    installedSettingsControl.removeInteraction(settingsInteraction)
+                }
+                let interaction = UIContextMenuInteraction(delegate: self)
+                settingsControl.addInteraction(interaction)
+                installedSettingsControl = settingsControl
+                settingsInteraction = interaction
+            }
         }
 
         func contextMenuInteraction(
@@ -1193,8 +1220,23 @@ private struct WalletTabContextMenu: UIViewControllerRepresentable {
         ) -> UIContextMenuConfiguration? {
             return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) {
                 [weak self] _ in
-                self?.walletMenu()
+                guard let self else { return nil }
+                return interaction === self.settingsInteraction
+                    ? self.networkMenu()
+                    : self.walletMenu()
             }
+        }
+
+        private func networkMenu() -> UIMenu {
+            let networkActions = KaspaNetwork.allCases.map { network in
+                UIAction(
+                    title: network.title,
+                    state: network == selectedNetwork ? .on : .off
+                ) { [weak self] _ in
+                    self?.onSelectNetwork(network)
+                }
+            }
+            return UIMenu(children: networkActions)
         }
 
         private func walletMenu() -> UIMenu {
