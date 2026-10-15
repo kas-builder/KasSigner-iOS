@@ -32,6 +32,8 @@
     "https://paul.kaspa.red",
     "https://alex.kaspa.red"
   ];
+  const TESTNET10_RESOLVER_DEADLINE_MS = 10_000;
+  const RESOLVER_REQUEST_TIMEOUT_MS = 5_000;
 
   function normalizeCustomNode(value) {
     const trimmed = String(value ?? "").trim();
@@ -42,10 +44,14 @@
     return trimmed;
   }
 
-  async function queryResolver(baseURL, network = "mainnet") {
+  async function queryResolver(
+    baseURL,
+    network = "mainnet",
+    timeoutMs = RESOLVER_REQUEST_TIMEOUT_MS
+  ) {
     const response = await fetch(
       `${baseURL}/v2/kaspa/${network}/any/wrpc/borsh`,
-      { signal: AbortSignal.timeout(5000) }
+      { signal: AbortSignal.timeout(timeoutMs) }
     );
     if (!response.ok) throw new Error(`Public node service returned ${response.status}.`);
     const body = await response.json();
@@ -68,7 +74,7 @@
 
   async function resolveNode(
     config = {},
-    { forceFresh = false, excludeNodeURL = "" } = {}
+    { forceFresh = false, excludeNodeURL = "", deadlineAt = null } = {}
   ) {
     const nodeKey = config.mode === "custom"
       ? `custom:${config.network ?? "mainnet"}:${normalizeCustomNode(config.customURL)}`
@@ -88,10 +94,27 @@
     }
 
     const shuffled = [...resolvers].sort(() => Math.random() - 0.5);
+    const isTestnet10 = config.network === "testnet-10";
+    const resolutionDeadline = isTestnet10
+      ? Math.min(
+          Date.now() + TESTNET10_RESOLVER_DEADLINE_MS,
+          deadlineAt ?? Number.POSITIVE_INFINITY
+        )
+      : null;
     let lastError = null;
     for (const url of shuffled) {
+      const remainingMs = resolutionDeadline === null
+        ? RESOLVER_REQUEST_TIMEOUT_MS
+        : resolutionDeadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error("Testnet 10 node resolution exceeded its time limit.");
+      }
       try {
-        const candidate = await queryResolver(url, config.network ?? "mainnet");
+        const candidate = await queryResolver(
+          url,
+          config.network ?? "mainnet",
+          Math.min(RESOLVER_REQUEST_TIMEOUT_MS, remainingMs)
+        );
         if (
           excludeNodeURL &&
           String(candidate.nodeURL) === String(excludeNodeURL)
@@ -104,6 +127,9 @@
       } catch (error) {
         lastError = error;
       }
+    }
+    if (resolutionDeadline !== null && Date.now() >= resolutionDeadline) {
+      throw new Error("Testnet 10 node resolution exceeded its time limit.");
     }
     throw lastError ?? new Error("No public Kaspa node could be resolved.");
   }
