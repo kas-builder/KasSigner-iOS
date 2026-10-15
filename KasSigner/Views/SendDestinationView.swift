@@ -3481,6 +3481,7 @@ struct BroadcastSuccessView: View {
             .padding(20)
             .navigationBarBackButtonHidden(true)
         }
+        .background(Color.black.ignoresSafeArea())
         .opacity(isFadingOut ? 0 : 1)
         .animation(
             fadesOnDone ? .easeInOut(duration: dismissalAnimationDuration) : nil,
