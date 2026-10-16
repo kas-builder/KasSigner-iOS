@@ -1212,7 +1212,7 @@ struct WalletHomeView: View {
                     Text("Time Locked Vault")
                         .font(.headline)
                     Spacer()
-                    Text(spent ? "Spent" : funded ? "Funded" : "Setup Draft")
+                    Text(spent ? "Spent" : funded ? "Active" : "Setup Draft")
                         .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
                         .foregroundStyle(funded ? Color.green : Color.orange)
                 }
@@ -1223,7 +1223,7 @@ struct WalletHomeView: View {
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(spent ? "Time Locked Vault, spent, tap to view vault" : funded ? "Time Locked Vault, funded, tap to view vault" : "Time Locked Vault, Setup Draft, tap to resume setup")
+        .accessibilityLabel(spent ? "Time Locked Vault, spent, tap to view vault" : funded ? "Time Locked Vault, active, tap to view vault" : "Time Locked Vault, Setup Draft, tap to resume setup")
     }
 
     private var unavailableAccountView: some View {
