@@ -312,14 +312,11 @@ struct WalletHomeView: View {
     }
 
     private enum WalletHomeAlert {
-        case timeLockedPlaceholder
         case mainnetProgrammableUTXO
         case vaultRecordWarning(String)
 
         var title: String {
             switch self {
-            case .timeLockedPlaceholder:
-                return "Not Built Yet"
             case .mainnetProgrammableUTXO:
                 return "Not Built on Mainnet"
             case .vaultRecordWarning:
@@ -329,8 +326,6 @@ struct WalletHomeView: View {
 
         var message: String {
             switch self {
-            case .timeLockedPlaceholder:
-                return "Time-Locked UTXOs are not built yet."
             case .mainnetProgrammableUTXO:
                 return "Programmable UTXOs and Protected Vaults are not yet available on Mainnet."
             case .vaultRecordWarning(let warning):
@@ -361,6 +356,7 @@ struct WalletHomeView: View {
     private enum WalletRoute: Hashable {
         case receive(UUID)
         case programmableUTXOTypes(UUID)
+        case timeLockedUTXORules(UUID)
         case protectedVaultRules(UUID)
         case protectedVaultSetupDraft(UUID)
         case protectedVaultDetail(UUID)
@@ -479,6 +475,16 @@ struct WalletHomeView: View {
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
                             programmableUTXOTypeSelection(profile)
+                        } else {
+                            mainnetVaultUnavailableView
+                        }
+                    } else {
+                        unavailableAccountView
+                    }
+                case .timeLockedUTXORules(let profileID):
+                    if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            TimeLockedUTXORulesView()
                         } else {
                             mainnetVaultUnavailableView
                         }
@@ -968,18 +974,14 @@ struct WalletHomeView: View {
                 }
             }
             Section("Types") {
-                Button {
-                    walletHomeAlert = .timeLockedPlaceholder
-                } label: {
+                NavigationLink(value: WalletRoute.timeLockedUTXORules(profile.id)) {
                     Label {
                         Text("New Time-Locked UTXO")
-                            .foregroundStyle(.primary)
                     } icon: {
                         Image(systemName: "clock.badge.checkmark")
                             .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
                     }
                 }
-                .buttonStyle(.plain)
 
                 NavigationLink(value: WalletRoute.protectedVaultRules(profile.id)) {
                     Label("New Protected Vault", systemImage: "lock.shield")
@@ -1354,6 +1356,88 @@ private struct ProtectedVaultSetupDraftResumeView: View {
         restoredUTXOs = currentUTXOs.filter { savedIDs.contains($0.id) }
         needsUTXOReselection = restoredUTXOs.count != draft.selectedUTXOIDs.count
         isValidating = false
+    }
+}
+
+private struct TimeLockedUTXORulesView: View {
+    @State private var unlockDate = Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now
+    @State private var showingVaultFlowInfo = false
+    @State private var showingUnlockDateInfo = false
+
+    var body: some View {
+        Form {
+            Section {
+                HStack(spacing: 10) {
+                    flowStep("Fund", symbol: "arrow.down")
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    flowStep("Locked", symbol: "lock.fill")
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    flowStep("Unlocks", symbol: "clock.badge.checkmark")
+                    Image(systemName: "arrow.right")
+                        .foregroundStyle(.secondary)
+                    flowStep("Send", symbol: "arrow.up.right")
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .listRowBackground(Color(.secondarySystemGroupedBackground))
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Vault Flow")
+                    Button {
+                        showingVaultFlowInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("About the vault flow")
+                }
+            }
+
+            Section {
+                DatePicker("Date", selection: $unlockDate, in: Date.now..., displayedComponents: .date)
+                DatePicker("Time", selection: $unlockDate, in: Date.now..., displayedComponents: .hourAndMinute)
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Unlock Date")
+                    Button {
+                        showingUnlockDateInfo = true
+                    } label: {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("About the unlock date")
+                }
+            } footer: {
+                Text("The date is an estimate. The vault will unlock at a DAA score set during review.")
+            }
+        }
+        .navigationTitle("Time-Locked UTXO")
+        .navigationBarTitleDisplayMode(.inline)
+        .alert("Vault Flow", isPresented: $showingVaultFlowInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Fund: send KAS into the vault. Locked: the KAS cannot be sent before the unlock score. Unlocks: reaching that score makes a claim possible; nothing moves automatically. Send: sign and broadcast a transaction to move the KAS.")
+        }
+        .alert("Unlock Date", isPresented: $showingUnlockDateInfo) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Choose when you want the KAS to become available. Before funding, the app will convert this date and time to a DAA score for the on-chain lock. The displayed date is an estimate; the DAA score controls when a claim can be accepted.")
+        }
+    }
+
+    private func flowStep(_ title: String, symbol: String) -> some View {
+        VStack(spacing: 7) {
+            Image(systemName: symbol)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(Color.accentColor)
+            Text(title)
+                .font(.caption.weight(.medium))
+        }
+        .frame(maxWidth: .infinity)
     }
 }
 
