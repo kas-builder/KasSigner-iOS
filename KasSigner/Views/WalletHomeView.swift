@@ -337,11 +337,13 @@ struct WalletHomeView: View {
     private enum VaultListItem: Identifiable {
         case vault(ProtectedVault)
         case setupDraft(ProtectedVaultSetupDraft)
+        case timeLockedSetupDraft(TimeLockedVaultSetupDraft)
 
         var id: UUID {
             switch self {
             case .vault(let vault): vault.id
             case .setupDraft(let draft): draft.id
+            case .timeLockedSetupDraft(let draft): draft.id
             }
         }
 
@@ -349,6 +351,7 @@ struct WalletHomeView: View {
             switch self {
             case .vault(let vault): vault.createdAt
             case .setupDraft(let draft): draft.createdAt
+            case .timeLockedSetupDraft(let draft): draft.createdAt
             }
         }
     }
@@ -357,6 +360,7 @@ struct WalletHomeView: View {
         case receive(UUID)
         case programmableUTXOTypes(UUID)
         case timeLockedUTXORules(UUID)
+        case timeLockedSetupDraft(UUID)
         case protectedVaultRules(UUID)
         case protectedVaultSetupDraft(UUID)
         case protectedVaultDetail(UUID)
@@ -484,12 +488,29 @@ struct WalletHomeView: View {
                 case .timeLockedUTXORules(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
-                            TimeLockedUTXORulesView()
+                            TimeLockedUTXORulesView(profile: profile)
                         } else {
                             mainnetVaultUnavailableView
                         }
                     } else {
                         unavailableAccountView
+                    }
+                case .timeLockedSetupDraft(let draftID):
+                    if let draft = protectedVaultStore.timeLockedSetupDraft(id: draftID),
+                       let profile = walletStore.profiles.first(where: { $0.id == draft.profileID }) {
+                        if profile.network == KaspaNetwork.testnet10.rawValue {
+                            TimeLockedVaultSetupDraftResumeView(draft: draft, profile: profile)
+                                .onAppear {
+                                    protectedVaultStore.recordOpenedTimeLockedDraft(
+                                        id: draft.id,
+                                        profileID: profile.id
+                                    )
+                                }
+                        } else {
+                            mainnetVaultUnavailableView
+                        }
+                    } else {
+                        ContentUnavailableView("Draft Unavailable", systemImage: "doc.text.magnifyingglass")
                     }
                 case .protectedVaultRules(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
@@ -976,7 +997,7 @@ struct WalletHomeView: View {
             Section("Types") {
                 NavigationLink(value: WalletRoute.timeLockedUTXORules(profile.id)) {
                     Label {
-                        Text("New Time-Locked UTXO")
+                        Text("New Time Locked Vault")
                     } icon: {
                         Image(systemName: "clock.badge.checkmark")
                             .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
@@ -993,11 +1014,14 @@ struct WalletHomeView: View {
             Section("Vaults") {
                 let vaults = protectedVaultStore.vaults(for: profile.id)
                 let setupDrafts = protectedVaultStore.setupDrafts(for: profile.id)
-                if vaults.isEmpty && setupDrafts.isEmpty {
+                let timeLockedDrafts = protectedVaultStore.timeLockedSetupDrafts(for: profile.id)
+                if vaults.isEmpty && setupDrafts.isEmpty && timeLockedDrafts.isEmpty {
                     Label("No Active Vaults", systemImage: "lock.open")
                     .foregroundStyle(.secondary)
                 }
-                let items = (vaults.map(VaultListItem.vault) + setupDrafts.map(VaultListItem.setupDraft))
+                let items = (vaults.map(VaultListItem.vault)
+                    + setupDrafts.map(VaultListItem.setupDraft)
+                    + timeLockedDrafts.map(VaultListItem.timeLockedSetupDraft))
                     .sorted { lhs, rhs in
                         let lhsOpened = protectedVaultStore.lastOpenedAt(id: lhs.id, profileID: profile.id)
                         let rhsOpened = protectedVaultStore.lastOpenedAt(id: rhs.id, profileID: profile.id)
@@ -1040,6 +1064,10 @@ struct WalletHomeView: View {
                     case .setupDraft(let draft):
                         NavigationLink(value: WalletRoute.protectedVaultSetupDraft(draft.id)) {
                             setupDraftCard(draft)
+                        }
+                    case .timeLockedSetupDraft(let draft):
+                        NavigationLink(value: WalletRoute.timeLockedSetupDraft(draft.id)) {
+                            timeLockedSetupDraftCard(draft)
                         }
                     }
                 }
@@ -1167,6 +1195,33 @@ struct WalletHomeView: View {
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Protected Vault, Setup Draft, tap to resume setup")
+    }
+
+    private func timeLockedSetupDraftCard(_ draft: TimeLockedVaultSetupDraft) -> some View {
+        HStack(spacing: 12) {
+            Label("Time Locked Vault", systemImage: "clock.badge.checkmark")
+                .labelStyle(.iconOnly)
+                .font(.body)
+                .imageScale(.large)
+                .foregroundStyle(.tint)
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack {
+                    Text("Time Locked Vault")
+                        .font(.headline)
+                    Spacer()
+                    Text("Setup Draft")
+                        .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
+                        .foregroundStyle(.orange)
+                }
+                Text("Tap to resume setup")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Time Locked Vault, Setup Draft, tap to resume setup")
     }
 
     private var unavailableAccountView: some View {
@@ -1360,9 +1415,36 @@ private struct ProtectedVaultSetupDraftResumeView: View {
 }
 
 private struct TimeLockedUTXORulesView: View {
-    @State private var unlockDate = Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now
+    let profile: WalletProfile
+    let setupDraft: TimeLockedVaultSetupDraft?
+    @State private var unlockDate: Date
     @State private var showingVaultFlowInfo = false
     @State private var showingUnlockDateInfo = false
+    @State private var selectedUTXOs: [WalletUTXO]
+    @State private var needsUTXOReselection: Bool
+    @State private var showingDetails: Bool
+    @State private var activeDraft: TimeLockedVaultSetupDraft?
+    @State private var showingDraftExitPrompt = false
+    @State private var draftSaveError: String?
+
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+
+    init(
+        profile: WalletProfile,
+        setupDraft: TimeLockedVaultSetupDraft? = nil,
+        restoredUTXOs: [WalletUTXO] = [],
+        needsUTXOReselection: Bool = false
+    ) {
+        self.profile = profile
+        self.setupDraft = setupDraft
+        _unlockDate = State(initialValue: setupDraft?.unlockDate
+            ?? Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now)
+        _selectedUTXOs = State(initialValue: restoredUTXOs)
+        _needsUTXOReselection = State(initialValue: needsUTXOReselection)
+        _showingDetails = State(initialValue: setupDraft?.step == .fundingDetails && !needsUTXOReselection)
+        _activeDraft = State(initialValue: setupDraft)
+    }
 
     var body: some View {
         Form {
@@ -1414,18 +1496,127 @@ private struct TimeLockedUTXORulesView: View {
             } footer: {
                 Text("The date is an estimate. The vault will unlock at a DAA score set during review.")
             }
+
+            Section {
+                if needsUTXOReselection {
+                    Text("One or more saved funding UTXOs are no longer available. Select the inputs again before continuing.")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+                NavigationLink {
+                    SendUTXOSelectionView(
+                        profile: profile,
+                        transactionType: .standard,
+                        clearSelectionOnAppear: true,
+                        showingSendFlow: .constant(false),
+                        protectedVaultSelection: { selectedUTXOs = $0 },
+                        initialProtectedVaultUTXOs: selectedUTXOs,
+                        selectionButtonTitle: "Select UTXOs"
+                    )
+                } label: {
+                    HStack {
+                        Text("Select UTXOs")
+                        Spacer()
+                        if !selectedUTXOs.isEmpty {
+                            Text("\(selectedUTXOs.count) selected")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Funding")
+            } footer: {
+                if !selectedUTXOs.isEmpty {
+                    Text("Selected input total: \((Decimal(selectedInputTotal) / Decimal(100_000_000)).formatted()) TKAS")
+                }
+            }
+
+            Section {
+                Button {
+                    let draft = makeDraft(step: .fundingDetails)
+                    guard protectedVaultStore.saveTimeLockedSetupDraft(draft) else {
+                        draftSaveError = protectedVaultStore.storageError
+                            ?? "The time-locked vault draft could not be saved. Check device storage before continuing."
+                        return
+                    }
+                    activeDraft = draft
+                    needsUTXOReselection = false
+                    showingDetails = true
+                } label: {
+                    Text("Continue")
+                        .frame(maxWidth: .infinity)
+                }
+                .modifier(ProtectedVaultActionButtonModifier(isProtectedVault: true))
+                .controlSize(.large)
+                .disabled(selectedUTXOs.isEmpty || unlockDate <= .now || selectedInputTotal == UInt64.max)
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
         }
-        .navigationTitle("Time-Locked UTXO")
+        .navigationTitle("Time-Lock Rules")
         .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden()
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    if activeDraft == nil { dismiss() }
+                    else { showingDraftExitPrompt = true }
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+            }
+        }
+        .navigationDestination(isPresented: detailsNavigation) {
+            if let activeDraft {
+                TimeLockedFundingDetailsView(
+                    profile: profile,
+                    selectedUTXOs: selectedUTXOs,
+                    unlockDate: unlockDate,
+                    setupDraft: activeDraft
+                )
+            }
+        }
+        .alert("Leave Vault Setup?", isPresented: $showingDraftExitPrompt) {
+            Button("Save as Draft") {
+                let draft = makeDraft(step: .rules)
+                if protectedVaultStore.saveTimeLockedSetupDraft(draft) {
+                    activeDraft = draft
+                    dismiss()
+                } else {
+                    draftSaveError = protectedVaultStore.storageError
+                        ?? "The time-locked vault draft could not be saved."
+                }
+            }
+            Button("Cancel Draft", role: .destructive) {
+                if let activeDraft {
+                    protectedVaultStore.removeTimeLockedSetupDraft(id: activeDraft.id)
+                }
+                dismiss()
+            }
+            Button("Keep Editing", role: .cancel) { }
+        } message: {
+            Text("Save your time-locked vault setup to continue later, or cancel and remove this draft.")
+        }
+        .alert("Draft Could Not Be Saved", isPresented: Binding(
+            get: { draftSaveError != nil },
+            set: { if !$0 { draftSaveError = nil } }
+        )) {
+            Button("OK", role: .cancel) { draftSaveError = nil }
+        } message: {
+            Text(draftSaveError ?? "")
+        }
         .alert("Vault Flow", isPresented: $showingVaultFlowInfo) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("Fund: send KAS into the vault. Locked: the KAS cannot be sent before the unlock score. Unlocks: reaching that score makes a claim possible; nothing moves automatically. Send: sign and broadcast a transaction to move the KAS.")
+            Text("Fund: send KAS into the vault. Locked: the KAS cannot be sent before the unlock score. Unlocks: reaching that score makes a claim possible; nothing moves automatically. Send: sign and broadcast a claim to the destination fixed in the vault rules.")
         }
         .alert("Unlock Date", isPresented: $showingUnlockDateInfo) {
             Button("OK", role: .cancel) { }
         } message: {
             Text("Choose when you want the KAS to become available. Before funding, the app will convert this date and time to a DAA score for the on-chain lock. The displayed date is an estimate; the DAA score controls when a claim can be accepted.")
+        }
+        .onChange(of: selectedUTXOs) { _, selected in
+            if !selected.isEmpty { needsUTXOReselection = false }
         }
     }
 
@@ -1438,6 +1629,625 @@ private struct TimeLockedUTXORulesView: View {
                 .font(.caption.weight(.medium))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var selectedInputTotal: UInt64 {
+        selectedUTXOs.reduce(0) { total, utxo in
+            let sum = total.addingReportingOverflow(utxo.amount)
+            return sum.overflow ? UInt64.max : sum.partialValue
+        }
+    }
+
+    private func makeDraft(step: TimeLockedVaultSetupDraft.Step) -> TimeLockedVaultSetupDraft {
+        let latestDraft = activeDraft.flatMap {
+            protectedVaultStore.timeLockedSetupDraft(id: $0.id)
+        } ?? activeDraft
+        return TimeLockedVaultSetupDraft(
+            id: latestDraft?.id ?? UUID(),
+            profileID: profile.id,
+            createdAt: latestDraft?.createdAt ?? .now,
+            unlockDate: unlockDate,
+            selectedUTXOIDs: selectedUTXOs.map(\.id),
+            destination: latestDraft?.destination ?? "",
+            amountText: latestDraft?.amountText ?? "",
+            changeAddressIndex: latestDraft?.changeAddressIndex,
+            usesCustomFee: latestDraft?.usesCustomFee ?? false,
+            customFeeText: latestDraft?.customFeeText ?? "",
+            step: step
+        )
+    }
+
+    private var detailsNavigation: Binding<Bool> {
+        Binding(
+            get: { showingDetails },
+            set: { isPresented in
+                showingDetails = isPresented
+                guard !isPresented, activeDraft != nil else { return }
+                let draft = makeDraft(step: .rules)
+                if protectedVaultStore.saveTimeLockedSetupDraft(draft) {
+                    activeDraft = draft
+                } else {
+                    draftSaveError = protectedVaultStore.storageError
+                        ?? "The time-locked vault draft could not be saved."
+                }
+            }
+        )
+    }
+}
+
+private struct TimeLockedVaultSetupDraftResumeView: View {
+    let draft: TimeLockedVaultSetupDraft
+    let profile: WalletProfile
+
+    @EnvironmentObject private var syncService: WalletSyncService
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
+    @State private var restoredUTXOs: [WalletUTXO] = []
+    @State private var needsUTXOReselection = false
+    @State private var isValidating = true
+    @State private var validationError: String?
+
+    var body: some View {
+        Group {
+            if isValidating {
+                ProgressView("Revalidating saved funding UTXOs…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let validationError {
+                ContentUnavailableView(
+                    label: { Label("Funding UTXOs Couldn’t Be Verified", systemImage: "square.stack.3d.up.slash") },
+                    description: { Text(validationError) },
+                    actions: {
+                        Button("Retry") { Task { await validateSavedUTXOs() } }
+                            .buttonStyle(.borderedProminent)
+                    }
+                )
+            } else {
+                TimeLockedUTXORulesView(
+                    profile: profile,
+                    setupDraft: draft,
+                    restoredUTXOs: restoredUTXOs,
+                    needsUTXOReselection: needsUTXOReselection
+                )
+            }
+        }
+        .task { await validateSavedUTXOs() }
+    }
+
+    @MainActor
+    private func validateSavedUTXOs() async {
+        isValidating = true
+        validationError = nil
+        await syncService.refresh(
+            profile: profile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true,
+            includeTransactionHistory: false
+        )
+        guard case .connected = syncService.state,
+              let currentUTXOs = syncService.snapshot?.utxos else {
+            validationError = "Connect to the wallet network and retry before resuming this draft. Its saved inputs must be checked against current wallet UTXOs."
+            isValidating = false
+            return
+        }
+        let savedIDs = Set(draft.selectedUTXOIDs)
+        restoredUTXOs = currentUTXOs.filter { savedIDs.contains($0.id) }
+        needsUTXOReselection = restoredUTXOs.count != draft.selectedUTXOIDs.count
+        isValidating = false
+    }
+}
+
+private struct TimeLockedFundingDetailsView: View {
+    let profile: WalletProfile
+    let selectedUTXOs: [WalletUTXO]
+    let unlockDate: Date
+    let setupDraft: TimeLockedVaultSetupDraft
+
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+    @State private var destination: String
+    @State private var destinationValidation: AddressValidationResult?
+    @State private var isValidatingDestination = false
+    @State private var validationTask: Task<Void, Never>?
+    @State private var amountText: String
+    @State private var feeEstimate: FeeEstimate?
+    @State private var feeError: String?
+    @State private var reviewDescriptor: TimeLockedDestinationDescriptor?
+    @State private var isPreparingReview = false
+    @State private var reviewError: String?
+    @State private var showingReview = false
+    @State private var showingScanner = false
+    @State private var sendMax = false
+    @State private var showingChangePicker = false
+    @State private var selectedChangeIndex: Int?
+    @State private var usesCustomFee: Bool
+    @State private var customFeeText: String
+
+    private let accentColor = Color(red: 0.20, green: 0.62, blue: 0.57)
+
+    init(
+        profile: WalletProfile,
+        selectedUTXOs: [WalletUTXO],
+        unlockDate: Date,
+        setupDraft: TimeLockedVaultSetupDraft
+    ) {
+        self.profile = profile
+        self.selectedUTXOs = selectedUTXOs
+        self.unlockDate = unlockDate
+        self.setupDraft = setupDraft
+        _destination = State(initialValue: setupDraft.destination)
+        _amountText = State(initialValue: setupDraft.amountText)
+        _selectedChangeIndex = State(initialValue: setupDraft.changeAddressIndex)
+        _usesCustomFee = State(initialValue: setupDraft.usesCustomFee)
+        _customFeeText = State(initialValue: setupDraft.customFeeText)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 14) {
+                    destinationCard
+                    amountCard
+                    changeCard
+                    feeCard
+                    if let reviewError {
+                        Label(reviewError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+            }
+            .background(Color(.systemGroupedBackground))
+
+            Button {
+                Task { await prepareReview() }
+            } label: {
+                if isPreparingReview {
+                    ProgressView().frame(maxWidth: .infinity).padding(.vertical, 12)
+                } else {
+                    Text("Continue")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isPreparingReview || !canReview)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+        }
+        .navigationTitle("Destination & Amount")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color(.systemGroupedBackground))
+        .sheet(isPresented: $showingScanner) {
+            QRScannerView { scanned in
+                destination = normalizedDestination(scanned)
+                showingScanner = false
+            }
+        }
+        .sheet(isPresented: $showingChangePicker) {
+            NavigationStack {
+                List {
+                    ForEach(profile.changeAddresses.indices, id: \.self) { index in
+                        ChangeAddressSelectionRow(
+                            index: index,
+                            address: profile.changeAddresses[index],
+                            isSelected: index == changeIndex,
+                            isLocallyUsed: walletStore.isChangeAddressLocallyUsed(
+                                profile.changeAddresses[index],
+                                profileID: profile.id
+                            ),
+                            allowsUnverifiedSelection: true
+                        ) {
+                            selectedChangeIndex = index
+                            showingChangePicker = false
+                        }
+                        .id(index)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                    }
+                }
+                .navigationTitle("Change Address")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { showingChangePicker = false }
+                    }
+                }
+            }
+        }
+        .navigationDestination(isPresented: $showingReview) {
+            if let reviewDescriptor, let amountSompi, let feeSompi, let changeSompi {
+                TimeLockedRuleReviewView(
+                    unlockDate: unlockDate,
+                    descriptor: reviewDescriptor,
+                    amountSompi: amountSompi,
+                    feeSompi: feeSompi,
+                    changeSompi: changeSompi,
+                    changeAddress: profile.changeAddresses.indices.contains(changeIndex)
+                        ? profile.changeAddresses[changeIndex] : nil
+                )
+            }
+        }
+        .onChange(of: destination) { _, value in
+            validateDestination(value)
+            persistDraft()
+        }
+        .onChange(of: amountText) { _, _ in persistDraft() }
+        .onChange(of: selectedChangeIndex) { _, _ in persistDraft() }
+        .onChange(of: usesCustomFee) { _, _ in persistDraft() }
+        .onChange(of: customFeeText) { _, _ in persistDraft() }
+        .onChange(of: feeSompi) { _, fee in
+            if sendMax, let fee, selectedInputTotal > fee {
+                amountText = plainKas(selectedInputTotal - fee)
+            }
+        }
+        .task { await refreshFee() }
+        .onDisappear { validationTask?.cancel() }
+    }
+
+    private var destinationCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("Destination").font(.headline)
+                Spacer()
+                if isValidatingDestination {
+                    ProgressView().controlSize(.small)
+                } else if !destination.isEmpty {
+                    Image(systemName: destinationIsValid ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(destinationIsValid ? accentColor : .red)
+                }
+            }
+            TextField("\(preferences.network.addressPrefix)...", text: $destination, axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(.subheadline, design: .monospaced))
+                .lineLimit(2...4)
+                .padding(12)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(destination.isEmpty ? Color.primary.opacity(0.06) : destinationIsValid ? accentColor.opacity(0.75) : Color.red.opacity(0.65), lineWidth: 1)
+                }
+            HStack(spacing: 10) {
+                Button {
+                    destination = normalizedDestination(UIPasteboard.general.string ?? "")
+                } label: {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                        .frame(maxWidth: .infinity).frame(height: 22)
+                }
+                .buttonStyle(.bordered)
+                Button {
+                    showingScanner = true
+                } label: {
+                    Label("Scan QR", systemImage: "qrcode.viewfinder")
+                        .frame(maxWidth: .infinity).frame(height: 22)
+                }
+                .buttonStyle(.bordered)
+            }
+            if let destinationValidation {
+                Text(destinationIsValid ? "Valid Testnet 10 address" : destinationValidation.reason ?? "Enter a Testnet 10 address")
+                    .font(.caption)
+                    .foregroundStyle(destinationIsValid ? accentColor : .red)
+            }
+        }
+        .sendStyleCard()
+    }
+
+    private var amountCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Amount").font(.headline)
+                Text("Available balance: \(formatKas(selectedInputTotal))")
+                    .font(.footnote.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            HStack(spacing: 10) {
+                TextField("0", text: $amountText)
+                    .keyboardType(.decimalPad)
+                    .font(.title3.weight(.semibold).monospacedDigit())
+                    .disabled(sendMax)
+                Text(preferences.network.currencySymbol)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Toggle("Send Max", isOn: $sendMax)
+                .font(.subheadline.weight(.semibold))
+                .tint(accentColor)
+                .disabled(feeSompi == nil)
+                .onChange(of: sendMax) { _, enabled in
+                    if enabled, let feeSompi, selectedInputTotal > feeSompi {
+                        amountText = plainKas(selectedInputTotal - feeSompi)
+                    }
+                }
+            if !amountText.isEmpty && changeSompi == nil {
+                Text("Amount plus fee must fit within the selected input total.")
+                    .font(.caption).foregroundStyle(.red)
+            }
+        }
+        .sendStyleCard()
+    }
+
+    private var changeCard: some View {
+        Button {
+            showingChangePicker = true
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Change Address").font(.headline).foregroundStyle(.primary)
+                    Text(profile.changeAddresses.indices.contains(changeIndex)
+                         ? profile.changeAddresses[changeIndex] : "No change address available")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+            }
+            .padding()
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(sendMax || profile.changeAddresses.isEmpty)
+    }
+
+    private var feeCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Fee").font(.headline)
+            Picker("Fee", selection: $usesCustomFee) {
+                Text("Normal").tag(false)
+                Text("Custom").tag(true)
+            }
+            .pickerStyle(.segmented)
+            if usesCustomFee {
+                HStack(spacing: 10) {
+                    TextField("0", text: $customFeeText)
+                        .keyboardType(.decimalPad)
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                    Text(preferences.network.currencySymbol)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            if let feeError {
+                Text(feeError).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .sendStyleCard()
+    }
+
+    private var destinationIsValid: Bool {
+        destinationValidation?.valid == true && destinationValidation?.network == KaspaNetwork.testnet10.rawValue
+    }
+
+    private func normalizedDestination(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "kaspatest://", with: "kaspatest:", options: [.caseInsensitive])
+    }
+
+    private var selectedInputTotal: UInt64 {
+        selectedUTXOs.reduce(0) { total, utxo in
+            let sum = total.addingReportingOverflow(utxo.amount)
+            return sum.overflow ? UInt64.max : sum.partialValue
+        }
+    }
+
+    private var changeIndex: Int {
+        selectedChangeIndex ?? profile.nextChangeIndex
+    }
+
+    private func persistDraft() {
+        var updated = setupDraft
+        updated.destination = destination
+        updated.amountText = amountText
+        updated.changeAddressIndex = selectedChangeIndex
+        updated.usesCustomFee = usesCustomFee
+        updated.customFeeText = customFeeText
+        updated.selectedUTXOIDs = selectedUTXOs.map(\.id)
+        updated.step = .fundingDetails
+        _ = protectedVaultStore.saveTimeLockedSetupDraft(updated)
+    }
+
+    private var feeSompi: UInt64? {
+        if usesCustomFee {
+            guard let custom = parseAmountSompi(customFeeText), custom > 0 else { return nil }
+            return custom
+        }
+        return feeEstimate.flatMap { protectedVaultNormalFeeEstimate(estimate: $0, inputCount: selectedUTXOs.count) }
+    }
+
+    private var canReview: Bool {
+        destinationValidation?.valid == true
+            && destinationValidation?.network == KaspaNetwork.testnet10.rawValue
+            && !isValidatingDestination
+            && amountSompi.map { $0 > 10_000_000 } == true
+            && changeSompi != nil
+            && unlockDate > .now
+    }
+
+    private var amountSompi: UInt64? {
+        parseAmountSompi(amountText)
+    }
+
+    private func parseAmountSompi(_ text: String) -> UInt64? {
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: ",", with: ".")
+        let parts = raw.split(separator: ".", omittingEmptySubsequences: false)
+        guard !raw.isEmpty, parts.count <= 2,
+              parts.allSatisfy({ $0.allSatisfy(\.isNumber) }),
+              let whole = UInt64(parts[0]) else { return nil }
+        let fraction = parts.count == 2 ? String(parts[1]) : ""
+        guard fraction.count <= 8,
+              let fractionSompi = UInt64(fraction.padding(toLength: 8, withPad: "0", startingAt: 0))
+        else { return nil }
+        let wholeSompi = whole.multipliedReportingOverflow(by: 100_000_000)
+        let total = wholeSompi.partialValue.addingReportingOverflow(fractionSompi)
+        return wholeSompi.overflow || total.overflow ? nil : total.partialValue
+    }
+
+    private var changeSompi: UInt64? {
+        guard let amountSompi, let feeSompi else { return nil }
+        let required = amountSompi.addingReportingOverflow(feeSompi)
+        guard !required.overflow, required.partialValue <= selectedInputTotal else { return nil }
+        return selectedInputTotal - required.partialValue
+    }
+
+    private func formatKas(_ sompi: UInt64) -> String {
+        "\((Decimal(sompi) / Decimal(100_000_000)).formatted()) TKAS"
+    }
+
+    private func plainKas(_ sompi: UInt64) -> String {
+        let whole = sompi / 100_000_000
+        let fraction = sompi % 100_000_000
+        guard fraction > 0 else { return String(whole) }
+        return "\(whole).\(String(format: "%08llu", fraction).replacingOccurrences(of: "0+$", with: "", options: .regularExpression))"
+    }
+
+    private func validateDestination(_ value: String) {
+        validationTask?.cancel()
+        destinationValidation = nil
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "kaspatest://", with: "kaspatest:", options: [.caseInsensitive])
+        guard !normalized.isEmpty else {
+            isValidatingDestination = false
+            return
+        }
+        isValidatingDestination = true
+        validationTask = Task {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            do {
+                let result = try await engine.validateAddress(normalized)
+                guard !Task.isCancelled else { return }
+                destinationValidation = result
+                if result.valid, result.network == profile.network,
+                   let canonical = result.normalized, canonical != destination {
+                    destination = canonical
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                destinationValidation = AddressValidationResult(
+                    valid: false, network: nil, normalized: nil, reason: error.localizedDescription
+                )
+            }
+            isValidatingDestination = false
+        }
+    }
+
+    @MainActor
+    private func refreshFee() async {
+        guard preferences.network == .testnet10 else { return }
+        do {
+            feeEstimate = try await engine.getFeeEstimate(nodeConfiguration: preferences.nodeConfiguration)
+            feeError = nil
+        } catch {
+            feeEstimate = nil
+            feeError = "Could not load the Testnet 10 fee estimate."
+        }
+    }
+
+    @MainActor
+    private func prepareReview() async {
+        guard canReview else { return }
+        isPreparingReview = true
+        reviewError = nil
+        defer { isPreparingReview = false }
+        do {
+            let seconds = unlockDate.timeIntervalSinceNow
+            guard seconds.isFinite, seconds > 0,
+                  seconds < Double(UInt64.max / 10) else {
+                throw KasSignerEngine.EngineError.javascript("Choose a future unlock date.")
+            }
+            let score = try await engine.getTestnet10DAAScore(
+                nodeConfiguration: preferences.nodeConfiguration
+            )
+            let offset = UInt64(ceil(seconds * 10))
+            let target = score.addingReportingOverflow(offset)
+            guard !target.overflow else {
+                throw KasSignerEngine.EngineError.javascript("Unlock score is out of range.")
+            }
+            let canonicalDestination = destinationValidation?.normalized ?? destination
+            let descriptor = try await engine.deriveTimeLockedDestination(
+                profile: profile,
+                receiveIndex: profile.nextReceiveIndex,
+                destination: canonicalDestination,
+                locktimeDAA: target.partialValue
+            )
+            guard descriptor.destinationAddress.caseInsensitiveCompare(canonicalDestination) == .orderedSame,
+                  descriptor.locktimeDAA == target.partialValue,
+                  descriptor.vaultAddress.hasPrefix("kaspatest:"),
+                  !descriptor.redeemScriptHex.isEmpty else {
+                throw KasSignerEngine.EngineError.invalidResponse
+            }
+            reviewDescriptor = descriptor
+            showingReview = true
+        } catch {
+            reviewError = error.localizedDescription
+        }
+    }
+}
+
+private struct TimeLockedRuleReviewView: View {
+    let unlockDate: Date
+    let descriptor: TimeLockedDestinationDescriptor
+    let amountSompi: UInt64
+    let feeSompi: UInt64
+    let changeSompi: UInt64
+    let changeAddress: String?
+
+    var body: some View {
+        Form {
+            Section("Time Lock") {
+                LabeledContent("Unlock Date", value: unlockDate.formatted(date: .abbreviated, time: .shortened))
+                LabeledContent("DAA Score", value: descriptor.locktimeDAA.formatted())
+            }
+            Section {
+                Text(descriptor.destinationAddress)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+            } header: {
+                Text("Destination")
+            } footer: {
+                Text("The redeem script requires this exact destination after the unlock score.")
+            }
+            Section("Funding Preview") {
+                LabeledContent("Vault Amount", value: formatKas(amountSompi))
+                LabeledContent("Estimated Fee", value: formatKas(feeSompi))
+                LabeledContent("Change", value: formatKas(changeSompi))
+                if changeSompi > 0, let changeAddress {
+                    Text(changeAddress)
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                LabeledContent("Max Claim Fee", value: formatKas(descriptor.maximumClaimFeeSompi))
+            }
+            Section("Vault Address") {
+                Text(descriptor.vaultAddress)
+                    .font(.system(.footnote, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+        .navigationTitle("Review")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func formatKas(_ sompi: UInt64) -> String {
+        "\((Decimal(sompi) / Decimal(100_000_000)).formatted()) TKAS"
     }
 }
 
@@ -1718,7 +2528,7 @@ private struct ProtectedVaultRulesView: View {
         .task {
             await revalidateRestoredAddresses()
         }
-        .navigationDestination(isPresented: $showingCreateProtectedVault) {
+        .navigationDestination(isPresented: protectedVaultReviewNavigation) {
             if let submittedRules {
                 ReviewProtectedVaultView(
                     profile: profile,
@@ -1737,6 +2547,21 @@ private struct ProtectedVaultRulesView: View {
 
     private var activeSetupDraftID: UUID? {
         setupDraft?.id ?? submittedSetupDraft?.id
+    }
+
+    private var protectedVaultReviewNavigation: Binding<Bool> {
+        Binding(
+            get: { showingCreateProtectedVault },
+            set: { isPresented in
+                showingCreateProtectedVault = isPresented
+                guard !isPresented, activeSetupDraftID != nil else { return }
+                shouldResumeSavedStep = false
+                let draft = makeSetupDraft(step: .rules)
+                if protectedVaultStore.saveSetupDraft(draft) {
+                    submittedSetupDraft = draft
+                }
+            }
+        )
     }
 
     private func makeSetupDraft(step: ProtectedVaultSetupDraft.Step) -> ProtectedVaultSetupDraft {
@@ -2885,7 +3710,7 @@ private struct ReviewProtectedVaultView: View {
         .onChange(of: customFeeText) { _, _ in
             persistSetupDraft(step: setupDraft?.step ?? .review)
         }
-        .navigationDestination(isPresented: $showingWalletFundingReview) {
+        .navigationDestination(isPresented: fundingReviewNavigation) {
             if let descriptor {
                 ReviewWalletFundingView(
                     approvedAddresses: approvedAddresses,
@@ -3060,6 +3885,18 @@ private struct ReviewProtectedVaultView: View {
         draft.customFeeText = customFeeText
         draft.step = step
         protectedVaultStore.saveSetupDraft(draft)
+    }
+
+    private var fundingReviewNavigation: Binding<Bool> {
+        Binding(
+            get: { showingWalletFundingReview },
+            set: { isPresented in
+                showingWalletFundingReview = isPresented
+                guard !isPresented, setupDraft != nil else { return }
+                hasAppliedResumeStep = true
+                persistSetupDraft(step: .review)
+            }
+        )
     }
 
     @MainActor
@@ -5952,6 +6789,7 @@ struct SendUTXOSelectionView: View {
     var onTestnetBroadcast: ((String) -> Void)? = nil
     var protectedVaultSelection: (([WalletUTXO]) -> Void)? = nil
     var initialProtectedVaultUTXOs: [WalletUTXO] = []
+    var selectionButtonTitle: String? = nil
 
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var syncService: WalletSyncService
@@ -6002,7 +6840,7 @@ struct SendUTXOSelectionView: View {
                         }
                         startSendSession()
                     } label: {
-                        Text(selectedUTXOs.count == 1 ? "Spend UTXO" : "Spend UTXOs")
+                        Text(selectionButtonTitle ?? (selectedUTXOs.count == 1 ? "Spend UTXO" : "Spend UTXOs"))
                             .font(.headline)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)

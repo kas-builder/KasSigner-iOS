@@ -85,7 +85,7 @@ pub fn sign_testnet10_vault_v2_pskb(
 pub use kspt::{
     build_protected_vault_pending_script, build_protected_vault_pending_script_with_recovery,
     build_protected_vault_script, build_protected_vault_script_with_destinations,
-    build_protected_vault_script_with_recovery,
+    build_protected_vault_script_with_recovery, build_time_locked_destination_script,
 };
 
 #[cfg(feature = "protected-vault-verification")]
@@ -1335,6 +1335,56 @@ pub fn derive_protected_vault_with_destinations(
         "delay_daa": delay_daa,
     }))
     .map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Derive a Testnet-10 P2SH whose only claim path is a signed, time-locked
+/// payment to the committed P2PK destination. No unrestricted owner path exists.
+#[wasm_bindgen]
+pub fn derive_time_locked_destination(
+    kpub_str: &str,
+    receive_index: u32,
+    destination_address: &str,
+    locktime_daa: u64,
+    network: &str,
+) -> Result<String, JsValue> {
+    let prefix = require_testnet10_vault_network(network).map_err(JsValue::from_str)?;
+    if !destination_address.starts_with(&format!("{prefix}:")) {
+        return Err(JsValue::from_str("Destination must be on Testnet 10"));
+    }
+    let (version, payload) = address::decode_address(destination_address)
+        .map_err(|e| JsValue::from_str(&e))?;
+    if version != 0 || payload.len() != 32 {
+        return Err(JsValue::from_str("Time lock requires a P2PK destination"));
+    }
+    let mut destination_spk = vec![0x00, 0x00, 0x20];
+    destination_spk.extend_from_slice(&payload);
+    destination_spk.push(0xac);
+
+    let account = bip32::ExtPubKey::from_kpub(kpub_str).map_err(|e| JsValue::from_str(&e))?;
+    let owner = account.derive_child(0)
+        .and_then(|chain| chain.derive_child(receive_index))
+        .map_err(|e| JsValue::from_str(&e))?;
+    let owner_pubkey = owner.x_only_bytes();
+    let mut nonce = [0u8; 8];
+    getrandom::getrandom(&mut nonce)
+        .map_err(|_| JsValue::from_str("Secure vault nonce is unavailable"))?;
+    let redeem_script = kspt::build_time_locked_destination_script(
+        &owner_pubkey, &destination_spk, locktime_daa,
+        kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI, &nonce,
+    ).map_err(|e| JsValue::from_str(&e))?;
+    let vault_spk = kspt::protected_vault_p2sh_spk(&redeem_script);
+    let mut script_hash = [0u8; 32];
+    script_hash.copy_from_slice(&vault_spk[4..36]);
+    let vault_address = address::encode_p2sh_address(&script_hash, prefix);
+    serde_json::to_string(&serde_json::json!({
+        "owner_derivation_index": receive_index,
+        "owner_public_key": hex::encode(owner_pubkey),
+        "destination_address": destination_address,
+        "locktime_daa": locktime_daa,
+        "maximum_claim_fee_sompi": kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI,
+        "redeem_script_hex": hex::encode(redeem_script),
+        "vault_address": vault_address,
+    })).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Derive the recovery-aware V2 vault. All destination scripts, the recovery

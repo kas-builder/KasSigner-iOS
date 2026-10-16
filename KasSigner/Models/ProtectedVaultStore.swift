@@ -26,12 +26,14 @@ private struct ProtectedVaultRecoveryBackup: Codable {
     let walletFingerprint: String
     let vaults: [ProtectedVault]
     let setupDrafts: [ProtectedVaultSetupDraft]
+    var timeLockedSetupDrafts: [TimeLockedVaultSetupDraft]? = nil
 }
 
 private struct ProtectedVaultPersistentState: Codable {
     var version = 1
     var vaults: [ProtectedVault] = []
     var setupDrafts: [ProtectedVaultSetupDraft] = []
+    var timeLockedSetupDrafts: [TimeLockedVaultSetupDraft]? = nil
     var lastOpenedAtByItemKey: [String: Date] = [:]
     var walletFingerprintsByProfileID: [String: String] = [:]
     var refreshStatesByVaultID: [String: ProtectedVaultRefreshState]? = nil
@@ -159,6 +161,57 @@ struct ProtectedVaultSetupDraft: Codable, Equatable, Identifiable {
              delayHours: delayHours, delayMinutes: delayMinutes,
              selectedUTXOIDs: selectedUTXOIDs, feeChoiceRawValue: feeChoiceRawValue,
              customFeeText: customFeeText, step: step)
+    }
+}
+
+struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
+    enum Step: String, Codable {
+        case rules
+        case fundingDetails
+    }
+
+    let id: UUID
+    var profileID: UUID
+    let createdAt: Date
+    var unlockDate: Date
+    var selectedUTXOIDs: [String]
+    var destination: String
+    var amountText: String
+    var changeAddressIndex: Int?
+    var usesCustomFee: Bool
+    var customFeeText: String
+    var step: Step
+
+    init(
+        id: UUID = UUID(),
+        profileID: UUID,
+        createdAt: Date = .now,
+        unlockDate: Date,
+        selectedUTXOIDs: [String],
+        destination: String = "",
+        amountText: String = "",
+        changeAddressIndex: Int? = nil,
+        usesCustomFee: Bool = false,
+        customFeeText: String = "",
+        step: Step = .rules
+    ) {
+        self.id = id
+        self.profileID = profileID
+        self.createdAt = createdAt
+        self.unlockDate = unlockDate
+        self.selectedUTXOIDs = selectedUTXOIDs
+        self.destination = destination
+        self.amountText = amountText
+        self.changeAddressIndex = changeAddressIndex
+        self.usesCustomFee = usesCustomFee
+        self.customFeeText = customFeeText
+        self.step = step
+    }
+
+    func reassociated(to profileID: UUID) -> Self {
+        var copy = self
+        copy.profileID = profileID
+        return copy
     }
 }
 
@@ -836,6 +889,7 @@ struct ProtectedVaultStageOutput: Identifiable, Equatable {
 final class ProtectedVaultStore: ObservableObject {
     @Published private(set) var vaults: [ProtectedVault] = []
     @Published private(set) var setupDrafts: [ProtectedVaultSetupDraft] = []
+    @Published private(set) var timeLockedSetupDrafts: [TimeLockedVaultSetupDraft] = []
     @Published private(set) var storageError: String?
     @Published private(set) var refreshStates: [UUID: ProtectedVaultRefreshState] = [:]
 
@@ -885,6 +939,10 @@ final class ProtectedVaultStore: ObservableObject {
                 return vault.reassociated(to: profile.id)
             }
             setupDrafts = setupDrafts.map { draft in
+                guard oldIDs.contains(draft.profileID) else { return draft }
+                return draft.reassociated(to: profile.id)
+            }
+            timeLockedSetupDrafts = timeLockedSetupDrafts.map { draft in
                 guard oldIDs.contains(draft.profileID) else { return draft }
                 return draft.reassociated(to: profile.id)
             }
@@ -947,7 +1005,8 @@ final class ProtectedVaultStore: ObservableObject {
         }
         let backup = ProtectedVaultRecoveryBackup(
             version: 1, walletFingerprint: Self.fingerprint(for: profile),
-            vaults: vaults(for: profile.id), setupDrafts: setupDrafts(for: profile.id)
+            vaults: vaults(for: profile.id), setupDrafts: setupDrafts(for: profile.id),
+            timeLockedSetupDrafts: timeLockedSetupDrafts(for: profile.id)
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -974,6 +1033,10 @@ final class ProtectedVaultStore: ObservableObject {
         }
         guard Set(backup.setupDrafts.map(\.id)).count == backup.setupDrafts.count else {
             throw KasSignerEngine.EngineError.javascript("The recovery file contains duplicate setup drafts.")
+        }
+        let incomingTimeLockedDrafts = backup.timeLockedSetupDrafts ?? []
+        guard Set(incomingTimeLockedDrafts.map(\.id)).count == incomingTimeLockedDrafts.count else {
+            throw KasSignerEngine.EngineError.javascript("The recovery file contains duplicate time-locked vault drafts.")
         }
         for incoming in backup.vaults {
             if let current = vaults.first(where: { $0.id == incoming.id }),
@@ -1029,14 +1092,19 @@ final class ProtectedVaultStore: ObservableObject {
         let importedDrafts = backup.setupDrafts.filter { !existingDraftIDs.contains($0.id) }.map {
             $0.reassociated(to: profile.id)
         }
+        let existingTimeLockedDraftIDs = Set(timeLockedSetupDrafts.map(\.id))
+        let importedTimeLockedDrafts = incomingTimeLockedDrafts
+            .filter { !existingTimeLockedDraftIDs.contains($0.id) }
+            .map { $0.reassociated(to: profile.id) }
         guard commit({
             vaults.append(contentsOf: imported)
             setupDrafts.append(contentsOf: importedDrafts)
+            timeLockedSetupDrafts.append(contentsOf: importedTimeLockedDrafts)
             walletFingerprintsByProfileID[profile.id.uuidString] = Self.fingerprint(for: profile)
         }) else {
             throw KasSignerEngine.EngineError.javascript("The restored vault records could not be saved.")
         }
-        return imported.count
+        return imported.count + importedDrafts.count + importedTimeLockedDrafts.count
     }
 
     func vaults(for profileID: UUID) -> [ProtectedVault] {
@@ -1063,6 +1131,37 @@ final class ProtectedVaultStore: ObservableObject {
 
     func setupDraft(id: UUID) -> ProtectedVaultSetupDraft? {
         setupDrafts.first { $0.id == id }
+    }
+
+    func timeLockedSetupDrafts(for profileID: UUID) -> [TimeLockedVaultSetupDraft] {
+        timeLockedSetupDrafts
+            .filter { $0.profileID == profileID }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
+    func timeLockedSetupDraft(id: UUID) -> TimeLockedVaultSetupDraft? {
+        timeLockedSetupDrafts.first { $0.id == id }
+    }
+
+    @discardableResult
+    func saveTimeLockedSetupDraft(_ draft: TimeLockedVaultSetupDraft) -> Bool {
+        commit {
+            if let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == draft.id }) {
+                timeLockedSetupDrafts[index] = draft
+            } else {
+                timeLockedSetupDrafts.append(draft)
+            }
+        }
+    }
+
+    func removeTimeLockedSetupDraft(id: UUID) {
+        _ = commit { timeLockedSetupDrafts.removeAll { $0.id == id } }
+    }
+
+    func recordOpenedTimeLockedDraft(id: UUID, profileID: UUID, at date: Date = .now) {
+        _ = commit {
+            lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
+        }
     }
 
     func lastOpenedAt(id: UUID, profileID: UUID) -> Date? {
@@ -1443,6 +1542,7 @@ final class ProtectedVaultStore: ObservableObject {
                 }
                 vaults = saved.vaults
                 setupDrafts = saved.setupDrafts
+                timeLockedSetupDrafts = saved.timeLockedSetupDrafts ?? []
                 lastOpenedAtByItemKey = saved.lastOpenedAtByItemKey
                 walletFingerprintsByProfileID = saved.walletFingerprintsByProfileID
                 refreshStatesByVaultID = saved.refreshStatesByVaultID ?? [:]
@@ -1489,6 +1589,7 @@ final class ProtectedVaultStore: ObservableObject {
         guard storageError == nil else { return false }
         let previousVaults = vaults
         let previousDrafts = setupDrafts
+        let previousTimeLockedDrafts = timeLockedSetupDrafts
         let previousDates = lastOpenedAtByItemKey
         let previousFingerprints = walletFingerprintsByProfileID
         let previousRefreshStates = refreshStatesByVaultID
@@ -1496,6 +1597,7 @@ final class ProtectedVaultStore: ObservableObject {
         guard persist() else {
             vaults = previousVaults
             setupDrafts = previousDrafts
+            timeLockedSetupDrafts = previousTimeLockedDrafts
             lastOpenedAtByItemKey = previousDates
             walletFingerprintsByProfileID = previousFingerprints
             refreshStatesByVaultID = previousRefreshStates
@@ -1507,6 +1609,7 @@ final class ProtectedVaultStore: ObservableObject {
     private func persist() -> Bool {
         let state = ProtectedVaultPersistentState(
             vaults: vaults, setupDrafts: setupDrafts,
+            timeLockedSetupDrafts: timeLockedSetupDrafts,
             lastOpenedAtByItemKey: lastOpenedAtByItemKey,
             walletFingerprintsByProfileID: walletFingerprintsByProfileID,
             refreshStatesByVaultID: refreshStatesByVaultID

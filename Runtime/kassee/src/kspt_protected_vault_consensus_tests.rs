@@ -27,6 +27,7 @@ use kassee_web::{
     build_protected_vault_script_with_destinations,
     build_protected_vault_pending_script_with_recovery,
     build_protected_vault_script_with_recovery,
+    build_time_locked_destination_script,
 };
 use secp256k1::{Keypair, Message, SecretKey};
 
@@ -34,6 +35,54 @@ const INPUT_VALUE: u64 = 500_000_000;
 const FEE: u64 = 100_000;
 const MAX_FEE: u64 = 200_000;
 const DELAY_DAA: u64 = 600;
+const UNLOCK_DAA: u64 = 10_000;
+
+#[test]
+fn time_locked_destination_rejects_early_wrong_destination_and_excess_fee() {
+    let secret = SecretKey::from_slice(&[7u8; 32]).unwrap();
+    let owner = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);
+    let owner_pubkey = owner.x_only_public_key().0.serialize();
+    let destination = p2pk_spk(11);
+    let other = p2pk_spk(12);
+    let script = build_time_locked_destination_script(
+        &owner_pubkey, &versioned(&destination), UNLOCK_DAA, MAX_FEE, &[1u8; 8],
+    ).unwrap();
+    let covenant_id = Hash::from_u64_word(42);
+    let entry = UtxoEntry::new(INPUT_VALUE, pay_to_script_hash_script(&script),
+        1_000, false, Some(covenant_id));
+
+    let mut valid = transaction(destination.clone(), INPUT_VALUE - FEE, 0, covenant_id);
+    valid.lock_time = UNLOCK_DAA;
+    sign_pending(&mut valid, &entry, &owner, &script);
+    assert!(run_vm(&valid, &entry).is_ok());
+
+    let mut early = transaction(destination.clone(), INPUT_VALUE - FEE, 0, covenant_id);
+    early.lock_time = UNLOCK_DAA - 1;
+    sign_pending(&mut early, &entry, &owner, &script);
+    assert!(run_vm(&early, &entry).is_err());
+
+    let mut redirected = transaction(other, INPUT_VALUE - FEE, 0, covenant_id);
+    redirected.lock_time = UNLOCK_DAA;
+    sign_pending(&mut redirected, &entry, &owner, &script);
+    assert!(run_vm(&redirected, &entry).is_err());
+
+    let mut excessive_fee = transaction(destination, INPUT_VALUE - MAX_FEE - 1, 0, covenant_id);
+    excessive_fee.lock_time = UNLOCK_DAA;
+    sign_pending(&mut excessive_fee, &entry, &owner, &script);
+    assert!(run_vm(&excessive_fee, &entry).is_err());
+
+    let mut extra_output = transaction(p2pk_spk(11), INPUT_VALUE - FEE - 1, 0, covenant_id);
+    extra_output.lock_time = UNLOCK_DAA;
+    extra_output.outputs.push(TransactionOutput::new(1, p2pk_spk(12)));
+    extra_output.finalize();
+    sign_pending(&mut extra_output, &entry, &owner, &script);
+    assert!(run_vm(&extra_output, &entry).is_err());
+
+    let mut unsigned = transaction(p2pk_spk(11), INPUT_VALUE - FEE, 0, covenant_id);
+    unsigned.lock_time = UNLOCK_DAA;
+    unsigned.finalize();
+    assert!(run_vm(&unsigned, &entry).is_err());
+}
 
 #[test]
 fn funding_pskb_signatures_match_pinned_consensus_sighash() {

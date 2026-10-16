@@ -2865,9 +2865,9 @@ export function derive_protected_vault_pending_with_recovery(owner_pubkey_hex, d
 }
 
 /**
- * Derive the deterministic Protected Vault V1 descriptor for an M5-signable
- * receive key at account path /0/index. This is derivation only: no transaction
- * is created, signed, or broadcast.
+ * Retain the legacy V1 export for API compatibility. It has no network argument
+ * and previously derived Mainnet vaults, so it is disabled until Mainnet vault
+ * support is implemented.
  * @param {string} kpub_str
  * @param {number} receive_index
  * @param {string} approved_address
@@ -2898,8 +2898,8 @@ export function derive_protected_vault_v1(kpub_str, receive_index, approved_addr
 }
 
 /**
- * Derive a vault whose immediate path accepts any one of the committed
- * mainnet P2PK destinations. The address list is fixed in the redeem script.
+ * Derive a Testnet-10 vault whose immediate path accepts any one of the
+ * committed P2PK destinations. The list is fixed in the redeem script.
  * @param {string} kpub_str
  * @param {number} receive_index
  * @param {string} approved_addresses_json
@@ -2968,6 +2968,41 @@ export function derive_protected_vault_with_recovery(kpub_str, receive_index, ap
         return getStringFromWasm0(ptr5, len5);
     } finally {
         wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
+ * Derive a Testnet-10 P2SH whose only claim path is a signed, time-locked
+ * payment to the committed P2PK destination. No unrestricted owner path exists.
+ * @param {string} kpub_str
+ * @param {number} receive_index
+ * @param {string} destination_address
+ * @param {bigint} locktime_daa
+ * @param {string} network
+ * @returns {string}
+ */
+export function derive_time_locked_destination(kpub_str, receive_index, destination_address, locktime_daa, network) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_time_locked_destination(ptr0, len0, receive_index, ptr1, len1, locktime_daa, ptr2, len2);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
 
@@ -4776,7 +4811,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 240, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_);
             return ret;
         },
@@ -4786,12 +4821,12 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 240, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 239, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 201, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_);
             return ret;
         },

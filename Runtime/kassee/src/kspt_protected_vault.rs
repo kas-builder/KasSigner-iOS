@@ -18,6 +18,48 @@ const VERSIONED_P2PK_SPK_LEN: u64 = 36;
 /// This is embedded policy, not a fee estimate.
 pub const PROTECTED_VAULT_V1_MAX_FEE_SOMPI: u64 = 10_000_000;
 
+/// A terminal, destination-bound absolute time lock. The owner signature is
+/// required even after the lock expires. The only permitted spend has one
+/// input and one output, sends to the committed P2PK script, and leaves at
+/// most `max_fee` sompi as the transaction fee. A nonce keeps independent
+/// vaults with identical rules at different P2SH addresses.
+pub fn build_time_locked_destination_script(
+    owner_pubkey: &[u8; 32],
+    destination_versioned_spk: &[u8],
+    locktime_daa: u64,
+    max_fee: u64,
+    nonce: &[u8; 8],
+) -> Result<Vec<u8>, String> {
+    validate_v1_destination(destination_versioned_spk)?;
+    if locktime_daa == 0 || max_fee == 0 {
+        return Err("Time lock and maximum claim fee must be greater than zero".into());
+    }
+
+    let mut script = Vec::with_capacity(160);
+    push_pubkey(&mut script, owner_pubkey);
+    script.push(covenant_ops::OP_CHECKSIGVERIFY);
+    push_int(&mut script, locktime_daa);
+    script.push(covenant_ops::OP_CHECKLOCKTIMEVERIFY);
+    push_data(&mut script, nonce);
+    script.push(covenant_ops::OP_DROP);
+    push_int(&mut script, 1);
+    script.push(covenant_ops::OP_TX_INPUT_COUNT);
+    script.push(covenant_ops::OP_EQUALVERIFY);
+    push_int(&mut script, 1);
+    script.push(covenant_ops::OP_TX_OUTPUT_COUNT);
+    script.push(covenant_ops::OP_EQUALVERIFY);
+    script.push(covenant_ops::OP_TX_INPUT_INDEX);
+    push_int(&mut script, 0);
+    script.push(covenant_ops::OP_EQUALVERIFY);
+    append_fee_ceiling_check(&mut script, max_fee);
+    push_int(&mut script, 0);
+    script.push(covenant_ops::OP_TX_OUTPUT_SPK);
+    push_data(&mut script, destination_versioned_spk);
+    script.push(covenant_ops::OP_EQUALVERIFY);
+    script.push(covenant_ops::OP_1);
+    Ok(script)
+}
+
 /// Build the second-stage pending redeem script for one exact P2PK destination.
 /// CSV is evaluated relative to this pending UTXO's own creation DAA score.
 pub fn build_protected_vault_pending_script(

@@ -4,6 +4,17 @@ import WebKit
 import CryptoKit
 import Combine
 
+extension View {
+    func sendStyleCard() -> some View {
+        self.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+    }
+}
+
 private extension SendTransactionType {
     var shortTitle: String {
         switch self {
@@ -1396,15 +1407,7 @@ struct SendDestinationView: View {
                 destinationAmountField(text: $amountText)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(
-                cornerRadius: 15,
-                style: .continuous
-            )
-        )
+        .sendStyleCard()
     }
 
     private func destinationAmountField(text: Binding<String>) -> some View {
@@ -1512,15 +1515,7 @@ struct SendDestinationView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(
-                cornerRadius: 15,
-                style: .continuous
-            )
-        )
+        .sendStyleCard()
     }
 
     private var amountEntryText: Binding<String> {
@@ -1673,15 +1668,7 @@ struct SendDestinationView: View {
                 EmptyView()
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(
-                cornerRadius: 15,
-                style: .continuous
-            )
-        )
+        .sendStyleCard()
     }
 
     private func validateDestinationAddress(_ address: String) {
@@ -4448,7 +4435,7 @@ private struct ChangeAllocationView: View {
     }
 }
 
-private struct ChangeAddressSelectionRow: View {
+struct ChangeAddressSelectionRow: View {
     let index: Int
     let address: String
     let isSelected: Bool

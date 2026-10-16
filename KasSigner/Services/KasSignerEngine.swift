@@ -8,6 +8,26 @@ struct AddressValidationResult: Codable {
     let reason: String?
 }
 
+struct TimeLockedDestinationDescriptor: Decodable {
+    let ownerDerivationIndex: UInt32
+    let ownerPublicKey: String
+    let destinationAddress: String
+    let locktimeDAA: UInt64
+    let maximumClaimFeeSompi: UInt64
+    let redeemScriptHex: String
+    let vaultAddress: String
+
+    enum CodingKeys: String, CodingKey {
+        case ownerDerivationIndex = "owner_derivation_index"
+        case ownerPublicKey = "owner_public_key"
+        case destinationAddress = "destination_address"
+        case locktimeDAA = "locktime_daa"
+        case maximumClaimFeeSompi = "maximum_claim_fee_sompi"
+        case redeemScriptHex = "redeem_script_hex"
+        case vaultAddress = "vault_address"
+    }
+}
+
 struct FeeEstimate: Decodable, Equatable {
     let lowSompiPerGram: Double
     let normalSompiPerGram: Double
@@ -696,6 +716,47 @@ final class KasSignerEngine: NSObject, ObservableObject {
         }
         let data = try JSONSerialization.data(withJSONObject: json)
         return try JSONDecoder().decode(ProtectedVaultDescriptor.self, from: data)
+    }
+
+    func getTestnet10DAAScore(nodeConfiguration: [String: Any]) async throws -> UInt64 {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            "return await window.kaspi.getVirtualDAAScore(nodeConfig);",
+            arguments: ["nodeConfig": nodeConfiguration],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let score = result as? String, let value = UInt64(score) else {
+            throw EngineError.invalidResponse
+        }
+        return value
+    }
+
+    func deriveTimeLockedDestination(
+        profile: WalletProfile,
+        receiveIndex: Int,
+        destination: String,
+        locktimeDAA: UInt64
+    ) async throws -> TimeLockedDestinationDescriptor {
+        guard profile.network == KaspaNetwork.testnet10.rawValue else {
+            throw EngineError.javascript("Time-Locked UTXOs are limited to Testnet 10.")
+        }
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            "return window.kaspi.deriveTimeLockedDestination(kpub, index, destination, locktime, network);",
+            arguments: [
+                "kpub": profile.kpub,
+                "index": receiveIndex,
+                "destination": destination,
+                "locktime": String(locktimeDAA),
+                "network": profile.network
+            ],
+            in: nil,
+            contentWorld: .page
+        )
+        guard let json = result as? [String: Any] else { throw EngineError.invalidResponse }
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return try JSONDecoder().decode(TimeLockedDestinationDescriptor.self, from: data)
     }
 
 
