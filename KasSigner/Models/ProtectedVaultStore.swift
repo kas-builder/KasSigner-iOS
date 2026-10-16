@@ -899,7 +899,7 @@ final class ProtectedVaultStore: ObservableObject {
     private let lastOpenedStorageKey = "kassigner.protectedVaultLastOpened.v1"
     private let defaults: UserDefaults
     private let protectedStorage: ProtectedWalletStorage
-    private var lastOpenedAtByItemKey: [String: Date] = [:]
+    @Published private(set) var lastOpenedAtByItemKey: [String: Date] = [:]
     private var walletFingerprintsByProfileID: [String: String] = [:]
     private var refreshStatesByVaultID: [String: ProtectedVaultRefreshState] = [:]
 
@@ -1178,9 +1178,9 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     func recordOpened(id: UUID, profileID: UUID, at date: Date = .now) {
-        _ = commit {
-            lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
-        }
+        lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
+        guard let data = try? JSONEncoder().encode(lastOpenedAtByItemKey) else { return }
+        defaults.set(data, forKey: lastOpenedStorageKey)
     }
 
     @discardableResult
@@ -1544,6 +1544,12 @@ final class ProtectedVaultStore: ObservableObject {
                 setupDrafts = saved.setupDrafts
                 timeLockedSetupDrafts = saved.timeLockedSetupDrafts ?? []
                 lastOpenedAtByItemKey = saved.lastOpenedAtByItemKey
+                if let data = defaults.data(forKey: lastOpenedStorageKey),
+                   let recentDates = try? JSONDecoder().decode([String: Date].self, from: data) {
+                    for (key, date) in recentDates where date > (lastOpenedAtByItemKey[key] ?? .distantPast) {
+                        lastOpenedAtByItemKey[key] = date
+                    }
+                }
                 walletFingerprintsByProfileID = saved.walletFingerprintsByProfileID
                 refreshStatesByVaultID = saved.refreshStatesByVaultID ?? [:]
                 var restoredRefreshStates: [UUID: ProtectedVaultRefreshState] = [:]
@@ -1618,6 +1624,7 @@ final class ProtectedVaultStore: ObservableObject {
             storageError = "The vault registry could not be saved. Check device storage before continuing."
             return false
         }
+        defaults.removeObject(forKey: lastOpenedStorageKey)
         return true
     }
 

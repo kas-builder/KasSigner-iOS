@@ -500,12 +500,6 @@ struct WalletHomeView: View {
                        let profile = walletStore.profiles.first(where: { $0.id == draft.profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
                             TimeLockedVaultSetupDraftResumeView(draft: draft, profile: profile)
-                                .onAppear {
-                                    protectedVaultStore.recordOpenedTimeLockedDraft(
-                                        id: draft.id,
-                                        profileID: profile.id
-                                    )
-                                }
                         } else {
                             mainnetVaultUnavailableView
                         }
@@ -537,9 +531,6 @@ struct WalletHomeView: View {
                                 protectedVaultDraftsAwaitingFunding[vault.id] = vault
                                 navigationPath.append(WalletRoute.reviewVaultFunding(vault.id))
                             }
-                            .onAppear {
-                                protectedVaultStore.recordOpened(id: draft.id, profileID: profile.id)
-                            }
                         } else {
                             mainnetVaultUnavailableView
                         }
@@ -566,9 +557,6 @@ struct WalletHomeView: View {
                                         navigationPath.append(WalletRoute.spendProtectedVault(vaultID))
                                     }
                                 }
-                            }
-                            .onAppear {
-                                protectedVaultStore.recordOpened(id: vault.id, profileID: vault.profileID)
                             }
                         } else {
                             mainnetVaultUnavailableView
@@ -1035,15 +1023,19 @@ struct WalletHomeView: View {
                         case (nil, nil):
                             break
                         }
-                        return lhs.createdAt > rhs.createdAt
+                        if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+                        return lhs.id.uuidString < rhs.id.uuidString
                     }
 
                 ForEach(items) { item in
                     switch item {
                     case .vault(let vault):
-                        NavigationLink(value: WalletRoute.protectedVaultDetail(vault.id)) {
-                            activeVaultCard(vault)
+                        Button {
+                            openVault(.protectedVaultDetail(vault.id), itemID: vault.id, profileID: vault.profileID)
+                        } label: {
+                            vaultNavigationLabel { activeVaultCard(vault) }
                         }
+                        .buttonStyle(.plain)
                         .contextMenu {
                             Button {
                                 contextVault = vault
@@ -1062,13 +1054,19 @@ struct WalletHomeView: View {
                             }
                         }
                     case .setupDraft(let draft):
-                        NavigationLink(value: WalletRoute.protectedVaultSetupDraft(draft.id)) {
-                            setupDraftCard(draft)
+                        Button {
+                            openVault(.protectedVaultSetupDraft(draft.id), itemID: draft.id, profileID: draft.profileID)
+                        } label: {
+                            vaultNavigationLabel { setupDraftCard(draft) }
                         }
+                        .buttonStyle(.plain)
                     case .timeLockedSetupDraft(let draft):
-                        NavigationLink(value: WalletRoute.timeLockedSetupDraft(draft.id)) {
-                            timeLockedSetupDraftCard(draft)
+                        Button {
+                            openVault(.timeLockedSetupDraft(draft.id), itemID: draft.id, profileID: draft.profileID)
+                        } label: {
+                            vaultNavigationLabel { timeLockedSetupDraftCard(draft) }
                         }
+                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -1168,6 +1166,28 @@ struct WalletHomeView: View {
         .accessibilityLabel(
                     "\(vault.displayName), \(vault.status.title), \((vault.lockedAmount ?? vault.amount).formatted()) \(preferences.network.currencySymbol)"
         )
+    }
+
+    private func openVault(_ route: WalletRoute, itemID: UUID, profileID: UUID) {
+        navigationPath.append(route)
+        Task { @MainActor in
+            await Task.yield()
+            protectedVaultStore.recordOpened(id: itemID, profileID: profileID)
+        }
+    }
+
+    private func vaultNavigationLabel<Content: View>(
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(spacing: 12) {
+            content()
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
     }
 
     private func setupDraftCard(_ draft: ProtectedVaultSetupDraft) -> some View {

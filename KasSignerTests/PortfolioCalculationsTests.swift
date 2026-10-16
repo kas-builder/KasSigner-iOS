@@ -554,6 +554,34 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
         XCTAssertEqual(relaunched.vaults(for: restoredProfile.id).first?.id, vault.id)
     }
 
+    func testLastOpenedTimestampPersistsWithoutRewritingVaultRegistry() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultLastOpened-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "VaultLastOpened.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        let registryURL = root.appending(path: "protected-vault-state.json")
+        let registryBeforeOpen = try Data(contentsOf: registryURL)
+        let profileID = UUID()
+        let vaultID = UUID()
+        let openedAt = Date(timeIntervalSince1970: 1_800_000_123)
+
+        store.recordOpened(id: vaultID, profileID: profileID, at: openedAt)
+
+        XCTAssertEqual(try Data(contentsOf: registryURL), registryBeforeOpen)
+        XCTAssertEqual(store.lastOpenedAt(id: vaultID, profileID: profileID), openedAt)
+        XCTAssertNotNil(defaults.data(forKey: "kassigner.protectedVaultLastOpened.v1"))
+
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.lastOpenedAt(id: vaultID, profileID: profileID), openedAt)
+    }
+
     func testCorruptProtectedVaultFileIsNotReplacedByLegacyData() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "VaultCorrupt-\(UUID().uuidString)", directoryHint: .isDirectory)
