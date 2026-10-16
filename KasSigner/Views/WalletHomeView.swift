@@ -1198,7 +1198,9 @@ struct WalletHomeView: View {
     }
 
     private func timeLockedSetupDraftCard(_ draft: TimeLockedVaultSetupDraft) -> some View {
-        HStack(spacing: 12) {
+        let funded = draft.fundingTransactionID != nil
+        let spent = draft.claimTransactionID != nil
+        return HStack(spacing: 12) {
             Label("Time Locked Vault", systemImage: "clock.badge.checkmark")
                 .labelStyle(.iconOnly)
                 .font(.body)
@@ -1210,18 +1212,18 @@ struct WalletHomeView: View {
                     Text("Time Locked Vault")
                         .font(.headline)
                     Spacer()
-                    Text("Setup Draft")
+                    Text(spent ? "Spent" : funded ? "Funded" : "Setup Draft")
                         .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(funded ? Color.green : Color.orange)
                 }
-                Text("Tap to resume setup")
+                Text(funded ? "Tap to view vault" : "Tap to resume setup")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Time Locked Vault, Setup Draft, tap to resume setup")
+        .accessibilityLabel(spent ? "Time Locked Vault, spent, tap to view vault" : funded ? "Time Locked Vault, funded, tap to view vault" : "Time Locked Vault, Setup Draft, tap to resume setup")
     }
 
     private var unavailableAccountView: some View {
