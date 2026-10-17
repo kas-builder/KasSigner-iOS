@@ -1036,7 +1036,7 @@ struct WalletHomeView: View {
             Section("Types") {
                 NavigationLink(value: WalletRoute.timeLockedUTXORules(profile.id)) {
                     Label {
-                        Text("New Time Locked Vault")
+                        Text("New Time-Lock Vault")
                     } icon: {
                         Image(systemName: "clock.badge.checkmark")
                             .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
