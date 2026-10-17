@@ -1303,6 +1303,8 @@ struct WalletHomeView: View {
     private func timeLockedSetupDraftCard(_ draft: TimeLockedVaultSetupDraft) -> some View {
         let funded = draft.fundingTransactionID != nil
         let spent = draft.claimTransactionID != nil
+        let balanceSompi = spent ? 0 : (draft.amountSompi ?? 0)
+        let balanceText = "\((Decimal(balanceSompi) / Decimal(100_000_000)).formatted()) \(preferences.network.currencySymbol)"
         return HStack(spacing: 12) {
             Label("Time Locked Vault", systemImage: "clock.badge.checkmark")
                 .labelStyle(.iconOnly)
@@ -1319,14 +1321,14 @@ struct WalletHomeView: View {
                         .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
                         .foregroundStyle(funded ? Color.green : Color.orange)
                 }
-                Text(funded ? "Tap to view vault" : "Tap to resume setup")
+                Text(funded ? balanceText : "Tap to resume setup")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(spent ? "\(draft.displayName), spent, tap to view vault" : funded ? "\(draft.displayName), active, tap to view vault" : "\(draft.displayName), Setup Draft, tap to resume setup")
+        .accessibilityLabel(spent ? "\(draft.displayName), spent, \(balanceText), tap to view vault" : funded ? "\(draft.displayName), active, \(balanceText), tap to view vault" : "\(draft.displayName), Setup Draft, tap to resume setup")
     }
 
     private var unavailableAccountView: some View {
@@ -1558,7 +1560,7 @@ private struct TimeLockedUTXORulesView: View {
         Form {
             Section {
                 HStack(spacing: 10) {
-                    flowStep("Fund", symbol: "arrow.down")
+                    flowStep("Fund", symbol: "square.stack.3d.up")
                     Image(systemName: "arrow.right")
                         .foregroundStyle(.secondary)
                     flowStep("Locked", symbol: "lock.fill")
@@ -1961,10 +1963,13 @@ private struct TimeLockedVaultStatusView: View {
 
     private var statusLabel: String {
         if savedDraft.claimTransactionID != nil { return "Spent" }
-        guard currentDAA != nil, savedDraft.locktimeDAA != nil else {
+        guard let locktimeDAA = savedDraft.locktimeDAA else {
             return isRefreshing ? "Checking" : "Unavailable"
         }
-        return isUnlocked ? "Unlocked" : "Locked"
+        if let currentDAA {
+            return currentDAA >= locktimeDAA ? "Unlocked" : "Locked"
+        }
+        return errorMessage == nil ? "Locked" : "Unavailable"
     }
 
     private var statusColor: Color {
@@ -2111,7 +2116,7 @@ private struct TimeLockedVaultStatusView: View {
             Button("Cancel", role: .cancel) { claimPSKB = nil; claimSummary = nil }
             Button("Confirm & Authenticate") { Task { await signAndBroadcastClaim() } }
         } message: {
-            Text("Send the vault balance, less \(formatKas(feeSompi ?? 0)) claim fee, to \(savedDraft.destination)?")
+            Text("You are about to send \(formatKas(claimSummary?.totalOutputSompi ?? 0)) from this Time Locked Vault.\n\nDestination: \(savedDraft.destination)\nClaim Fee: \(formatKas(feeSompi ?? 0))\n\nAuthenticate to continue.")
         }
         .fullScreenCover(isPresented: $showingBroadcastSuccess) {
             if let claimTransactionID {
@@ -2939,7 +2944,7 @@ private struct TimeLockedRuleReviewView: View {
             Button("Cancel", role: .cancel) { fundingPSKB = nil; fundingSummary = nil }
             Button("Confirm & Authenticate") { Task { await signAndBroadcastFunding() } }
         } message: {
-            Text("Deposit \(formatKas(amountSompi)) into \(descriptor.vaultAddress)? The funding fee is \(formatKas(feeSompi)) and change is \(formatKas(changeSompi)).")
+            Text("You are about to deposit \(formatKas(amountSompi)) into this Time Locked Vault.\n\nVault Address: \(descriptor.vaultAddress)\nFunding Fee: \(formatKas(feeSompi))\nChange: \(formatKas(changeSompi))\n\nAuthenticate to continue.")
         }
         .task { await runSecurityChecks() }
     }
