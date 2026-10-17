@@ -1317,9 +1317,15 @@ struct WalletHomeView: View {
                     Text(draft.displayName)
                         .font(.headline)
                     Spacer()
-                    Text(spent ? "Spent" : funded ? "Active" : "Setup Draft")
-                        .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
-                        .foregroundStyle(funded ? Color.green : Color.orange)
+                    HStack(spacing: 4) {
+                        if spent {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption.weight(.semibold))
+                        }
+                        Text(spent ? "Spent" : funded ? "Active" : "Setup Draft")
+                            .font(.system(size: UIFont.preferredFont(forTextStyle: .caption1).pointSize * 1.05, weight: .semibold))
+                    }
+                    .foregroundStyle(funded ? Color.green : Color.orange)
                 }
                 Text(funded ? balanceText : "Tap to resume setup")
                     .font(.subheadline.weight(.medium))
@@ -2849,52 +2855,69 @@ private struct TimeLockedRuleReviewView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 14) {
-                summaryCard(title: "Time Lock") {
-                    summaryRow("Unlock Date", value: unlockDate.formatted(date: .abbreviated, time: .shortened))
-                    Divider()
-                    summaryRow("DAA Score", value: descriptor.locktimeDAA.formatted())
-                }
+        Form {
+            Section("Summary") {
+                LabeledContent(
+                    "Unlock Date",
+                    value: unlockDate.formatted(date: .abbreviated, time: .shortened)
+                )
+                LabeledContent("DAA Score", value: descriptor.locktimeDAA.formatted())
+                LabeledContent("Selected UTXOs", value: "\(selectedUTXOs.count)")
+                LabeledContent("Vault Amount", value: formatKas(amountSompi))
+                LabeledContent("Estimated Fee", value: formatKas(feeSompi))
+            }
 
+            Section {
                 SendReviewAddressCard(
                     title: "Destination", address: descriptor.destinationAddress,
                     accessibilityLabel: "Copy destination address"
                 )
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
 
-                summaryCard(title: "Funding Preview") {
-                    summaryRow("Selected UTXOs", value: "\(selectedUTXOs.count)")
-                    Divider()
-                    summaryRow("Vault Amount", value: formatKas(amountSompi))
-                    Divider()
-                    summaryRow("Estimated Fee", value: formatKas(feeSompi))
-                    Divider()
-                    summaryRow("Change", value: formatKas(changeSompi))
-                    Divider()
-                    summaryRow("Max Claim Fee", value: formatKas(descriptor.maximumClaimFeeSompi))
-                }
-                if changeSompi > 0, let changeAddress {
+            if changeSompi > 0, let changeAddress {
+                Section {
                     SendReviewAddressCard(
                         title: "Change", address: changeAddress,
                         accessibilityLabel: "Copy change address",
                         amountText: formatKas(changeSompi)
                     )
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
+            }
+
+            Section {
                 SendReviewAddressCard(
                     title: "Vault Address", address: descriptor.vaultAddress,
                     accessibilityLabel: "Copy vault address",
                     amountText: formatKas(amountSompi)
                 )
+                .listRowInsets(EdgeInsets())
+                .listRowBackground(Color.clear)
+                .listRowSeparator(.hidden)
+            }
 
+            Section {
                 ProtectedVaultSecurityChecksCard(checks: checks)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
 
-                if let fundingError {
+            if let fundingError {
+                Section {
                     Label(fundingError, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.red)
                 }
+            }
 
-                if isChecking {
+            if isChecking {
+                Section {
                     HStack(spacing: 10) {
                         ProgressView()
                         Text("Verifying inputs and addresses…")
@@ -2902,17 +2925,17 @@ private struct TimeLockedRuleReviewView: View {
                             .foregroundStyle(.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                } else if let checkError {
+                }
+            } else if let checkError {
+                Section {
                     Label(checkError, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
         }
-        .background(Color(.systemGroupedBackground))
+        .listSectionSpacing(12)
         .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge: .bottom) {
@@ -2928,7 +2951,7 @@ private struct TimeLockedRuleReviewView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
                 } else {
-                    Text(allChecksPassed ? "Continue" : "Recheck Security")
+                    Text(allChecksPassed ? "Fund Vault" : "Recheck Security")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -3070,27 +3093,6 @@ private struct TimeLockedRuleReviewView: View {
             onFundingComplete(draftID, profile.id, txid, warning)
         } catch {
             fundingError = error.localizedDescription
-        }
-    }
-
-    private func summaryCard<Content: View>(
-        title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.headline)
-            content()
-        }
-        .sendStyleCard()
-    }
-
-    private func summaryRow(_ title: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).foregroundStyle(.secondary)
-            Spacer(minLength: 12)
-            Text(value)
-                .font(.subheadline.weight(.semibold).monospacedDigit())
-                .multilineTextAlignment(.trailing)
         }
     }
 
