@@ -2434,6 +2434,59 @@ private struct VerifiedTransactionReviewView: View {
     }
 }
 
+struct SendReviewAddressCard: View {
+    let title: String
+    let address: String
+    let accessibilityLabel: String
+    var amountText: String? = nil
+    var usdText: String? = nil
+
+    @EnvironmentObject private var copyFeedbackCenter: CopyFeedbackCenter
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                Text(title).font(.title3.weight(.semibold))
+                Spacer()
+                if let amountText {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text(amountText)
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                        if let usdText {
+                            Text(usdText)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .multilineTextAlignment(.trailing)
+                }
+            }
+            Button {
+                PrivatePasteboard.copy(address)
+                copyFeedbackCenter.showCopied(address)
+            } label: {
+                Text(address)
+                    .font(.body.monospaced())
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(Color(.tertiarySystemGroupedBackground),
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                    }
+            }
+            .buttonStyle(SubtlePressButtonStyle())
+            .accessibilityLabel(accessibilityLabel)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+    }
+}
+
 private struct VerifiedTransactionSummaryCards: View {
     let review: VerifiedTransactionReview
 
@@ -2522,52 +2575,9 @@ private struct VerifiedTransactionSummaryCards: View {
         address: String,
         accessibilityLabel: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top) {
-                Text(title)
-                    .font(.title3.weight(.semibold))
-
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 3) {
-                    Text(formatKas(amountSompi))
-                        .font(.subheadline.weight(.semibold).monospacedDigit())
-
-                    if let usdValue = formatUSD(amountSompi) {
-                        Text(usdValue)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .multilineTextAlignment(.trailing)
-            }
-
-            Button {
-                PrivatePasteboard.copy(address)
-                copyFeedbackCenter.showCopied(address)
-            } label: {
-                Text(address)
-                    .font(.body.monospaced())
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .background(
-                        Color(.tertiarySystemGroupedBackground),
-                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-                    }
-            }
-            .buttonStyle(SubtlePressButtonStyle())
-            .accessibilityLabel(accessibilityLabel)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
-        .background(
-            Color(.secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+        SendReviewAddressCard(
+            title: title, address: address, accessibilityLabel: accessibilityLabel,
+            amountText: formatKas(amountSompi), usdText: formatUSD(amountSompi)
         )
     }
 

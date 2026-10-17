@@ -14,6 +14,7 @@ struct TimeLockedDestinationDescriptor: Decodable {
     let destinationAddress: String
     let locktimeDAA: UInt64
     let maximumClaimFeeSompi: UInt64
+    let nonceHex: String
     let redeemScriptHex: String
     let vaultAddress: String
 
@@ -23,6 +24,7 @@ struct TimeLockedDestinationDescriptor: Decodable {
         case destinationAddress = "destination_address"
         case locktimeDAA = "locktime_daa"
         case maximumClaimFeeSompi = "maximum_claim_fee_sompi"
+        case nonceHex = "nonce_hex"
         case redeemScriptHex = "redeem_script_hex"
         case vaultAddress = "vault_address"
     }
@@ -299,6 +301,7 @@ struct SendDraftRecipient: Codable, Equatable {
 
 struct PSKTSummary: Decodable, Equatable {
     let transactionVersion: UInt16?
+    let lockTime: UInt64?
     let totalInputSompi: UInt64?
     let totalOutputSompi: UInt64?
     let feeSompi: UInt64?
@@ -312,9 +315,10 @@ struct PSKTSummary: Decodable, Equatable {
         totalInputSompi: UInt64?, totalOutputSompi: UInt64?, feeSompi: UInt64?,
         inputCount: Int?, outputCount: Int?, inputs: [PSKTSummaryInput]?,
         outputs: [PSKTSummaryOutput]?, finalizeReady: Bool? = nil,
-        transactionVersion: UInt16? = nil
+        transactionVersion: UInt16? = nil, lockTime: UInt64? = nil
     ) {
         self.transactionVersion = transactionVersion
+        self.lockTime = lockTime
         self.totalInputSompi = totalInputSompi
         self.totalOutputSompi = totalOutputSompi
         self.feeSompi = feeSompi
@@ -327,6 +331,7 @@ struct PSKTSummary: Decodable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case transactionVersion = "tx_version"
+        case lockTime = "lock_time"
         case totalInputSompi = "total_in_sompi"
         case totalOutputSompi = "total_out_sompi"
         case feeSompi = "fee_sompi"
@@ -341,26 +346,33 @@ struct PSKTSummary: Decodable, Equatable {
 struct PSKTSummaryInput: Decodable, Equatable {
     let txID: String?
     let index: UInt32?
+    let sequence: UInt64?
     let amountSompi: UInt64?
     let scriptHex: String?
+    let redeemScriptHex: String?
     let signaturesPresent: Int?
 
     init(
         txID: String?, index: UInt32?, amountSompi: UInt64? = nil,
-        scriptHex: String? = nil, signaturesPresent: Int? = nil
+        scriptHex: String? = nil, signaturesPresent: Int? = nil,
+        sequence: UInt64? = nil, redeemScriptHex: String? = nil
     ) {
         self.txID = txID
         self.index = index
+        self.sequence = sequence
         self.amountSompi = amountSompi
         self.scriptHex = scriptHex
+        self.redeemScriptHex = redeemScriptHex
         self.signaturesPresent = signaturesPresent
     }
 
     private enum CodingKeys: String, CodingKey {
         case txID = "prev_tx_id"
         case index = "prev_index"
+        case sequence
         case amountSompi = "amount_sompi"
         case scriptHex = "script_hex"
+        case redeemScriptHex = "redeem_script_hex"
         case signaturesPresent = "sigs_present"
     }
 }
@@ -736,20 +748,22 @@ final class KasSignerEngine: NSObject, ObservableObject {
         profile: WalletProfile,
         receiveIndex: Int,
         destination: String,
-        locktimeDAA: UInt64
+        locktimeDAA: UInt64,
+        nonceHex: String? = nil
     ) async throws -> TimeLockedDestinationDescriptor {
         guard profile.network == KaspaNetwork.testnet10.rawValue else {
             throw EngineError.javascript("Time-Locked UTXOs are limited to Testnet 10.")
         }
         try await ensureReady()
         let result = try await webView.callAsyncJavaScript(
-            "return window.kaspi.deriveTimeLockedDestination(kpub, index, destination, locktime, network);",
+            "return window.kaspi.deriveTimeLockedDestination(kpub, index, destination, locktime, network, nonceHex);",
             arguments: [
                 "kpub": profile.kpub,
                 "index": receiveIndex,
                 "destination": destination,
                 "locktime": String(locktimeDAA),
-                "network": profile.network
+                "network": profile.network,
+                "nonceHex": nonceHex ?? ""
             ],
             in: nil,
             contentWorld: .page
@@ -968,7 +982,8 @@ final class KasSignerEngine: NSObject, ObservableObject {
         selectedInputs: [WalletUTXO],
         vaultAddress: String,
         amountSompi: UInt64,
-        feeSompi: UInt64
+        feeSompi: UInt64,
+        changeIndex: Int? = nil
     ) async throws -> String {
         guard profile.network == KaspaNetwork.testnet10.rawValue else {
             throw EngineError.javascript(
@@ -976,12 +991,16 @@ final class KasSignerEngine: NSObject, ObservableObject {
             )
         }
         try await ensureReady()
+        let fundingChangeIndex = changeIndex ?? profile.nextChangeIndex
+        guard profile.changeAddresses.indices.contains(fundingChangeIndex) else {
+            throw EngineError.javascript("The selected change address is unavailable.")
+        }
         let wallet: [String: Any] = [
             "kpub": profile.kpub,
             "receive_addresses": profile.receiveAddresses,
             "change_addresses": profile.changeAddresses,
             "next_receive_index": profile.nextReceiveIndex,
-            "next_change_index": profile.nextChangeIndex
+            "next_change_index": fundingChangeIndex
         ]
         let utxosData = try JSONEncoder().encode(selectedInputs)
         guard let utxosJSON = String(data: utxosData, encoding: .utf8) else {
@@ -1019,6 +1038,71 @@ final class KasSignerEngine: NSObject, ObservableObject {
             throw EngineError.javascript("The tagged funding PSKB was not valid hexadecimal.")
         }
         return normalized
+    }
+
+    func buildTimeLockedClaimPSKB(
+        utxo: WalletUTXO, descriptor: TimeLockedDestinationDescriptor,
+        feeSompi: UInt64
+    ) async throws -> String {
+        try await ensureReady()
+        let data = try JSONEncoder().encode(utxo)
+        guard let utxoJSON = String(data: data, encoding: .utf8) else {
+            throw EngineError.invalidResponse
+        }
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.buildTimeLockedClaimPSKB(
+                    utxoJSON, ownerPublicKey, destination, locktimeDAA, nonceHex, feeSompi
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "utxoJSON": utxoJSON,
+                "ownerPublicKey": descriptor.ownerPublicKey,
+                "destination": descriptor.destinationAddress,
+                "locktimeDAA": String(descriptor.locktimeDAA),
+                "nonceHex": descriptor.nonceHex,
+                "feeSompi": String(feeSompi)
+            ], in: nil, contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(response["error"] as? String ?? "Claim construction failed.")
+        }
+        guard let value = response["value"] as? String else { throw EngineError.invalidResponse }
+        return value
+    }
+
+    func signTestnet10TimeLockedClaimPSKB(
+        _ wireHex: String, mnemonic: String, receiveIndex: UInt32
+    ) async throws -> String {
+        try await ensureReady()
+        let result = try await webView.callAsyncJavaScript(
+            """
+            try {
+                const value = window.kaspi.signTestnet10TimeLockedClaimPSKB(
+                    wireHex, mnemonic, receiveIndex
+                );
+                return { ok: true, value };
+            } catch (error) {
+                return { ok: false, error: String(error?.message ?? error) };
+            }
+            """,
+            arguments: [
+                "wireHex": wireHex, "mnemonic": mnemonic,
+                "receiveIndex": Int(receiveIndex)
+            ], in: nil, contentWorld: .page
+        )
+        guard let response = result as? [String: Any] else { throw EngineError.invalidResponse }
+        guard response["ok"] as? Bool == true else {
+            throw EngineError.javascript(response["error"] as? String ?? "Claim signing failed.")
+        }
+        guard let value = response["value"] as? String else { throw EngineError.invalidResponse }
+        return value
     }
 
     func buildProtectedVaultApprovedSpendPSKB(

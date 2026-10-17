@@ -145,7 +145,7 @@
   try {
     post({ event: "status", message: "Loading KasSigner module…" });
     const runtimeVersion = "db218007d8f955c5";
-    const transactionRuntimeVersion = "927dc22b105ba77d";
+    const transactionRuntimeVersion = "4115c0d11f8b75fb";
     const module = await import(
       `./pkg/kassee_web.js?runtime=${runtimeVersion}`
     );
@@ -181,6 +181,8 @@
       "create_protected_vault_funding_pskb_with_utxos",
       "create_protected_vault_approved_spend_pskb",
       "derive_time_locked_destination",
+      "create_time_locked_claim_pskb",
+      "sign_testnet10_time_locked_claim_pskb",
       "pskt_summary",
       "pskt_relay_to_kspt_v2",
       "pskt_merge_signed_kspt_v2",
@@ -576,13 +578,13 @@
         );
       },
 
-      deriveTimeLockedDestination(kpub, receiveIndex, destination, locktimeDAA, network) {
+      deriveTimeLockedDestination(kpub, receiveIndex, destination, locktimeDAA, network, nonceHex) {
         if (String(network) !== "testnet-10") {
           throw new Error("Time-Locked UTXOs are limited to Testnet 10.");
         }
         return JSON.parse(transactionModule.derive_time_locked_destination(
           String(kpub).trim(), Number(receiveIndex), String(destination).trim(),
-          BigInt(String(locktimeDAA)), String(network)
+          BigInt(String(locktimeDAA)), String(network), String(nonceHex ?? "")
         ));
       },
 
@@ -637,6 +639,19 @@
           BigInt(amountSompi),
           BigInt(feeSompi),
           String(utxosJSON)
+        );
+      },
+
+      buildTimeLockedClaimPSKB(utxoJSON, ownerPublicKey, destination, locktimeDAA, nonceHex, feeSompi) {
+        return transactionModule.create_time_locked_claim_pskb(
+          String(utxoJSON), String(ownerPublicKey), String(destination),
+          BigInt(String(locktimeDAA)), String(nonceHex), BigInt(String(feeSompi))
+        );
+      },
+
+      signTestnet10TimeLockedClaimPSKB(wireHex, mnemonic, receiveIndex) {
+        return transactionModule.sign_testnet10_time_locked_claim_pskb(
+          String(wireHex), String(mnemonic), Number(receiveIndex)
         );
       },
 

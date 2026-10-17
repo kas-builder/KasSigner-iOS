@@ -85,6 +85,30 @@ struct ProtectedVaultRefreshState: Codable, Equatable {
     }
 }
 
+enum VaultLastOpenedOrder {
+    static func precedes(
+        id lhsID: UUID,
+        createdAt lhsCreatedAt: Date,
+        lastOpenedAt lhsOpenedAt: Date?,
+        id rhsID: UUID,
+        createdAt rhsCreatedAt: Date,
+        lastOpenedAt rhsOpenedAt: Date?
+    ) -> Bool {
+        switch (lhsOpenedAt, rhsOpenedAt) {
+        case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+            return lhsDate > rhsDate
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
+        }
+        if lhsCreatedAt != rhsCreatedAt { return lhsCreatedAt > rhsCreatedAt }
+        return lhsID.uuidString < rhsID.uuidString
+    }
+}
+
 @MainActor
 enum ProtectedVaultNodeLabel {
     static func make(preferences: AppPreferences) -> String {
@@ -168,11 +192,14 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
     enum Step: String, Codable {
         case rules
         case fundingDetails
+        case funded
+        case spent
     }
 
     let id: UUID
     var profileID: UUID
     let createdAt: Date
+    var name: String? = nil
     var unlockDate: Date
     var selectedUTXOIDs: [String]
     var destination: String
@@ -180,6 +207,16 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
     var changeAddressIndex: Int?
     var usesCustomFee: Bool
     var customFeeText: String
+    var nonceHex: String?
+    var locktimeDAA: UInt64?
+    var ownerDerivationIndex: UInt32?
+    var ownerPublicKey: String?
+    var redeemScriptHex: String?
+    var vaultAddress: String?
+    var amountSompi: UInt64?
+    var covenantID: String?
+    var fundingTransactionID: String?
+    var claimTransactionID: String?
     var step: Step
 
     init(
@@ -193,6 +230,16 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         changeAddressIndex: Int? = nil,
         usesCustomFee: Bool = false,
         customFeeText: String = "",
+        nonceHex: String? = nil,
+        locktimeDAA: UInt64? = nil,
+        ownerDerivationIndex: UInt32? = nil,
+        ownerPublicKey: String? = nil,
+        redeemScriptHex: String? = nil,
+        vaultAddress: String? = nil,
+        amountSompi: UInt64? = nil,
+        covenantID: String? = nil,
+        fundingTransactionID: String? = nil,
+        claimTransactionID: String? = nil,
         step: Step = .rules
     ) {
         self.id = id
@@ -205,6 +252,16 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         self.changeAddressIndex = changeAddressIndex
         self.usesCustomFee = usesCustomFee
         self.customFeeText = customFeeText
+        self.nonceHex = nonceHex
+        self.locktimeDAA = locktimeDAA
+        self.ownerDerivationIndex = ownerDerivationIndex
+        self.ownerPublicKey = ownerPublicKey
+        self.redeemScriptHex = redeemScriptHex
+        self.vaultAddress = vaultAddress
+        self.amountSompi = amountSompi
+        self.covenantID = covenantID
+        self.fundingTransactionID = fundingTransactionID
+        self.claimTransactionID = claimTransactionID
         self.step = step
     }
 
@@ -212,6 +269,11 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         var copy = self
         copy.profileID = profileID
         return copy
+    }
+
+    var displayName: String {
+        let trimmedName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedName.isEmpty ? "Time Locked Vault" : trimmedName
     }
 }
 
@@ -507,6 +569,32 @@ struct ProtectedVaultFundingPlan: Equatable {
     let feeSompi: UInt64
     let inputTotalSompi: UInt64
     let changeSompi: UInt64
+
+    init(inputs: [WalletUTXO], depositSompi: UInt64, feeSompi: UInt64) throws {
+        guard !inputs.isEmpty else { throw ProtectedVaultFundingPlanError.noInputs }
+        guard inputs.count <= UTXOCoinControlStore.maximumSelectedUTXOs else {
+            throw ProtectedVaultFundingPlanError.tooManyInputs
+        }
+        guard Set(inputs.map(\.id)).count == inputs.count else {
+            throw ProtectedVaultFundingPlanError.duplicateInput
+        }
+        guard depositSompi > 0 else { throw ProtectedVaultFundingPlanError.invalidDepositAmount }
+        guard feeSompi > 0 else { throw ProtectedVaultFundingPlanError.invalidFee }
+        let inputTotalSompi = try inputs.reduce(UInt64(0)) { total, input in
+            let next = total.addingReportingOverflow(input.amount)
+            guard !next.overflow else { throw ProtectedVaultFundingPlanError.inputTotalOverflow }
+            return next.partialValue
+        }
+        let required = depositSompi.addingReportingOverflow(feeSompi)
+        guard !required.overflow, inputTotalSompi >= required.partialValue else {
+            throw ProtectedVaultFundingPlanError.insufficientInput
+        }
+        self.inputs = inputs
+        self.depositSompi = depositSompi
+        self.feeSompi = feeSompi
+        self.inputTotalSompi = inputTotalSompi
+        self.changeSompi = inputTotalSompi - required.partialValue
+    }
 
     init(vault: ProtectedVault, inputs: [WalletUTXO], feeSompi: UInt64) throws {
         guard !inputs.isEmpty else {
@@ -808,6 +896,8 @@ enum SignedProtectedVaultFundingVerificationError: LocalizedError, Equatable {
 enum SignedProtectedVaultFundingVerifier {
     static func verify(unsigned: PSKTSummary, signed: PSKTSummary) throws {
         guard unsigned.totalInputSompi == signed.totalInputSompi,
+              unsigned.transactionVersion == signed.transactionVersion,
+              unsigned.lockTime == signed.lockTime,
               unsigned.totalOutputSompi == signed.totalOutputSompi,
               unsigned.feeSompi == signed.feeSompi,
               unsigned.inputCount == signed.inputCount,
@@ -828,13 +918,14 @@ enum SignedProtectedVaultFundingVerifier {
     private static func transactionInputs(
         _ inputs: [PSKTSummaryInput]?
     ) -> [String]? {
-        inputs?.map {
-            [
-                $0.txID?.lowercased() ?? "",
-                $0.index.map(String.init) ?? "",
-                $0.amountSompi.map(String.init) ?? "",
-                $0.scriptHex?.lowercased() ?? ""
-            ].joined(separator: ":")
+        inputs?.map { input in
+            let txID = input.txID?.lowercased() ?? ""
+            let index = input.index.map { String($0) } ?? ""
+            let sequence = input.sequence.map { String($0) } ?? ""
+            let amount = input.amountSompi.map { String($0) } ?? ""
+            let script = input.scriptHex?.lowercased() ?? ""
+            let redeem = input.redeemScriptHex?.lowercased() ?? ""
+            return [txID, index, sequence, amount, script, redeem].joined(separator: ":")
         }
     }
 
@@ -1154,14 +1245,44 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func recordTimeLockedFunding(
+        id: UUID, transactionID: String, descriptor: TimeLockedDestinationDescriptor,
+        amountSompi: UInt64, covenantID: String
+    ) -> Bool {
+        guard var draft = timeLockedSetupDraft(id: id), draft.fundingTransactionID == nil else { return false }
+        draft.destination = descriptor.destinationAddress
+        draft.nonceHex = descriptor.nonceHex
+        draft.locktimeDAA = descriptor.locktimeDAA
+        draft.ownerDerivationIndex = descriptor.ownerDerivationIndex
+        draft.ownerPublicKey = descriptor.ownerPublicKey
+        draft.redeemScriptHex = descriptor.redeemScriptHex
+        draft.vaultAddress = descriptor.vaultAddress
+        draft.amountSompi = amountSompi
+        draft.covenantID = covenantID
+        draft.fundingTransactionID = transactionID
+        draft.step = .funded
+        return saveTimeLockedSetupDraft(draft)
+    }
+
+    @discardableResult
+    func recordTimeLockedClaim(id: UUID, transactionID: String) -> Bool {
+        guard var draft = timeLockedSetupDraft(id: id), draft.fundingTransactionID != nil,
+              draft.claimTransactionID == nil else { return false }
+        draft.claimTransactionID = transactionID
+        draft.step = .spent
+        return saveTimeLockedSetupDraft(draft)
+    }
+
     func removeTimeLockedSetupDraft(id: UUID) {
-        _ = commit { timeLockedSetupDrafts.removeAll { $0.id == id } }
+        _ = commit {
+            timeLockedSetupDrafts.removeAll { $0.id == id }
+            lastOpenedAtByItemKey = lastOpenedAtByItemKey.filter { !$0.key.hasSuffix(":\(id.uuidString)") }
+        }
     }
 
     func recordOpenedTimeLockedDraft(id: UUID, profileID: UUID, at date: Date = .now) {
-        _ = commit {
-            lastOpenedAtByItemKey[lastOpenedItemKey(id: id, profileID: profileID)] = date
-        }
+        recordOpened(id: id, profileID: profileID, at: date)
     }
 
     func lastOpenedAt(id: UUID, profileID: UUID) -> Date? {
@@ -1208,6 +1329,7 @@ final class ProtectedVaultStore: ObservableObject {
         if commit({
             vaults.removeAll { $0.id == id }
             refreshStatesByVaultID.removeValue(forKey: id.uuidString)
+            lastOpenedAtByItemKey = lastOpenedAtByItemKey.filter { !$0.key.hasSuffix(":\(id.uuidString)") }
         }) {
             refreshStates.removeValue(forKey: id)
         }
@@ -1218,6 +1340,14 @@ final class ProtectedVaultStore: ObservableObject {
         guard !trimmedName.isEmpty,
               let index = vaults.firstIndex(where: { $0.id == id }) else { return }
         _ = commit { vaults[index].name = trimmedName }
+    }
+
+    func renameTimeLockedVault(id: UUID, to name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }),
+              timeLockedSetupDrafts[index].fundingTransactionID != nil else { return }
+        _ = commit { timeLockedSetupDrafts[index].name = trimmedName }
     }
 
     @discardableResult

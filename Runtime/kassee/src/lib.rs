@@ -81,6 +81,14 @@ pub fn sign_testnet10_vault_v2_pskb(
         .map_err(|error| JsValue::from_str(&error))
 }
 
+#[wasm_bindgen]
+pub fn sign_testnet10_time_locked_claim_pskb(
+    wire_hex: &str, mnemonic: &str, receive_index: u32,
+) -> Result<String, JsValue> {
+    pskt::sign_testnet10_time_locked_claim_pskb(wire_hex, mnemonic, receive_index)
+        .map_err(|error| JsValue::from_str(&error))
+}
+
 #[cfg(feature = "protected-vault-verification")]
 pub use kspt::{
     build_protected_vault_pending_script, build_protected_vault_pending_script_with_recovery,
@@ -1346,6 +1354,7 @@ pub fn derive_time_locked_destination(
     destination_address: &str,
     locktime_daa: u64,
     network: &str,
+    nonce_hex: &str,
 ) -> Result<String, JsValue> {
     let prefix = require_testnet10_vault_network(network).map_err(JsValue::from_str)?;
     if !destination_address.starts_with(&format!("{prefix}:")) {
@@ -1366,8 +1375,13 @@ pub fn derive_time_locked_destination(
         .map_err(|e| JsValue::from_str(&e))?;
     let owner_pubkey = owner.x_only_bytes();
     let mut nonce = [0u8; 8];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|_| JsValue::from_str("Secure vault nonce is unavailable"))?;
+    if nonce_hex.trim().is_empty() {
+        getrandom::getrandom(&mut nonce)
+            .map_err(|_| JsValue::from_str("Secure vault nonce is unavailable"))?;
+    } else {
+        hex::decode_to_slice(nonce_hex.trim(), &mut nonce)
+            .map_err(|_| JsValue::from_str("Time-locked vault nonce must be 8 bytes of hex"))?;
+    }
     let redeem_script = kspt::build_time_locked_destination_script(
         &owner_pubkey, &destination_spk, locktime_daa,
         kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI, &nonce,
@@ -1382,9 +1396,89 @@ pub fn derive_time_locked_destination(
         "destination_address": destination_address,
         "locktime_daa": locktime_daa,
         "maximum_claim_fee_sompi": kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI,
+        "nonce_hex": hex::encode(nonce),
         "redeem_script_hex": hex::encode(redeem_script),
         "vault_address": vault_address,
     })).map_err(|e| JsValue::from_str(&e.to_string()))
+}
+
+/// Build the terminal Testnet-10 claim for a funded Time Locked Vault.
+/// The destination, owner key, lock score and nonce are recompiled before the
+/// UTXO is accepted, so saved app metadata cannot redirect the spend.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn create_time_locked_claim_pskb(
+    utxo_json: &str,
+    owner_pubkey_hex: &str,
+    destination_address: &str,
+    locktime_daa: u64,
+    nonce_hex: &str,
+    fee_sompi: u64,
+) -> Result<String, JsValue> {
+    require_testnet10_vault_address(destination_address).map_err(JsValue::from_str)?;
+    let utxo: rpc::UtxoEntry = serde_json::from_str(utxo_json)
+        .map_err(|e| JsValue::from_str(&format!("Bad vault UTXO: {e}")))?;
+    let owner = hex_to_32(owner_pubkey_hex, "owner public key")?;
+    let mut nonce = [0u8; 8];
+    hex::decode_to_slice(nonce_hex, &mut nonce)
+        .map_err(|_| JsValue::from_str("Time-locked vault nonce must be 8 bytes of hex"))?;
+    let destination_spk = address::address_to_script_pubkey(destination_address)
+        .map_err(|e| JsValue::from_str(&e))?;
+    let redeem = kspt::build_time_locked_destination_script(
+        &owner, &{
+            let mut versioned = vec![0u8, 0u8];
+            versioned.extend_from_slice(&destination_spk);
+            versioned
+        }, locktime_daa, kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI, &nonce,
+    ).map_err(|e| JsValue::from_str(&e))?;
+    if kspt::protected_vault_p2sh_script(&redeem) != utxo.script_public_key {
+        return Err(JsValue::from_str("Vault rules do not match the funded UTXO"));
+    }
+    let covenant_id = utxo.covenant_id.as_deref()
+        .ok_or_else(|| JsValue::from_str("The funded vault UTXO has no covenant ID"))?;
+    let _ = hex_to_32(covenant_id, "covenant id")?;
+    if fee_sompi == 0 || fee_sompi > kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI
+        || fee_sompi >= utxo.amount {
+        return Err(JsValue::from_str("Claim fee is outside the covenant limit"));
+    }
+    let output_amount = utxo.amount - fee_sompi;
+    let owner_key_hex = format!("02{}", hex::encode(owner));
+    let pskt = serde_json::json!({
+        "global": {
+            "version": 0u8, "txVersion": 1u16, "fallbackLockTime": locktime_daa,
+            "inputsModifiable": false, "outputsModifiable": false,
+            "inputCount": 1u16, "outputCount": 1u16, "xpubs": {},
+            "id": serde_json::Value::Null, "proprietaries": {}
+        },
+        "inputs": [{
+            "utxoEntry": {
+                "amount": utxo.amount,
+                "scriptPublicKey": format!("0000{}", hex::encode(&utxo.script_public_key)),
+                "blockDaaScore": utxo.block_daa_score,
+                "isCoinbase": false,
+                "covenantId": covenant_id
+            },
+            "previousOutpoint": { "transactionId": utxo.tx_id, "index": utxo.index },
+            "sequence": 0u64, "minTime": serde_json::Value::Null,
+            "partialSigs": {}, "sighashType": 1u8,
+            "redeemScript": hex::encode(&redeem), "sigOpCount": 1u8,
+            "bip32Derivations": { owner_key_hex: { "masterFingerprint": "00000000", "path": [] } },
+            "finalScriptSig": serde_json::Value::Null,
+            "proprietaries": { "timeLockedClaim": true }
+        }],
+        "outputs": [{
+            "amount": output_amount,
+            "scriptPublicKey": format!("0000{}", hex::encode(destination_spk)),
+            "covenantBinding": serde_json::Value::Null,
+            "redeemScript": serde_json::Value::Null,
+            "bip32Derivations": {}, "proprietaries": {}
+        }]
+    });
+    let json = serde_json::to_vec(&serde_json::Value::Array(vec![pskt]))
+        .map_err(|e| JsValue::from_str(&format!("Serialize time-locked claim: {e}")))?;
+    let mut wire = b"PSKB".to_vec();
+    wire.extend_from_slice(hex::encode(json).as_bytes());
+    Ok(hex::encode(wire))
 }
 
 /// Derive the recovery-aware V2 vault. All destination scripts, the recovery

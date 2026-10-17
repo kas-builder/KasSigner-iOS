@@ -391,6 +391,7 @@ struct WalletHomeView: View {
     @State private var showingCurrencyConverter = false
     @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
     @State private var contextVault: ProtectedVault?
+    @State private var contextTimeLockedDraft: TimeLockedVaultSetupDraft?
     @State private var contextVaultRenameText = ""
     @State private var showingContextVaultRename = false
     @State private var showingContextVaultRemoval = false
@@ -1011,20 +1012,14 @@ struct WalletHomeView: View {
                     + setupDrafts.map(VaultListItem.setupDraft)
                     + timeLockedDrafts.map(VaultListItem.timeLockedSetupDraft))
                     .sorted { lhs, rhs in
-                        let lhsOpened = protectedVaultStore.lastOpenedAt(id: lhs.id, profileID: profile.id)
-                        let rhsOpened = protectedVaultStore.lastOpenedAt(id: rhs.id, profileID: profile.id)
-                        switch (lhsOpened, rhsOpened) {
-                        case let (lhsDate?, rhsDate?):
-                            if lhsDate != rhsDate { return lhsDate > rhsDate }
-                        case (_?, nil):
-                            return true
-                        case (nil, _?):
-                            return false
-                        case (nil, nil):
-                            break
-                        }
-                        if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
-                        return lhs.id.uuidString < rhs.id.uuidString
+                        VaultLastOpenedOrder.precedes(
+                            id: lhs.id,
+                            createdAt: lhs.createdAt,
+                            lastOpenedAt: protectedVaultStore.lastOpenedAt(id: lhs.id, profileID: profile.id),
+                            id: rhs.id,
+                            createdAt: rhs.createdAt,
+                            lastOpenedAt: protectedVaultStore.lastOpenedAt(id: rhs.id, profileID: profile.id)
+                        )
                     }
 
                 ForEach(items) { item in
@@ -1038,6 +1033,7 @@ struct WalletHomeView: View {
                         .buttonStyle(.plain)
                         .contextMenu {
                             Button {
+                                contextTimeLockedDraft = nil
                                 contextVault = vault
                                 contextVaultRenameText = vault.displayName
                                 showingContextVaultRename = true
@@ -1046,6 +1042,7 @@ struct WalletHomeView: View {
                             }
 
                             Button(role: .destructive) {
+                                contextTimeLockedDraft = nil
                                 contextVault = vault
                                 showingContextVaultRemoval = true
                             } label: {
@@ -1067,6 +1064,27 @@ struct WalletHomeView: View {
                             vaultNavigationLabel { timeLockedSetupDraftCard(draft) }
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            if draft.fundingTransactionID != nil {
+                                Button {
+                                    contextVault = nil
+                                    contextTimeLockedDraft = draft
+                                    contextVaultRenameText = draft.displayName
+                                    showingContextVaultRename = true
+                                } label: {
+                                    Label("Rename Vault", systemImage: "pin")
+                                }
+
+                                Button(role: .destructive) {
+                                    contextVault = nil
+                                    contextTimeLockedDraft = draft
+                                    showingContextVaultRemoval = true
+                                } label: {
+                                    Label("Remove Vault Record", systemImage: "trash")
+                                        .foregroundStyle(.red)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1079,11 +1097,15 @@ struct WalletHomeView: View {
             isPresented: $showingContextVaultRemoval,
             titleVisibility: .visible
         ) {
-            Button("Remove Local Record", role: .destructive) {
+            Button(contextTimeLockedDraft == nil ? "Remove Local Record" : "Remove Vault Record", role: .destructive) {
                 if let contextVault {
                     protectedVaultStore.remove(id: contextVault.id)
                 }
+                if let contextTimeLockedDraft {
+                    protectedVaultStore.removeTimeLockedSetupDraft(id: contextTimeLockedDraft.id)
+                }
                 contextVault = nil
+                contextTimeLockedDraft = nil
             }
         } message: {
             Text(contextVaultRemovalMessage)
@@ -1091,12 +1113,19 @@ struct WalletHomeView: View {
         .alert("Rename Vault", isPresented: $showingContextVaultRename) {
             TextField("Vault name", text: $contextVaultRenameText)
                 .textInputAutocapitalization(.words)
-            Button("Cancel", role: .cancel) { contextVault = nil }
+            Button("Cancel", role: .cancel) {
+                contextVault = nil
+                contextTimeLockedDraft = nil
+            }
             Button("Save") {
                 if let contextVault {
                     protectedVaultStore.rename(id: contextVault.id, to: contextVaultRenameText)
                 }
+                if let contextTimeLockedDraft {
+                    protectedVaultStore.renameTimeLockedVault(id: contextTimeLockedDraft.id, to: contextVaultRenameText)
+                }
                 contextVault = nil
+                contextTimeLockedDraft = nil
             }
             .disabled(contextVaultRenameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
@@ -1105,6 +1134,7 @@ struct WalletHomeView: View {
     }
 
     private var contextVaultRemovalTitle: String {
+        if contextTimeLockedDraft != nil { return "Remove this Time Locked Vault from the app?" }
         guard let contextVault else { return "Remove this vault from the app?" }
         return contextVault.status == .localDraft
             ? "Delete this vault draft?"
@@ -1112,6 +1142,9 @@ struct WalletHomeView: View {
     }
 
     private var contextVaultRemovalMessage: String {
+        if contextTimeLockedDraft != nil {
+            return "This removes the saved Time Locked Vault record and its local claim details from this app. It will not move or recover the on-chain funds."
+        }
         guard let contextVault else { return "This removes the saved vault record from this app." }
         if contextVault.status == .localDraft {
             return "This removes the unfunded vault draft from this app."
@@ -1229,7 +1262,7 @@ struct WalletHomeView: View {
 
             VStack(alignment: .leading, spacing: 5) {
                 HStack {
-                    Text("Time Locked Vault")
+                    Text(draft.displayName)
                         .font(.headline)
                     Spacer()
                     Text(spent ? "Spent" : funded ? "Active" : "Setup Draft")
@@ -1243,7 +1276,7 @@ struct WalletHomeView: View {
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(spent ? "Time Locked Vault, spent, tap to view vault" : funded ? "Time Locked Vault, active, tap to view vault" : "Time Locked Vault, Setup Draft, tap to resume setup")
+        .accessibilityLabel(spent ? "\(draft.displayName), spent, tap to view vault" : funded ? "\(draft.displayName), active, tap to view vault" : "\(draft.displayName), Setup Draft, tap to resume setup")
     }
 
     private var unavailableAccountView: some View {
@@ -1664,6 +1697,7 @@ private struct TimeLockedUTXORulesView: View {
         let latestDraft = activeDraft.flatMap {
             protectedVaultStore.timeLockedSetupDraft(id: $0.id)
         } ?? activeDraft
+        let sameUnlockDate = latestDraft?.unlockDate == unlockDate
         return TimeLockedVaultSetupDraft(
             id: latestDraft?.id ?? UUID(),
             profileID: profile.id,
@@ -1675,6 +1709,16 @@ private struct TimeLockedUTXORulesView: View {
             changeAddressIndex: latestDraft?.changeAddressIndex,
             usesCustomFee: latestDraft?.usesCustomFee ?? false,
             customFeeText: latestDraft?.customFeeText ?? "",
+            nonceHex: latestDraft?.nonceHex,
+            locktimeDAA: sameUnlockDate ? latestDraft?.locktimeDAA : nil,
+            ownerDerivationIndex: latestDraft?.ownerDerivationIndex,
+            ownerPublicKey: latestDraft?.ownerPublicKey,
+            redeemScriptHex: sameUnlockDate ? latestDraft?.redeemScriptHex : nil,
+            vaultAddress: sameUnlockDate ? latestDraft?.vaultAddress : nil,
+            amountSompi: latestDraft?.amountSompi,
+            covenantID: latestDraft?.covenantID,
+            fundingTransactionID: latestDraft?.fundingTransactionID,
+            claimTransactionID: latestDraft?.claimTransactionID,
             step: step
         )
     }
@@ -1712,7 +1756,9 @@ private struct TimeLockedVaultSetupDraftResumeView: View {
 
     var body: some View {
         Group {
-            if isValidating {
+            if draft.fundingTransactionID != nil {
+                TimeLockedVaultStatusView(draft: draft, profile: profile)
+            } else if isValidating {
                 ProgressView("Revalidating saved funding UTXOs…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let validationError {
@@ -1733,7 +1779,9 @@ private struct TimeLockedVaultSetupDraftResumeView: View {
                 )
             }
         }
-        .task { await validateSavedUTXOs() }
+        .task {
+            if draft.fundingTransactionID == nil { await validateSavedUTXOs() }
+        }
     }
 
     @MainActor
@@ -1761,6 +1809,391 @@ private struct TimeLockedVaultSetupDraftResumeView: View {
     }
 }
 
+private struct VaultTransactionCard: View {
+    let title: String
+    let transactionID: String
+    let transactionURL: URL
+
+    var body: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(title)
+                    .font(.headline.weight(.semibold))
+
+                Link(destination: transactionURL) {
+                    Text(transactionID)
+                        .font(.body.monospaced())
+                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
+                        .multilineTextAlignment(.leading)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(
+                            Color(.tertiarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                        }
+                }
+                .accessibilityLabel("Open \(title.lowercased()) transaction \(transactionID)")
+                .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
+            .background(
+                Color(.secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+        }
+        .listRowInsets(EdgeInsets())
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+    }
+}
+
+private struct TimeLockedVaultStatusView: View {
+    let draft: TimeLockedVaultSetupDraft
+    let profile: WalletProfile
+
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+    @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var walletStore: WalletStore
+    @State private var currentDAA: UInt64?
+    @State private var vaultUTXO: WalletUTXO?
+    @State private var feeSompi: UInt64?
+    @State private var isRefreshing = false
+    @State private var isPreparingClaim = false
+    @State private var isBroadcastingClaim = false
+    @State private var showingClaimConfirmation = false
+    @State private var claimPSKB: String?
+    @State private var claimSummary: PSKTSummary?
+    @State private var claimTransactionID: String?
+    @State private var showingBroadcastSuccess = false
+    @State private var errorMessage: String?
+
+    private var savedDraft: TimeLockedVaultSetupDraft {
+        protectedVaultStore.timeLockedSetupDraft(id: draft.id) ?? draft
+    }
+
+    private var descriptor: TimeLockedDestinationDescriptor? {
+        guard let ownerDerivationIndex = savedDraft.ownerDerivationIndex,
+              let ownerPublicKey = savedDraft.ownerPublicKey,
+              let locktimeDAA = savedDraft.locktimeDAA,
+              let nonceHex = savedDraft.nonceHex,
+              let redeemScriptHex = savedDraft.redeemScriptHex,
+              let vaultAddress = savedDraft.vaultAddress else { return nil }
+        return TimeLockedDestinationDescriptor(
+            ownerDerivationIndex: ownerDerivationIndex,
+            ownerPublicKey: ownerPublicKey,
+            destinationAddress: savedDraft.destination,
+            locktimeDAA: locktimeDAA,
+            maximumClaimFeeSompi: 10_000_000,
+            nonceHex: nonceHex,
+            redeemScriptHex: redeemScriptHex,
+            vaultAddress: vaultAddress
+        )
+    }
+
+    private var isUnlocked: Bool {
+        guard let currentDAA, let locktimeDAA = savedDraft.locktimeDAA else { return false }
+        return currentDAA >= locktimeDAA
+    }
+
+    private var statusLabel: String {
+        if savedDraft.claimTransactionID != nil { return "Spent" }
+        guard currentDAA != nil, savedDraft.locktimeDAA != nil else {
+            return isRefreshing ? "Checking" : "Unavailable"
+        }
+        return isUnlocked ? "Unlocked" : "Locked"
+    }
+
+    private var statusColor: Color {
+        switch statusLabel {
+        case "Locked": .red
+        case "Unlocked", "Spent": .green
+        default: .secondary
+        }
+    }
+
+    private var statusSymbol: String {
+        switch statusLabel {
+        case "Locked": "lock.fill"
+        case "Unlocked", "Spent": "checkmark.circle.fill"
+        case "Checking": "arrow.clockwise"
+        default: "questionmark.circle"
+        }
+    }
+
+    var body: some View {
+        Form {
+            Section("Summary") {
+                LabeledContent {
+                    HStack(spacing: 6) {
+                        Image(systemName: statusSymbol)
+                        Text(statusLabel)
+                    }
+                    .fixedSize()
+                    .foregroundStyle(statusColor)
+                } label: {
+                    Text("Status")
+                }
+                LabeledContent(
+                    "Balance",
+                    value: formatKas(savedDraft.claimTransactionID == nil ? (savedDraft.amountSompi ?? 0) : 0)
+                )
+                LabeledContent(
+                    "Unlock Date",
+                    value: savedDraft.unlockDate.formatted(date: .abbreviated, time: .shortened)
+                )
+                if let locktimeDAA = savedDraft.locktimeDAA {
+                    LabeledContent("Unlock DAA", value: locktimeDAA.formatted())
+                }
+                LabeledContent("Current DAA", value: currentDAA?.formatted() ?? "—")
+            }
+
+            if let descriptor {
+                Section {
+                    SendReviewAddressCard(
+                        title: "Destination", address: descriptor.destinationAddress,
+                        accessibilityLabel: "Copy destination address"
+                    )
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                }
+                Section {
+                    SendReviewAddressCard(
+                        title: "Vault Address", address: descriptor.vaultAddress,
+                        accessibilityLabel: "Copy vault address",
+                        amountText: savedDraft.amountSompi.map(formatKas)
+                    )
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                }
+            }
+
+            if let fundingTransactionID = savedDraft.fundingTransactionID {
+                VaultTransactionCard(
+                    title: "Vault Funding Transaction",
+                    transactionID: fundingTransactionID,
+                    transactionURL: preferences.explorer.transactionURL(
+                        fundingTransactionID,
+                        network: preferences.network
+                    )
+                )
+                .padding(.top, -6)
+            }
+
+            if let claimTransactionID = savedDraft.claimTransactionID {
+                VaultTransactionCard(
+                    title: "Vault Spend Transaction",
+                    transactionID: claimTransactionID,
+                    transactionURL: preferences.explorer.transactionURL(
+                        claimTransactionID,
+                        network: preferences.network
+                    )
+                )
+                .padding(.top, -6)
+            }
+
+            if let errorMessage {
+                Section {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+            }
+            if isRefreshing {
+                Section {
+                    ProgressView("Checking Testnet 10…")
+                }
+            }
+        }
+        .listSectionSpacing(12)
+        .navigationTitle("Vault Status")
+        .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) {
+            if savedDraft.claimTransactionID == nil {
+                Button {
+                    Task { await prepareClaim() }
+                } label: {
+                    if isPreparingClaim || isBroadcastingClaim {
+                        ProgressView().frame(maxWidth: .infinity).padding(.vertical, 12)
+                    } else {
+                        Text("Spend from Vault")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!isUnlocked || vaultUTXO == nil || feeSompi == nil
+                    || isRefreshing || isPreparingClaim || isBroadcastingClaim)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(.ultraThinMaterial)
+            }
+        }
+        .toolbar {
+            if savedDraft.claimTransactionID == nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Refresh", systemImage: "arrow.clockwise") {
+                        Task { await refresh() }
+                    }
+                    .disabled(isRefreshing)
+                }
+            }
+        }
+        .alert("Claim Time Locked Vault", isPresented: $showingClaimConfirmation) {
+            Button("Cancel", role: .cancel) { claimPSKB = nil; claimSummary = nil }
+            Button("Confirm & Authenticate") { Task { await signAndBroadcastClaim() } }
+        } message: {
+            Text("Send the vault balance, less \(formatKas(feeSompi ?? 0)) claim fee, to \(savedDraft.destination)?")
+        }
+        .fullScreenCover(isPresented: $showingBroadcastSuccess) {
+            if let claimTransactionID {
+                BroadcastSuccessView(transactionID: claimTransactionID) {
+                    showingBroadcastSuccess = false
+                }
+            }
+        }
+        .task { await refresh() }
+    }
+
+    @MainActor
+    private func refresh() async {
+        guard savedDraft.claimTransactionID == nil else {
+            currentDAA = nil
+            vaultUTXO = nil
+            feeSompi = nil
+            return
+        }
+        guard !isRefreshing else { return }
+        isRefreshing = true
+        errorMessage = nil
+        defer { isRefreshing = false }
+        guard preferences.network == .testnet10, profile.network == KaspaNetwork.testnet10.rawValue,
+              let descriptor else {
+            errorMessage = "This vault is available on Testnet 10 only, and its saved rules must be complete."
+            return
+        }
+        do {
+            async let score = engine.getTestnet10DAAScore(nodeConfiguration: preferences.nodeConfiguration)
+            async let sync = engine.syncAddress(descriptor.vaultAddress, nodeConfiguration: preferences.nodeConfiguration)
+            async let estimate = engine.getFeeEstimate(nodeConfiguration: preferences.nodeConfiguration)
+            let (currentScore, snapshot, feeEstimate) = try await (score, sync, estimate)
+            currentDAA = currentScore
+            vaultUTXO = snapshot.utxos.first {
+                $0.covenantID?.caseInsensitiveCompare(savedDraft.covenantID ?? "") == .orderedSame
+                    && $0.amount == savedDraft.amountSompi
+            }
+            let scaledFee = ceil(max(1, feeEstimate.normalSompiPerGram) * 3_000)
+            if scaledFee.isFinite, scaledFee >= 0, scaledFee < Double(UInt64.max) {
+                let estimatedFee = max(feeEstimate.suggestedFee, UInt64(scaledFee))
+                feeSompi = estimatedFee > 0 && estimatedFee <= descriptor.maximumClaimFeeSompi
+                    ? estimatedFee : nil
+            } else {
+                feeSompi = nil
+            }
+            if vaultUTXO == nil && savedDraft.claimTransactionID == nil {
+                errorMessage = "The funded vault UTXO is not available yet. Refresh after the funding transaction confirms."
+            } else if feeSompi == nil && savedDraft.claimTransactionID == nil {
+                errorMessage = "The current fee exceeds this vault's maximum claim fee. Try again later."
+            }
+        } catch {
+            errorMessage = "Could not update the Testnet 10 DAA score, vault balance, or fee. \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func prepareClaim() async {
+        guard !isPreparingClaim, savedDraft.claimTransactionID == nil else { return }
+        isPreparingClaim = true
+        errorMessage = nil
+        claimPSKB = nil
+        defer { isPreparingClaim = false }
+        await refresh()
+        guard isUnlocked, let descriptor, let utxo = vaultUTXO, let feeSompi else {
+            errorMessage = "The vault is not yet unlocked, or its funded UTXO and fee could not be verified."
+            return
+        }
+        do {
+            let pskb = try await engine.buildTimeLockedClaimPSKB(
+                utxo: utxo, descriptor: descriptor, feeSompi: feeSompi
+            )
+            let summary = try await engine.summarizePSKB(pskb, network: .testnet10)
+            guard summary.transactionVersion == 1,
+                  summary.lockTime == descriptor.locktimeDAA,
+                  summary.inputCount == 1, summary.outputCount == 1,
+                  summary.totalInputSompi == utxo.amount,
+                  summary.totalOutputSompi == utxo.amount - feeSompi,
+                  summary.feeSompi == feeSompi,
+                  summary.inputs?.first?.txID?.caseInsensitiveCompare(utxo.txID) == .orderedSame,
+                  summary.inputs?.first?.index == utxo.index,
+                  summary.inputs?.first?.sequence != UInt64.max,
+                  summary.inputs?.first?.redeemScriptHex?.caseInsensitiveCompare(descriptor.redeemScriptHex) == .orderedSame,
+                  summary.outputs?.first?.address?.caseInsensitiveCompare(descriptor.destinationAddress) == .orderedSame,
+                  summary.outputs?.first?.amountSompi == utxo.amount - feeSompi,
+                  summary.outputs?.first?.covenantID == nil else {
+                errorMessage = "The claim transaction does not match this vault's saved rules."
+                return
+            }
+            claimPSKB = pskb
+            claimSummary = summary
+            showingClaimConfirmation = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func signAndBroadcastClaim() async {
+        guard !isBroadcastingClaim, let claimPSKB, let claimSummary,
+              let descriptor, savedDraft.claimTransactionID == nil else { return }
+        isBroadcastingClaim = true
+        errorMessage = nil
+        defer { isBroadcastingClaim = false }
+        guard await appLockService.authorizeTransactionBroadcast() else {
+            errorMessage = appLockService.authenticationError.map { "Authentication failed: \($0)" }
+                ?? "Authentication is required to claim the vault."
+            return
+        }
+        do {
+            let mnemonic = try TestnetSeedStore.load(for: profile.id)
+            let signed = try await engine.signTestnet10TimeLockedClaimPSKB(
+                claimPSKB, mnemonic: mnemonic, receiveIndex: descriptor.ownerDerivationIndex
+            )
+            let signedSummary = try await engine.summarizePSKB(signed, network: .testnet10)
+            try SignedProtectedVaultFundingVerifier.verify(unsigned: claimSummary, signed: signedSummary)
+            try await engine.verifyProtectedVaultApprovedSignature(signed)
+            let txid = try await engine.broadcastSignedPSKB(
+                signed, nodeConfiguration: preferences.nodeConfiguration
+            )
+            claimTransactionID = txid
+            let vaultSaved = protectedVaultStore.recordTimeLockedClaim(id: draft.id, transactionID: txid)
+            let walletSaved = walletStore.recordBroadcastedTransaction(
+                profileID: profile.id, transactionID: txid,
+                destination: descriptor.destinationAddress,
+                amountSompi: (claimSummary.totalOutputSompi ?? 0),
+                feeSompi: claimSummary.feeSompi ?? 0
+            )
+            if !vaultSaved || !walletSaved {
+                errorMessage = "Claim was broadcast, but its local record could not be fully saved. Keep transaction ID \(txid)."
+            }
+            showingBroadcastSuccess = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func formatKas(_ sompi: UInt64) -> String {
+        "\((Decimal(sompi) / Decimal(100_000_000)).formatted()) TKAS"
+    }
+}
+
 private struct TimeLockedFundingDetailsView: View {
     let profile: WalletProfile
     let selectedUTXOs: [WalletUTXO]
@@ -1771,6 +2204,7 @@ private struct TimeLockedFundingDetailsView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+    @EnvironmentObject private var syncService: WalletSyncService
     @State private var destination: String
     @State private var destinationValidation: AddressValidationResult?
     @State private var isValidatingDestination = false
@@ -1840,13 +2274,24 @@ private struct TimeLockedFundingDetailsView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(isPreparingReview || !canReview)
+            .disabled(isPreparingReview || !canAttemptReview)
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .background(.ultraThinMaterial)
         }
-        .navigationTitle("Destination & Amount")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 1) {
+                    Text("Destination & Amount")
+                        .font(.headline)
+                    Text("Time Locked Vault")
+                        .font(.caption)
+                        .fontWeight(.regular)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
         .background(Color(.systemGroupedBackground))
         .sheet(isPresented: $showingScanner) {
             QRScannerView { scanned in
@@ -1889,11 +2334,16 @@ private struct TimeLockedFundingDetailsView: View {
         .navigationDestination(isPresented: $showingReview) {
             if let reviewDescriptor, let amountSompi, let feeSompi, let changeSompi {
                 TimeLockedRuleReviewView(
+                    profile: profile,
+                    draftID: setupDraft.id,
+                    selectedUTXOs: selectedUTXOs,
                     unlockDate: unlockDate,
                     descriptor: reviewDescriptor,
                     amountSompi: amountSompi,
                     feeSompi: feeSompi,
+                    usesCustomFee: usesCustomFee,
                     changeSompi: changeSompi,
+                    changeIndex: changeIndex,
                     changeAddress: profile.changeAddresses.indices.contains(changeIndex)
                         ? profile.changeAddresses[changeIndex] : nil
                 )
@@ -2049,6 +2499,16 @@ private struct TimeLockedFundingDetailsView: View {
             if let feeError {
                 Text(feeError).font(.caption).foregroundStyle(.secondary)
             }
+            if let feeSompi {
+                HStack {
+                    Text(usesCustomFee ? "Selected fee" : "Estimated fee")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(formatKas(feeSompi))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+                .font(.footnote)
+            }
         }
         .sendStyleCard()
     }
@@ -2073,24 +2533,35 @@ private struct TimeLockedFundingDetailsView: View {
         selectedChangeIndex ?? profile.nextChangeIndex
     }
 
-    private func persistDraft() {
-        var updated = setupDraft
+    private func persistDraft(nonceHex: String? = nil) {
+        var updated = protectedVaultStore.timeLockedSetupDraft(id: setupDraft.id) ?? setupDraft
         updated.destination = destination
         updated.amountText = amountText
         updated.changeAddressIndex = selectedChangeIndex
         updated.usesCustomFee = usesCustomFee
         updated.customFeeText = customFeeText
+        updated.nonceHex = nonceHex ?? reviewDescriptor?.nonceHex ?? setupDraft.nonceHex
+        updated.locktimeDAA = reviewDescriptor?.locktimeDAA ?? updated.locktimeDAA
+        updated.ownerDerivationIndex = reviewDescriptor?.ownerDerivationIndex ?? updated.ownerDerivationIndex
+        updated.ownerPublicKey = reviewDescriptor?.ownerPublicKey ?? updated.ownerPublicKey
+        updated.redeemScriptHex = reviewDescriptor?.redeemScriptHex ?? updated.redeemScriptHex
+        updated.vaultAddress = reviewDescriptor?.vaultAddress ?? updated.vaultAddress
+        updated.amountSompi = amountSompi
         updated.selectedUTXOIDs = selectedUTXOs.map(\.id)
         updated.step = .fundingDetails
         _ = protectedVaultStore.saveTimeLockedSetupDraft(updated)
     }
 
     private var feeSompi: UInt64? {
+        feeSompi(for: feeEstimate)
+    }
+
+    private func feeSompi(for estimate: FeeEstimate?) -> UInt64? {
         if usesCustomFee {
             guard let custom = parseAmountSompi(customFeeText), custom > 0 else { return nil }
             return custom
         }
-        return feeEstimate.flatMap { protectedVaultNormalFeeEstimate(estimate: $0, inputCount: selectedUTXOs.count) }
+        return estimate.flatMap { protectedVaultNormalFeeEstimate(estimate: $0, inputCount: selectedUTXOs.count) }
     }
 
     private var canReview: Bool {
@@ -2099,6 +2570,14 @@ private struct TimeLockedFundingDetailsView: View {
             && !isValidatingDestination
             && amountSompi.map { $0 > 10_000_000 } == true
             && changeSompi != nil
+            && unlockDate > .now
+    }
+
+    private var canAttemptReview: Bool {
+        destinationValidation?.valid == true
+            && destinationValidation?.network == KaspaNetwork.testnet10.rawValue
+            && !isValidatingDestination
+            && amountSompi.map { $0 > 10_000_000 } == true
             && unlockDate > .now
     }
 
@@ -2185,11 +2664,43 @@ private struct TimeLockedFundingDetailsView: View {
 
     @MainActor
     private func prepareReview() async {
-        guard canReview else { return }
+        guard !isPreparingReview else { return }
         isPreparingReview = true
         reviewError = nil
         defer { isPreparingReview = false }
         do {
+            let refreshedEstimate: FeeEstimate
+            do {
+                refreshedEstimate = try await engine.getFeeEstimate(
+                    nodeConfiguration: preferences.nodeConfiguration
+                )
+            } catch {
+                let message = "Fee cannot be updated. Check your network connection and try again."
+                feeError = message
+                reviewError = message
+                return
+            }
+            guard let refreshedFee = feeSompi(for: refreshedEstimate), refreshedFee > 0 else {
+                let message = "Fee cannot be updated. Check the selected fee and try again."
+                feeError = message
+                reviewError = message
+                return
+            }
+            feeEstimate = refreshedEstimate
+            feeError = nil
+
+            if sendMax {
+                guard selectedInputTotal > refreshedFee else {
+                    reviewError = "Fee cannot be updated for this amount. Select more UTXOs or enter a smaller amount."
+                    return
+                }
+                amountText = plainKas(selectedInputTotal - refreshedFee)
+            }
+            guard canReview else {
+                reviewError = "Check the destination, amount, selected UTXOs, and unlock date before continuing."
+                return
+            }
+
             let seconds = unlockDate.timeIntervalSinceNow
             guard seconds.isFinite, seconds > 0,
                   seconds < Double(UInt64.max / 10) else {
@@ -2198,25 +2709,33 @@ private struct TimeLockedFundingDetailsView: View {
             let score = try await engine.getTestnet10DAAScore(
                 nodeConfiguration: preferences.nodeConfiguration
             )
+            let saved = protectedVaultStore.timeLockedSetupDraft(id: setupDraft.id)
             let offset = UInt64(ceil(seconds * 10))
             let target = score.addingReportingOverflow(offset)
             guard !target.overflow else {
                 throw KasSignerEngine.EngineError.javascript("Unlock score is out of range.")
             }
+            let locktimeDAA = saved?.unlockDate == unlockDate
+                ? saved?.locktimeDAA ?? target.partialValue : target.partialValue
+            guard locktimeDAA > score else {
+                throw KasSignerEngine.EngineError.javascript("The saved unlock score has passed. Choose a new unlock date.")
+            }
             let canonicalDestination = destinationValidation?.normalized ?? destination
             let descriptor = try await engine.deriveTimeLockedDestination(
                 profile: profile,
-                receiveIndex: profile.nextReceiveIndex,
+                receiveIndex: Int(saved?.ownerDerivationIndex ?? UInt32(profile.nextReceiveIndex)),
                 destination: canonicalDestination,
-                locktimeDAA: target.partialValue
+                locktimeDAA: locktimeDAA,
+                nonceHex: saved?.nonceHex ?? setupDraft.nonceHex
             )
             guard descriptor.destinationAddress.caseInsensitiveCompare(canonicalDestination) == .orderedSame,
-                  descriptor.locktimeDAA == target.partialValue,
+                  descriptor.locktimeDAA == locktimeDAA,
                   descriptor.vaultAddress.hasPrefix("kaspatest:"),
                   !descriptor.redeemScriptHex.isEmpty else {
                 throw KasSignerEngine.EngineError.invalidResponse
             }
             reviewDescriptor = descriptor
+            persistDraft(nonceHex: descriptor.nonceHex)
             showingReview = true
         } catch {
             reviewError = error.localizedDescription
@@ -2225,47 +2744,440 @@ private struct TimeLockedFundingDetailsView: View {
 }
 
 private struct TimeLockedRuleReviewView: View {
+    let profile: WalletProfile
+    let draftID: UUID
+    let selectedUTXOs: [WalletUTXO]
     let unlockDate: Date
     let descriptor: TimeLockedDestinationDescriptor
     let amountSompi: UInt64
     let feeSompi: UInt64
+    let usesCustomFee: Bool
     let changeSompi: UInt64
+    let changeIndex: Int
     let changeAddress: String?
 
+    @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var walletStore: WalletStore
+    @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
+    @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var syncService: WalletSyncService
+    @State private var checks: [ProtectedVaultSecurityCheck] = []
+    @State private var isChecking = true
+    @State private var checkError: String?
+    @State private var isBuildingFunding = false
+    @State private var isBroadcastingFunding = false
+    @State private var showingFundingConfirmation = false
+    @State private var fundingPSKB: String?
+    @State private var fundingSummary: PSKTSummary?
+    @State private var fundingCovenantID: String?
+    @State private var fundingTransactionID: String?
+    @State private var showingBroadcastSuccess = false
+    @State private var fundingError: String?
+
+    private var allChecksPassed: Bool {
+        !checks.isEmpty && checks.allSatisfy { $0.passed == true }
+    }
+
     var body: some View {
-        Form {
-            Section("Time Lock") {
-                LabeledContent("Unlock Date", value: unlockDate.formatted(date: .abbreviated, time: .shortened))
-                LabeledContent("DAA Score", value: descriptor.locktimeDAA.formatted())
-            }
-            Section {
-                Text(descriptor.destinationAddress)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-            } header: {
-                Text("Destination")
-            } footer: {
-                Text("The redeem script requires this exact destination after the unlock score.")
-            }
-            Section("Funding Preview") {
-                LabeledContent("Vault Amount", value: formatKas(amountSompi))
-                LabeledContent("Estimated Fee", value: formatKas(feeSompi))
-                LabeledContent("Change", value: formatKas(changeSompi))
-                if changeSompi > 0, let changeAddress {
-                    Text(changeAddress)
-                        .font(.system(.footnote, design: .monospaced))
-                        .textSelection(.enabled)
+        ScrollView {
+            VStack(spacing: 14) {
+                summaryCard(title: "Time Lock") {
+                    summaryRow("Unlock Date", value: unlockDate.formatted(date: .abbreviated, time: .shortened))
+                    Divider()
+                    summaryRow("DAA Score", value: descriptor.locktimeDAA.formatted())
                 }
-                LabeledContent("Max Claim Fee", value: formatKas(descriptor.maximumClaimFeeSompi))
+
+                SendReviewAddressCard(
+                    title: "Destination", address: descriptor.destinationAddress,
+                    accessibilityLabel: "Copy destination address"
+                )
+
+                summaryCard(title: "Funding Preview") {
+                    summaryRow("Selected UTXOs", value: "\(selectedUTXOs.count)")
+                    Divider()
+                    summaryRow("Vault Amount", value: formatKas(amountSompi))
+                    Divider()
+                    summaryRow("Estimated Fee", value: formatKas(feeSompi))
+                    Divider()
+                    summaryRow("Change", value: formatKas(changeSompi))
+                    Divider()
+                    summaryRow("Max Claim Fee", value: formatKas(descriptor.maximumClaimFeeSompi))
+                }
+                if changeSompi > 0, let changeAddress {
+                    SendReviewAddressCard(
+                        title: "Change", address: changeAddress,
+                        accessibilityLabel: "Copy change address",
+                        amountText: formatKas(changeSompi)
+                    )
+                }
+                SendReviewAddressCard(
+                    title: "Vault Address", address: descriptor.vaultAddress,
+                    accessibilityLabel: "Copy vault address",
+                    amountText: formatKas(amountSompi)
+                )
+
+                ProtectedVaultSecurityChecksCard(checks: checks)
+
+                if let fundingError {
+                    Label(fundingError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                if isChecking {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Verifying inputs and addresses…")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else if let checkError {
+                    Label(checkError, systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
-            Section("Vault Address") {
-                Text(descriptor.vaultAddress)
-                    .font(.system(.footnote, design: .monospaced))
-                    .textSelection(.enabled)
-            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
         }
+        .background(Color(.systemGroupedBackground))
         .navigationTitle("Review")
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .bottom) {
+            Button {
+                if allChecksPassed {
+                    Task { await buildAndVerifyFunding() }
+                } else {
+                    Task { await runSecurityChecks() }
+                }
+            } label: {
+                if isChecking || isBuildingFunding || isBroadcastingFunding {
+                    ProgressView()
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                } else {
+                    Text(allChecksPassed ? "Continue" : "Recheck Security")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isChecking || isBuildingFunding || isBroadcastingFunding || fundingTransactionID != nil)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(.ultraThinMaterial)
+        }
+        .alert("Fund Time Locked Vault", isPresented: $showingFundingConfirmation) {
+            Button("Cancel", role: .cancel) { fundingPSKB = nil; fundingSummary = nil }
+            Button("Confirm & Authenticate") { Task { await signAndBroadcastFunding() } }
+        } message: {
+            Text("Deposit \(formatKas(amountSompi)) into \(descriptor.vaultAddress)? The funding fee is \(formatKas(feeSompi)) and change is \(formatKas(changeSompi)).")
+        }
+        .fullScreenCover(isPresented: $showingBroadcastSuccess) {
+            if let fundingTransactionID {
+                BroadcastSuccessView(transactionID: fundingTransactionID) {
+                    showingBroadcastSuccess = false
+                }
+            }
+        }
+        .task { await runSecurityChecks() }
+    }
+
+    @MainActor
+    private func buildAndVerifyFunding() async {
+        guard !isBuildingFunding, fundingTransactionID == nil else { return }
+        isBuildingFunding = true
+        fundingError = nil
+        fundingPSKB = nil
+        fundingSummary = nil
+        defer { isBuildingFunding = false }
+
+        await runSecurityChecks()
+        guard allChecksPassed else {
+            fundingError = checkError ?? "Security checks failed. Review the setup and try again."
+            return
+        }
+
+        do {
+            let estimate: FeeEstimate
+            do {
+                estimate = try await engine.getFeeEstimate(nodeConfiguration: preferences.nodeConfiguration)
+            } catch {
+                fundingError = "Fee cannot be updated. Check the Testnet 10 connection and try again."
+                return
+            }
+            if !usesCustomFee {
+                guard protectedVaultNormalFeeEstimate(estimate: estimate, inputCount: selectedUTXOs.count) == feeSompi else {
+                    fundingError = "The fee changed. Go back to Destination & Amount and continue again to review the updated fee."
+                    return
+                }
+            }
+            guard let activeProfile = walletStore.profiles.first(where: { $0.id == profile.id }),
+                  activeProfile.changeAddresses.indices.contains(changeIndex),
+                  let draft = protectedVaultStore.timeLockedSetupDraft(id: draftID),
+                  draft.fundingTransactionID == nil,
+                  draft.locktimeDAA == descriptor.locktimeDAA,
+                  draft.vaultAddress?.caseInsensitiveCompare(descriptor.vaultAddress) == .orderedSame else {
+                fundingError = "The saved vault setup changed. Go back and review it again."
+                return
+            }
+            let plan = try ProtectedVaultFundingPlan(
+                inputs: selectedUTXOs, depositSompi: amountSompi, feeSompi: feeSompi
+            )
+            guard plan.changeSompi == changeSompi else {
+                fundingError = "The funding amount or change changed. Go back and review it again."
+                return
+            }
+            let pskb = try await engine.buildProtectedVaultFundingPSKB(
+                profile: activeProfile,
+                selectedInputs: selectedUTXOs,
+                vaultAddress: descriptor.vaultAddress,
+                amountSompi: amountSompi,
+                feeSompi: feeSompi,
+                changeIndex: changeIndex
+            )
+            let summary = try await engine.summarizePSKB(pskb, network: .testnet10)
+            _ = try ProtectedVaultFundingVerifier.verify(
+                summary: summary,
+                plan: plan,
+                vaultAddress: descriptor.vaultAddress,
+                expectedChangeAddress: changeSompi > 0 ? changeAddress : nil,
+                requiresExactFee: true
+            )
+            guard let covenantID = summary.outputs?.first?.covenantID,
+                  covenantID.count == 64, covenantID.allSatisfy(\.isHexDigit) else {
+                fundingError = "The funding output has no valid covenant ID."
+                return
+            }
+            fundingPSKB = pskb
+            fundingSummary = summary
+            fundingCovenantID = covenantID
+            showingFundingConfirmation = true
+        } catch {
+            fundingError = error.localizedDescription
+        }
+    }
+
+    @MainActor
+    private func signAndBroadcastFunding() async {
+        guard !isBroadcastingFunding, fundingTransactionID == nil,
+              let pskb = fundingPSKB, let unsignedSummary = fundingSummary,
+              let covenantID = fundingCovenantID else { return }
+        isBroadcastingFunding = true
+        fundingError = nil
+        defer { isBroadcastingFunding = false }
+
+        guard await appLockService.authorizeTransactionBroadcast() else {
+            fundingError = appLockService.authenticationError.map { "Authentication failed: \($0)" }
+                ?? "Authentication is required to fund the vault."
+            return
+        }
+        do {
+            let mnemonic = try TestnetSeedStore.load(for: profile.id)
+            let signed = try await engine.signTestnet10FundingPSKB(pskb, mnemonic: mnemonic)
+            let signedSummary = try await engine.summarizePSKB(signed, network: .testnet10)
+            try SignedProtectedVaultFundingVerifier.verify(
+                unsigned: unsignedSummary, signed: signedSummary
+            )
+            try await engine.verifyStandardPSKBSignatures(signed)
+            _ = try await engine.finalizeSignedPSKB(signed)
+            let txid = try await engine.broadcastSignedPSKB(
+                signed, nodeConfiguration: preferences.nodeConfiguration
+            )
+            fundingTransactionID = txid
+            let vaultSaved = protectedVaultStore.recordTimeLockedFunding(
+                id: draftID, transactionID: txid, descriptor: descriptor,
+                amountSompi: amountSompi, covenantID: covenantID
+            )
+            let walletSaved = walletStore.recordBroadcastedTransaction(
+                profileID: profile.id, transactionID: txid,
+                destination: descriptor.vaultAddress, amountSompi: amountSompi,
+                feeSompi: feeSompi,
+                committedChangeIndices: changeSompi > 0 ? [changeIndex] : []
+            )
+            let ownerIndexSaved = walletStore.recordSelectedReceiveAddress(
+                profileID: profile.id, index: Int(descriptor.ownerDerivationIndex)
+            )
+            if !vaultSaved || !walletSaved || !ownerIndexSaved {
+                fundingError = "Funding was broadcast, but the local vault record could not be fully saved. Keep transaction ID \(txid) and refresh the wallet before trying again."
+            }
+            showingBroadcastSuccess = true
+        } catch {
+            fundingError = error.localizedDescription
+        }
+    }
+
+    private func summaryCard<Content: View>(
+        title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.headline)
+            content()
+        }
+        .sendStyleCard()
+    }
+
+    private func summaryRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.subheadline.weight(.semibold).monospacedDigit())
+                .multilineTextAlignment(.trailing)
+        }
+    }
+
+    @MainActor
+    private func runSecurityChecks() async {
+        isChecking = true
+        checkError = nil
+        checks = [
+            ProtectedVaultSecurityCheck(title: "Selected inputs are still unspent and unchanged", passed: nil),
+            ProtectedVaultSecurityCheck(title: "Fixed destination is a valid Testnet 10 address", passed: nil),
+            ProtectedVaultSecurityCheck(title: "Vault address is valid on Testnet 10", passed: nil),
+            ProtectedVaultSecurityCheck(title: "Covenant commits to this destination and unlock score", passed: nil),
+            ProtectedVaultSecurityCheck(title: "Change address belongs to this wallet", passed: nil),
+            ProtectedVaultSecurityCheck(title: "Amount, fee, and change balance to the selected inputs", passed: nil)
+        ]
+
+        var inputCheck = false
+        var destinationCheck = false
+        var vaultAddressCheck = false
+        var covenantCheck = false
+        var changeCheck = changeSompi == 0
+        var totalsCheck = false
+
+        guard preferences.network == .testnet10,
+              profile.network == KaspaNetwork.testnet10.rawValue else {
+            checkError = "Time Locked Vault review is available on Testnet 10 only."
+            finishChecks(input: false, destination: false, vaultAddress: false, covenant: false, change: false, totals: false)
+            return
+        }
+
+        await syncService.refresh(
+            profile: profile,
+            walletStore: walletStore,
+            engine: engine,
+            preferences: preferences,
+            force: true,
+            includeTransactionHistory: false
+        )
+        if syncService.state == .connected,
+           let currentUTXOs = syncService.snapshot?.utxos {
+            let currentByID = Dictionary(
+                currentUTXOs.map { ($0.id.lowercased(), $0) },
+                uniquingKeysWith: { first, _ in first }
+            )
+            inputCheck = !selectedUTXOs.isEmpty
+                && Set(selectedUTXOs.map { $0.id.lowercased() }).count == selectedUTXOs.count
+                && selectedUTXOs.allSatisfy {
+                currentByID[$0.id.lowercased()] == $0
+            }
+        } else {
+            checkError = "Could not verify the selected UTXOs. Reconnect to Testnet 10 and retry."
+        }
+
+        do {
+            let result = try await engine.validateAddress(descriptor.destinationAddress)
+            destinationCheck = result.valid
+                && result.network == KaspaNetwork.testnet10.rawValue
+                && result.normalized?.caseInsensitiveCompare(descriptor.destinationAddress) == .orderedSame
+        } catch {
+            checkError = checkError ?? "Could not verify the fixed destination address. Check the network and retry."
+        }
+
+        do {
+            let result = try await engine.validateAddress(descriptor.vaultAddress)
+            vaultAddressCheck = result.valid
+                && result.network == KaspaNetwork.testnet10.rawValue
+                && result.normalized?.caseInsensitiveCompare(descriptor.vaultAddress) == .orderedSame
+        } catch {
+            checkError = checkError ?? "Could not verify the vault address. Check the network and retry."
+        }
+
+        do {
+            let derived = try await engine.deriveTimeLockedDestination(
+                profile: profile,
+                receiveIndex: Int(descriptor.ownerDerivationIndex),
+                destination: descriptor.destinationAddress,
+                locktimeDAA: descriptor.locktimeDAA,
+                nonceHex: descriptor.nonceHex
+            )
+            covenantCheck = derived.destinationAddress.caseInsensitiveCompare(descriptor.destinationAddress) == .orderedSame
+                && derived.locktimeDAA == descriptor.locktimeDAA
+                && derived.ownerDerivationIndex == descriptor.ownerDerivationIndex
+                && derived.nonceHex.caseInsensitiveCompare(descriptor.nonceHex) == .orderedSame
+                && derived.ownerPublicKey.caseInsensitiveCompare(descriptor.ownerPublicKey) == .orderedSame
+                && derived.redeemScriptHex.caseInsensitiveCompare(descriptor.redeemScriptHex) == .orderedSame
+                && derived.vaultAddress.caseInsensitiveCompare(descriptor.vaultAddress) == .orderedSame
+                && derived.maximumClaimFeeSompi == descriptor.maximumClaimFeeSompi
+                && derived.vaultAddress.hasPrefix("kaspatest:")
+                && !derived.redeemScriptHex.isEmpty
+        } catch {
+            checkError = checkError ?? "Could not re-derive the covenant. Reopen the setup and retry."
+        }
+
+        if changeSompi > 0,
+           profile.changeAddresses.indices.contains(changeIndex),
+           let changeAddress,
+           profile.changeAddresses[changeIndex].caseInsensitiveCompare(changeAddress) == .orderedSame {
+            do {
+                let result = try await engine.validateAddress(changeAddress)
+                changeCheck = result.valid
+                    && result.network == KaspaNetwork.testnet10.rawValue
+                    && result.normalized?.caseInsensitiveCompare(changeAddress) == .orderedSame
+            } catch {
+                checkError = checkError ?? "Could not verify the wallet change address. Select a change address and retry."
+            }
+        }
+
+        let inputTotal = selectedUTXOs.reduce(UInt64(0)) { partial, utxo in
+            let sum = partial.addingReportingOverflow(utxo.amount)
+            return sum.overflow ? UInt64.max : sum.partialValue
+        }
+        let amountAndFee = amountSompi.addingReportingOverflow(feeSompi)
+        let outputTotal = amountAndFee.partialValue.addingReportingOverflow(changeSompi)
+        totalsCheck = !amountAndFee.overflow && !outputTotal.overflow
+            && outputTotal.partialValue == inputTotal
+            && feeSompi > 0 && amountSompi > 0
+
+        finishChecks(
+            input: inputCheck,
+            destination: destinationCheck,
+            vaultAddress: vaultAddressCheck,
+            covenant: covenantCheck,
+            change: changeCheck,
+            totals: totalsCheck
+        )
+        if !allChecksPassed, checkError == nil {
+            checkError = "One or more security checks failed. Go back, review the setup, and try again."
+        }
+        isChecking = false
+    }
+
+    @MainActor
+    private func finishChecks(
+        input: Bool,
+        destination: Bool,
+        vaultAddress: Bool,
+        covenant: Bool,
+        change: Bool,
+        totals: Bool
+    ) {
+        checks = [
+            ProtectedVaultSecurityCheck(title: "Selected inputs are still unspent and unchanged", passed: input),
+            ProtectedVaultSecurityCheck(title: "Fixed destination is a valid Testnet 10 address", passed: destination),
+            ProtectedVaultSecurityCheck(title: "Vault address is valid on Testnet 10", passed: vaultAddress),
+            ProtectedVaultSecurityCheck(title: "Covenant commits to this destination and unlock score", passed: covenant),
+            ProtectedVaultSecurityCheck(title: "Change address belongs to this wallet", passed: change),
+            ProtectedVaultSecurityCheck(title: "Amount, fee, and change balance to the selected inputs", passed: totals)
+        ]
+        isChecking = false
     }
 
     private func formatKas(_ sompi: UInt64) -> String {
@@ -4387,44 +5299,14 @@ private struct ProtectedVaultDetailView: View {
     }
 
     private func transactionCard(title: String, transactionID: String) -> some View {
-        Section {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(title)
-                    .font(.headline.weight(.semibold))
-
-                Link(destination: preferences.explorer.transactionURL(
-                    transactionID,
-                    network: preferences.network
-                )) {
-                    Text(transactionID)
-                        .font(.body.monospaced())
-                        .foregroundStyle(Color(red: 0.20, green: 0.62, blue: 0.57))
-                        .multilineTextAlignment(.leading)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(14)
-                        .background(
-                            Color(.tertiarySystemGroupedBackground),
-                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-                        }
-                }
-                .accessibilityLabel("Open \(title.lowercased()) transaction \(transactionID)")
-                .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
-            .background(
-                Color(.secondarySystemGroupedBackground),
-                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+        VaultTransactionCard(
+            title: title,
+            transactionID: transactionID,
+            transactionURL: preferences.explorer.transactionURL(
+                transactionID,
+                network: preferences.network
             )
-        }
-        .listRowInsets(EdgeInsets())
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
+        )
     }
 
     private func pendingWithdrawalCompletionTitle(

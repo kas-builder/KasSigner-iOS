@@ -567,19 +567,100 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
 
         let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
         let registryURL = root.appending(path: "protected-vault-state.json")
-        let registryBeforeOpen = try Data(contentsOf: registryURL)
         let profileID = UUID()
         let vaultID = UUID()
         let openedAt = Date(timeIntervalSince1970: 1_800_000_123)
+        let vault = ProtectedVault(
+            id: vaultID,
+            profileID: profileID,
+            amount: 1,
+            approvedAddresses: ["kaspatest:approved"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0
+        )
+        XCTAssertTrue(store.add(vault))
+        let registryBeforeOpen = try Data(contentsOf: registryURL)
 
         store.recordOpened(id: vaultID, profileID: profileID, at: openedAt)
 
         XCTAssertEqual(try Data(contentsOf: registryURL), registryBeforeOpen)
         XCTAssertEqual(store.lastOpenedAt(id: vaultID, profileID: profileID), openedAt)
+        XCTAssertNil(store.lastOpenedAt(id: vaultID, profileID: UUID()))
         XCTAssertNotNil(defaults.data(forKey: "kassigner.protectedVaultLastOpened.v1"))
+
+        store.rename(id: vaultID, to: "Renamed Vault")
+        XCTAssertTrue(store.recordFundingBroadcast(id: vaultID, transactionID: String(repeating: "a", count: 64)))
+        XCTAssertEqual(store.lastOpenedAt(id: vaultID, profileID: profileID), openedAt)
 
         let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
         XCTAssertEqual(relaunched.lastOpenedAt(id: vaultID, profileID: profileID), openedAt)
+        XCTAssertEqual(relaunched.vaults(for: profileID).first?.displayName, "Renamed Vault")
+        relaunched.remove(id: vaultID)
+        XCTAssertNil(relaunched.lastOpenedAt(id: vaultID, profileID: profileID))
+    }
+
+    func testVaultLastOpenedOrderingUsesRecencyThenDeterministicCreationAndIDTieBreakers() {
+        let olderID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let newerID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
+        let olderCreation = Date(timeIntervalSince1970: 100)
+        let newerCreation = Date(timeIntervalSince1970: 200)
+        let firstOpen = Date(timeIntervalSince1970: 300)
+        let recentOpen = Date(timeIntervalSince1970: 400)
+
+        XCTAssertTrue(VaultLastOpenedOrder.precedes(
+            id: olderID, createdAt: olderCreation, lastOpenedAt: recentOpen,
+            id: newerID, createdAt: newerCreation, lastOpenedAt: firstOpen
+        ))
+        XCTAssertTrue(VaultLastOpenedOrder.precedes(
+            id: olderID, createdAt: olderCreation, lastOpenedAt: firstOpen,
+            id: newerID, createdAt: newerCreation, lastOpenedAt: nil
+        ))
+        XCTAssertTrue(VaultLastOpenedOrder.precedes(
+            id: olderID, createdAt: newerCreation, lastOpenedAt: nil,
+            id: newerID, createdAt: olderCreation, lastOpenedAt: nil
+        ))
+        XCTAssertTrue(VaultLastOpenedOrder.precedes(
+            id: olderID, createdAt: olderCreation, lastOpenedAt: nil,
+            id: newerID, createdAt: olderCreation, lastOpenedAt: nil
+        ))
+    }
+
+    func testTimeLockedVaultRenamePreservesOrderAndRemovalClearsIt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "TimeLockedVaultLastOpened-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "TimeLockedVaultLastOpened.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        let profileID = UUID()
+        let draftID = UUID()
+        let openedAt = Date(timeIntervalSince1970: 1_800_000_456)
+        var draft = TimeLockedVaultSetupDraft(
+            id: draftID,
+            profileID: profileID,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [],
+            fundingTransactionID: String(repeating: "b", count: 64),
+            step: .funded
+        )
+        draft.name = "Original Time Lock"
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(draft))
+
+        store.recordOpened(id: draftID, profileID: profileID, at: openedAt)
+        store.renameTimeLockedVault(id: draftID, to: "Renamed Time Lock")
+        XCTAssertEqual(store.lastOpenedAt(id: draftID, profileID: profileID), openedAt)
+
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.lastOpenedAt(id: draftID, profileID: profileID), openedAt)
+        XCTAssertEqual(relaunched.timeLockedSetupDraft(id: draftID)?.displayName, "Renamed Time Lock")
+        relaunched.removeTimeLockedSetupDraft(id: draftID)
+        XCTAssertNil(relaunched.lastOpenedAt(id: draftID, profileID: profileID))
     }
 
     func testCorruptProtectedVaultFileIsNotReplacedByLegacyData() throws {

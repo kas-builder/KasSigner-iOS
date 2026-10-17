@@ -249,6 +249,7 @@ pub struct PartialSigInfo {
 pub struct InputSummary {
     pub prev_tx_id: String,
     pub prev_index: u32,
+    pub sequence: u64,
     pub amount_sompi: u64,
     pub amount_kas: f64,
     pub script_kind: String, // "p2pk", "p2sh", "p2sh-multisig", "unknown"
@@ -282,6 +283,7 @@ pub struct OutputSummary {
 pub struct PsktSummary {
     pub format: String, // "pskb" or "pskt"
     pub tx_version: u16,
+    pub lock_time: u64,
     pub input_count: usize,
     pub output_count: usize,
     pub inputs: Vec<InputSummary>,
@@ -514,6 +516,101 @@ pub fn sign_testnet10_standard_pskb(wire_hex: &str, mnemonic: &str) -> Result<St
     Ok(signed)
 }
 
+/// Sign a single-input terminal time-lock claim with the Testnet-10 owner key.
+pub fn sign_testnet10_time_locked_claim_pskb(
+    wire_hex: &str, mnemonic: &str, receive_index: u32,
+) -> Result<String, String> {
+    if detect_format_hex(wire_hex) != PsktFormat::Pskb {
+        return Err("Expected one time-locked claim PSKB".into());
+    }
+    let wire = hex::decode(wire_hex).map_err(|e| format!("Outer hex: {e}"))?;
+    let json = hex::decode(&wire[4..]).map_err(|e| format!("Inner hex: {e}"))?;
+    let mut root: Value = serde_json::from_slice(&json).map_err(|e| format!("PSKB JSON: {e}"))?;
+    let pskt = root.as_array_mut()
+        .and_then(|items| (items.len() == 1).then(|| &mut items[0]))
+        .ok_or("Claim PSKB must contain exactly one transaction")?;
+    let global = pskt.get("global").ok_or("Missing claim global")?;
+    if global.get("txVersion").and_then(Value::as_u64) != Some(1) {
+        return Err("Time-locked claim requires transaction version 1".into());
+    }
+    let locktime = global.get("fallbackLockTime").and_then(Value::as_u64)
+        .ok_or("Claim is missing its unlock DAA score")?;
+    let inputs = pskt.get("inputs").and_then(Value::as_array).ok_or("Missing claim inputs")?;
+    let outputs = pskt.get("outputs").and_then(Value::as_array).ok_or("Missing claim outputs")?;
+    if inputs.len() != 1 || outputs.len() != 1 {
+        return Err("Time-locked claim requires one input and one output".into());
+    }
+    let input = &inputs[0];
+    let redeem = hex::decode(input.get("redeemScript").and_then(Value::as_str)
+        .ok_or("Missing claim redeem script")?).map_err(|e| format!("Redeem script: {e}"))?;
+    if redeem.len() < 35 || redeem[0] != 0x20 || redeem[33] != 0xad {
+        return Err("Invalid time-locked owner script".into());
+    }
+    let owner: [u8; 32] = redeem[1..33].try_into().map_err(|_| "Invalid owner key")?;
+    let utxo = input.get("utxoEntry").ok_or("Missing claim UTXO")?;
+    let amount = utxo.get("amount").and_then(Value::as_u64).ok_or("Missing claim amount")?;
+    let (spk_version, spk) = parse_spk_hex(
+        utxo.get("scriptPublicKey").and_then(Value::as_str).ok_or("Missing claim input script")?
+    )?;
+    if spk_version != 0 || spk != crate::kspt::protected_vault_p2sh_script(&redeem) {
+        return Err("Claim redeem script does not match its vault UTXO".into());
+    }
+    let previous = input.get("previousOutpoint").ok_or("Missing claim outpoint")?;
+    let txid: [u8; 32] = hex::decode(previous.get("transactionId").and_then(Value::as_str)
+        .ok_or("Missing claim transaction ID")?).map_err(|e| format!("Claim txid: {e}"))?
+        .try_into().map_err(|_| "Claim transaction ID must be 32 bytes")?;
+    let index = previous.get("index").and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok()).ok_or("Invalid claim outpoint index")?;
+    let sequence = input.get("sequence").and_then(Value::as_u64).ok_or("Missing claim sequence")?;
+    if sequence == u64::MAX { return Err("Claim sequence disables the time lock".into()); }
+    let output = &outputs[0];
+    let output_amount = output.get("amount").and_then(Value::as_u64)
+        .ok_or("Missing claim output amount")?;
+    if output_amount == 0 || output_amount >= amount
+        || amount - output_amount > crate::kspt::PROTECTED_VAULT_V1_MAX_FEE_SOMPI {
+        return Err("Claim fee exceeds the covenant limit".into());
+    }
+    if output.get("covenantBinding").is_some_and(|value| !value.is_null()) {
+        return Err("Terminal claim output must not carry a covenant binding".into());
+    }
+    let (output_version, output_spk) = parse_spk_hex(
+        output.get("scriptPublicKey").and_then(Value::as_str)
+            .ok_or("Missing claim output script")?
+    )?;
+    let secret = crate::testnet_hot_wallet::private_key_for(mnemonic, 0, receive_index)?;
+    let signing_key = k256::SecretKey::from_slice(&secret).map_err(|_| "Invalid owner key")?;
+    let public = signing_key.public_key().to_sec1_bytes();
+    if public[1..33] != owner { return Err("Testnet key does not own this vault".into()); }
+    use k256::elliptic_curve::bigint::U256;
+    use k256::elliptic_curve::ops::Reduce;
+    let scalar = <k256::Scalar as Reduce<U256>>::reduce_bytes((&secret).into());
+    let inputs_for_hash = vec![(&txid, index, sequence, 1u8)];
+    let outputs_for_hash = vec![crate::rpc::SighashOutput {
+        value: output_amount, spk_version: output_version,
+        spk_script: output_spk, covenant: None,
+    }];
+    let sighash = crate::rpc::compute_sighash_all(
+        1, &inputs_for_hash, 0, spk_version, &spk, amount,
+        &outputs_for_hash, locktime, &[], &[0u8; 20], 0,
+    );
+    let signature = crate::adaptor::bip340_sign(&scalar, &sighash)?;
+    if !crate::adaptor::bip340_verify(&owner, &sighash, &signature)? {
+        return Err("Time-locked claim signature failed local verification".into());
+    }
+    let partials = pskt.get_mut("inputs").and_then(Value::as_array_mut)
+        .and_then(|items| items.get_mut(0)).and_then(|item| item.get_mut("partialSigs"))
+        .and_then(Value::as_object_mut).ok_or("Missing claim signatures")?;
+    if !partials.is_empty() { return Err("Refusing to overwrite a claim signature".into()); }
+    partials.insert(format!("02{}", hex::encode(owner)),
+        serde_json::json!({ "schnorr": hex::encode(signature) }));
+    let mut encoded = b"PSKB".to_vec();
+    encoded.extend_from_slice(hex::encode(serde_json::to_vec(&root)
+        .map_err(|e| e.to_string())?).as_bytes());
+    let signed = hex::encode(encoded);
+    verify_pskb_signatures(&signed, true)?;
+    Ok(signed)
+}
+
 /// Sign one V2 vault or pending input using a Testnet-10 account seed. The
 /// requested derivation must match the exact x-only key committed in the PSKB.
 pub fn sign_testnet10_vault_v2_pskb(
@@ -735,6 +832,7 @@ fn verify_pskb_signatures(wire_hex: &str, protected_vault_approved: bool) -> Res
         .get("txVersion")
         .and_then(Value::as_u64)
         .ok_or("missing txVersion")? as u16;
+    let locktime = global.get("fallbackLockTime").and_then(Value::as_u64).unwrap_or(0);
     let inputs = pskt
         .get("inputs")
         .and_then(Value::as_array)
@@ -919,7 +1017,7 @@ fn verify_pskb_signatures(wire_hex: &str, protected_vault_approved: bool) -> Res
             h.update(&[*sigop]);
         }
         h.update(&outputs_hash);
-        h.update(&0u64.to_le_bytes());
+        h.update(&locktime.to_le_bytes());
         h.update(&[0u8; 20]);
         h.update(&0u64.to_le_bytes());
         h.update(&[0u8; 32]);
@@ -954,6 +1052,7 @@ fn parse_pskt_object(
         .get("txVersion")
         .and_then(|v| v.as_u64())
         .ok_or_else(|| "missing txVersion".to_string())? as u16;
+    let lock_time = global.get("fallbackLockTime").and_then(Value::as_u64).unwrap_or(0);
 
     // ─── inputs ───
     let inputs_arr = obj
@@ -1011,6 +1110,7 @@ fn parse_pskt_object(
             PsktFormat::Unknown => "unknown".into(),
         },
         tx_version,
+        lock_time,
         input_count: inputs.len(),
         output_count: outputs.len(),
         inputs,
@@ -1079,6 +1179,7 @@ fn parse_input_summary(inp: &Value) -> Result<InputSummary, String> {
     Ok(InputSummary {
         prev_tx_id,
         prev_index,
+        sequence: obj.get("sequence").and_then(Value::as_u64).unwrap_or(0),
         amount_sompi,
         amount_kas: amount_sompi as f64 / 1e8,
         script_kind,

@@ -85,6 +85,49 @@ fn time_locked_destination_rejects_early_wrong_destination_and_excess_fee() {
 }
 
 #[test]
+fn time_locked_claim_builder_and_hot_signer_execute_in_consensus_vm() {
+    let mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    let secret = kassee_web::testnet_test_vector_private_key(mnemonic, 0, 0).unwrap();
+    let keypair = Keypair::from_secret_key(
+        secp256k1::SECP256K1, &SecretKey::from_slice(&secret).unwrap()
+    );
+    let owner = keypair.x_only_public_key().0.serialize();
+    let destination = p2pk_spk(11);
+    let destination_address = kassee_web::encode_p2pk_address(
+        &hex::encode(&versioned(&destination)[3..35]), Some("testnet-10".into())
+    ).unwrap();
+    let nonce = [3u8; 8];
+    let script = build_time_locked_destination_script(
+        &owner, &versioned(&destination), UNLOCK_DAA, 10_000_000, &nonce,
+    ).unwrap();
+    let covenant_id = Hash::from_u64_word(42);
+    let entry = UtxoEntry::new(
+        INPUT_VALUE, pay_to_script_hash_script(&script), 1_000, false, Some(covenant_id)
+    );
+    let utxo = serde_json::json!({
+        "tx_id": Hash::from_u64_word(1).to_string(), "index": 0,
+        "amount": INPUT_VALUE,
+        "script_public_key": entry.script_public_key.script(),
+        "block_daa_score": 1_000,
+        "covenant_id": covenant_id.to_string(),
+    });
+    let pskb = kassee_web::create_time_locked_claim_pskb(
+        &utxo.to_string(), &hex::encode(owner), &destination_address,
+        UNLOCK_DAA, &hex::encode(nonce), FEE,
+    ).unwrap();
+    let signed = kassee_web::sign_testnet10_time_locked_claim_pskb(
+        &pskb, mnemonic, 0,
+    ).unwrap();
+    let mut tx = transaction(destination, INPUT_VALUE - FEE, 0, covenant_id);
+    tx.lock_time = UNLOCK_DAA;
+    tx.outputs[0].covenant = None;
+    tx.inputs[0].signature_script = kassee_web::finalized_v2_sigscript_native(&signed).unwrap();
+    tx.finalize();
+    let result = run_vm(&tx, &entry);
+    assert!(result.is_ok(), "claim VM result: {result:?}");
+}
+
+#[test]
 fn funding_pskb_signatures_match_pinned_consensus_sighash() {
     let secret = SecretKey::from_slice(&[21u8; 32]).unwrap();
     let owner = Keypair::from_secret_key(secp256k1::SECP256K1, &secret);

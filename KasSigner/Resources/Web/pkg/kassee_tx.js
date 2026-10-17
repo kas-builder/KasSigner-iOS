@@ -2734,6 +2734,45 @@ export function create_stealth_spend(one_time_pubkey_hex, tweak_hex, dest_addres
 }
 
 /**
+ * Build the terminal Testnet-10 claim for a funded Time Locked Vault.
+ * The destination, owner key, lock score and nonce are recompiled before the
+ * UTXO is accepted, so saved app metadata cannot redirect the spend.
+ * @param {string} utxo_json
+ * @param {string} owner_pubkey_hex
+ * @param {string} destination_address
+ * @param {bigint} locktime_daa
+ * @param {string} nonce_hex
+ * @param {bigint} fee_sompi
+ * @returns {string}
+ */
+export function create_time_locked_claim_pskb(utxo_json, owner_pubkey_hex, destination_address, locktime_daa, nonce_hex, fee_sompi) {
+    let deferred6_0;
+    let deferred6_1;
+    try {
+        const ptr0 = passStringToWasm0(utxo_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(owner_pubkey_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(destination_address, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(nonce_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.create_time_locked_claim_pskb(ptr0, len0, ptr1, len1, ptr2, len2, locktime_daa, ptr3, len3, fee_sompi);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
+        if (ret[3]) {
+            ptr5 = 0; len5 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
+    } finally {
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
+    }
+}
+
+/**
  * Decode a Kaspa address → JSON { version, payload_hex }
  * @param {string} addr
  * @returns {string}
@@ -2979,11 +3018,12 @@ export function derive_protected_vault_with_recovery(kpub_str, receive_index, ap
  * @param {string} destination_address
  * @param {bigint} locktime_daa
  * @param {string} network
+ * @param {string} nonce_hex
  * @returns {string}
  */
-export function derive_time_locked_destination(kpub_str, receive_index, destination_address, locktime_daa, network) {
-    let deferred5_0;
-    let deferred5_1;
+export function derive_time_locked_destination(kpub_str, receive_index, destination_address, locktime_daa, network, nonce_hex) {
+    let deferred6_0;
+    let deferred6_1;
     try {
         const ptr0 = passStringToWasm0(kpub_str, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
@@ -2991,18 +3031,20 @@ export function derive_time_locked_destination(kpub_str, receive_index, destinat
         const len1 = WASM_VECTOR_LEN;
         const ptr2 = passStringToWasm0(network, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.derive_time_locked_destination(ptr0, len0, receive_index, ptr1, len1, locktime_daa, ptr2, len2);
-        var ptr4 = ret[0];
-        var len4 = ret[1];
+        const ptr3 = passStringToWasm0(nonce_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.derive_time_locked_destination(ptr0, len0, receive_index, ptr1, len1, locktime_daa, ptr2, len2, ptr3, len3);
+        var ptr5 = ret[0];
+        var len5 = ret[1];
         if (ret[3]) {
-            ptr4 = 0; len4 = 0;
+            ptr5 = 0; len5 = 0;
             throw takeFromExternrefTable0(ret[2]);
         }
-        deferred5_0 = ptr4;
-        deferred5_1 = len4;
-        return getStringFromWasm0(ptr4, len4);
+        deferred6_0 = ptr5;
+        deferred6_1 = len5;
+        return getStringFromWasm0(ptr5, len5);
     } finally {
-        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+        wasm.__wbindgen_free(deferred6_0, deferred6_1, 1);
     }
 }
 
@@ -3957,6 +3999,35 @@ export function sign_testnet10_funding_pskb(wire_hex, mnemonic) {
 /**
  * @param {string} wire_hex
  * @param {string} mnemonic
+ * @param {number} receive_index
+ * @returns {string}
+ */
+export function sign_testnet10_time_locked_claim_pskb(wire_hex, mnemonic, receive_index) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(wire_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(mnemonic, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sign_testnet10_time_locked_claim_pskb(ptr0, len0, ptr1, len1, receive_index);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * @param {string} wire_hex
+ * @param {string} mnemonic
  * @param {number} chain
  * @param {number} index
  * @returns {string}
@@ -4811,7 +4882,7 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 214, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true_);
             return ret;
         },
@@ -4821,12 +4892,12 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 202, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 214, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke___wasm_bindgen_a36ba44a4de80ab___JsValue______true__2);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 201, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 213, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_a36ba44a4de80ab___convert__closures_____invoke_______true_);
             return ret;
         },

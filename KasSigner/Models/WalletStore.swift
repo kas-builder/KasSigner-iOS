@@ -869,6 +869,17 @@ final class WalletStore: ObservableObject {
     }
 
     @discardableResult
+    func recordSelectedChangeAddress(profileID: UUID, index: Int) -> Bool {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+              profiles[profileIndex].changeAddresses.indices.contains(index) else { return false }
+        if index >= profiles[profileIndex].nextChangeIndex {
+            profiles[profileIndex].nextChangeIndex = index + 1
+            save()
+        }
+        return true
+    }
+
+    @discardableResult
     func reserveReceiveAddress(profileID: UUID, index: Int) -> Bool {
         guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
               index == profiles[profileIndex].nextReceiveIndex
@@ -878,6 +889,17 @@ final class WalletStore: ObservableObject {
 
         profiles[profileIndex].nextReceiveIndex = index + 1
         save()
+        return true
+    }
+
+    @discardableResult
+    func recordSelectedReceiveAddress(profileID: UUID, index: Int) -> Bool {
+        guard let profileIndex = profiles.firstIndex(where: { $0.id == profileID }),
+              profiles[profileIndex].receiveAddresses.indices.contains(index) else { return false }
+        if index >= profiles[profileIndex].nextReceiveIndex {
+            profiles[profileIndex].nextReceiveIndex = index + 1
+            save()
+        }
         return true
     }
 
