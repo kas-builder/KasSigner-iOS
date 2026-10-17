@@ -306,6 +306,14 @@ struct WalletHomeView: View {
         let localRecordWarning: String?
     }
 
+    private struct TimeLockedBroadcastReceipt: Identifiable {
+        let id = UUID()
+        let draftID: UUID
+        let profileID: UUID
+        let transactionID: String
+        let localRecordWarning: String?
+    }
+
     private struct TestnetBroadcastReceipt: Identifiable {
         let id = UUID()
         let transactionID: String
@@ -371,6 +379,7 @@ struct WalletHomeView: View {
 
     @State private var navigationPath = NavigationPath()
     @State private var vaultBroadcastReceipt: VaultBroadcastReceipt?
+    @State private var timeLockedBroadcastReceipt: TimeLockedBroadcastReceipt?
     @State private var testnetBroadcastReceipt: TestnetBroadcastReceipt?
     @State private var showingSendFlow = false
     @State private var protectedVaultFundingSelections: [UUID: [WalletUTXO]] = [:]
@@ -489,7 +498,10 @@ struct WalletHomeView: View {
                 case .timeLockedUTXORules(let profileID):
                     if let profile = walletStore.profiles.first(where: { $0.id == profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
-                            TimeLockedUTXORulesView(profile: profile)
+                            TimeLockedUTXORulesView(
+                                profile: profile,
+                                onFundingComplete: presentTimeLockedBroadcast
+                            )
                         } else {
                             mainnetVaultUnavailableView
                         }
@@ -500,7 +512,11 @@ struct WalletHomeView: View {
                     if let draft = protectedVaultStore.timeLockedSetupDraft(id: draftID),
                        let profile = walletStore.profiles.first(where: { $0.id == draft.profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
-                            TimeLockedVaultSetupDraftResumeView(draft: draft, profile: profile)
+                            TimeLockedVaultSetupDraftResumeView(
+                                draft: draft,
+                                profile: profile,
+                                onFundingComplete: presentTimeLockedBroadcast
+                            )
                         } else {
                             mainnetVaultUnavailableView
                         }
@@ -666,6 +682,17 @@ struct WalletHomeView: View {
                 }
             }
         }
+        .fullScreenCover(item: $timeLockedBroadcastReceipt) { receipt in
+            BroadcastSuccessView(
+                transactionID: receipt.transactionID,
+                localRecordWarning: receipt.localRecordWarning
+            ) {
+                timeLockedBroadcastReceipt = nil
+                if hasSavedTimeLockedFunding(receipt.transactionID, draftID: receipt.draftID) {
+                    navigateToTimeLockedVaultStatus(draftID: receipt.draftID, profileID: receipt.profileID)
+                }
+            }
+        }
         .fullScreenCover(item: $testnetBroadcastReceipt) { receipt in
             BroadcastSuccessView(
                 transactionID: receipt.transactionID,
@@ -695,6 +722,17 @@ struct WalletHomeView: View {
         )
     }
 
+    private func presentTimeLockedBroadcast(
+        draftID: UUID, profileID: UUID, transactionID: String, warning: String?
+    ) {
+        timeLockedBroadcastReceipt = TimeLockedBroadcastReceipt(
+            draftID: draftID,
+            profileID: profileID,
+            transactionID: transactionID,
+            localRecordWarning: warning
+        )
+    }
+
     private func presentTestnetBroadcast(transactionID: String) {
         guard preferences.network == .testnet10 else { return }
         testnetBroadcastReceipt = TestnetBroadcastReceipt(transactionID: transactionID)
@@ -709,12 +747,24 @@ struct WalletHomeView: View {
             || vault.pendingWithdrawals.contains { $0.completionTransactionID == transactionID }
     }
 
+    private func hasSavedTimeLockedFunding(_ transactionID: String, draftID: UUID) -> Bool {
+        protectedVaultStore.timeLockedSetupDraft(id: draftID)?.fundingTransactionID
+            == transactionID
+    }
+
     private func navigateToVaultStatus(_ vaultID: UUID) {
         guard let profileID = protectedVaultStore.vaults.first(where: { $0.id == vaultID })?.profileID
         else { return }
         navigationPath = NavigationPath()
         navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
         navigationPath.append(WalletRoute.protectedVaultDetail(vaultID))
+    }
+
+    private func navigateToTimeLockedVaultStatus(draftID: UUID, profileID: UUID) {
+        guard protectedVaultStore.timeLockedSetupDraft(id: draftID)?.profileID == profileID else { return }
+        navigationPath = NavigationPath()
+        navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
+        navigationPath.append(WalletRoute.timeLockedSetupDraft(draftID))
     }
 
     private func showDelayProgress(vaultID: UUID, warning: String?) {
@@ -1472,6 +1522,7 @@ private struct ProtectedVaultSetupDraftResumeView: View {
 private struct TimeLockedUTXORulesView: View {
     let profile: WalletProfile
     let setupDraft: TimeLockedVaultSetupDraft?
+    let onFundingComplete: (UUID, UUID, String, String?) -> Void
     @State private var unlockDate: Date
     @State private var showingVaultFlowInfo = false
     @State private var showingUnlockDateInfo = false
@@ -1489,10 +1540,12 @@ private struct TimeLockedUTXORulesView: View {
         profile: WalletProfile,
         setupDraft: TimeLockedVaultSetupDraft? = nil,
         restoredUTXOs: [WalletUTXO] = [],
-        needsUTXOReselection: Bool = false
+        needsUTXOReselection: Bool = false,
+        onFundingComplete: @escaping (UUID, UUID, String, String?) -> Void
     ) {
         self.profile = profile
         self.setupDraft = setupDraft
+        self.onFundingComplete = onFundingComplete
         _unlockDate = State(initialValue: setupDraft?.unlockDate
             ?? Calendar.current.date(byAdding: .day, value: 30, to: .now) ?? .now)
         _selectedUTXOs = State(initialValue: restoredUTXOs)
@@ -1627,7 +1680,8 @@ private struct TimeLockedUTXORulesView: View {
                     profile: profile,
                     selectedUTXOs: selectedUTXOs,
                     unlockDate: unlockDate,
-                    setupDraft: activeDraft
+                    setupDraft: activeDraft,
+                    onFundingComplete: onFundingComplete
                 )
             }
         }
@@ -1744,6 +1798,7 @@ private struct TimeLockedUTXORulesView: View {
 private struct TimeLockedVaultSetupDraftResumeView: View {
     let draft: TimeLockedVaultSetupDraft
     let profile: WalletProfile
+    let onFundingComplete: (UUID, UUID, String, String?) -> Void
 
     @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var walletStore: WalletStore
@@ -1775,7 +1830,8 @@ private struct TimeLockedVaultSetupDraftResumeView: View {
                     profile: profile,
                     setupDraft: draft,
                     restoredUTXOs: restoredUTXOs,
-                    needsUTXOReselection: needsUTXOReselection
+                    needsUTXOReselection: needsUTXOReselection,
+                    onFundingComplete: onFundingComplete
                 )
             }
         }
@@ -2199,6 +2255,7 @@ private struct TimeLockedFundingDetailsView: View {
     let selectedUTXOs: [WalletUTXO]
     let unlockDate: Date
     let setupDraft: TimeLockedVaultSetupDraft
+    let onFundingComplete: (UUID, UUID, String, String?) -> Void
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -2229,12 +2286,14 @@ private struct TimeLockedFundingDetailsView: View {
         profile: WalletProfile,
         selectedUTXOs: [WalletUTXO],
         unlockDate: Date,
-        setupDraft: TimeLockedVaultSetupDraft
+        setupDraft: TimeLockedVaultSetupDraft,
+        onFundingComplete: @escaping (UUID, UUID, String, String?) -> Void
     ) {
         self.profile = profile
         self.selectedUTXOs = selectedUTXOs
         self.unlockDate = unlockDate
         self.setupDraft = setupDraft
+        self.onFundingComplete = onFundingComplete
         _destination = State(initialValue: setupDraft.destination)
         _amountText = State(initialValue: setupDraft.amountText)
         _selectedChangeIndex = State(initialValue: setupDraft.changeAddressIndex)
@@ -2345,7 +2404,8 @@ private struct TimeLockedFundingDetailsView: View {
                     changeSompi: changeSompi,
                     changeIndex: changeIndex,
                     changeAddress: profile.changeAddresses.indices.contains(changeIndex)
-                        ? profile.changeAddresses[changeIndex] : nil
+                        ? profile.changeAddresses[changeIndex] : nil,
+                    onFundingComplete: onFundingComplete
                 )
             }
         }
@@ -2755,6 +2815,7 @@ private struct TimeLockedRuleReviewView: View {
     let changeSompi: UInt64
     let changeIndex: Int
     let changeAddress: String?
+    let onFundingComplete: (UUID, UUID, String, String?) -> Void
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -2772,7 +2833,6 @@ private struct TimeLockedRuleReviewView: View {
     @State private var fundingSummary: PSKTSummary?
     @State private var fundingCovenantID: String?
     @State private var fundingTransactionID: String?
-    @State private var showingBroadcastSuccess = false
     @State private var fundingError: String?
 
     private var allChecksPassed: Bool {
@@ -2876,13 +2936,6 @@ private struct TimeLockedRuleReviewView: View {
             Button("Confirm & Authenticate") { Task { await signAndBroadcastFunding() } }
         } message: {
             Text("Deposit \(formatKas(amountSompi)) into \(descriptor.vaultAddress)? The funding fee is \(formatKas(feeSompi)) and change is \(formatKas(changeSompi)).")
-        }
-        .fullScreenCover(isPresented: $showingBroadcastSuccess) {
-            if let fundingTransactionID {
-                BroadcastSuccessView(transactionID: fundingTransactionID) {
-                    showingBroadcastSuccess = false
-                }
-            }
         }
         .task { await runSecurityChecks() }
     }
@@ -3002,10 +3055,10 @@ private struct TimeLockedRuleReviewView: View {
             let ownerIndexSaved = walletStore.recordSelectedReceiveAddress(
                 profileID: profile.id, index: Int(descriptor.ownerDerivationIndex)
             )
-            if !vaultSaved || !walletSaved || !ownerIndexSaved {
-                fundingError = "Funding was broadcast, but the local vault record could not be fully saved. Keep transaction ID \(txid) and refresh the wallet before trying again."
-            }
-            showingBroadcastSuccess = true
+            let warning = (!vaultSaved || !walletSaved || !ownerIndexSaved)
+                ? "Funding was broadcast, but the local vault record could not be fully saved. Keep transaction ID \(txid) and refresh the wallet before trying again."
+                : nil
+            onFundingComplete(draftID, profile.id, txid, warning)
         } catch {
             fundingError = error.localizedDescription
         }
