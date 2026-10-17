@@ -2009,6 +2009,10 @@ private struct TimeLockedVaultStatusView: View {
                     LabeledContent("Unlock DAA", value: locktimeDAA.formatted())
                 }
                 LabeledContent("Current DAA", value: currentDAA?.formatted() ?? "—")
+                LabeledContent(
+                    "Created",
+                    value: savedDraft.createdAt.formatted(date: .abbreviated, time: .shortened)
+                )
             }
 
             if let descriptor {
@@ -5086,6 +5090,7 @@ private struct ProtectedVaultDetailView: View {
 
     var body: some View {
         let refreshState = protectedVaultStore.refreshState(for: vault.id)
+        let balance = vault.status == .spent ? Decimal.zero : (vault.lockedAmount ?? vault.amount)
         Form {
             Section("Summary") {
                 LabeledContent {
@@ -5103,7 +5108,6 @@ private struct ProtectedVaultDetailView: View {
                 } label: {
                     Text("Status")
                 }
-                let balance = vault.status == .spent ? Decimal.zero : (vault.lockedAmount ?? vault.amount)
                 LabeledContent("Balance", value: "\(balance.formatted()) \(preferences.network.currencySymbol)")
                 LabeledContent("Approved Addresses", value: "\(vault.approvedAddresses.count)")
                 LabeledContent(
@@ -5168,6 +5172,19 @@ private struct ProtectedVaultDetailView: View {
                         .disabled(isRefreshing)
                     }
                     .font(.subheadline)
+                }
+            }
+
+            if let vaultAddress = vault.vaultAddress {
+                Section {
+                    SendReviewAddressCard(
+                        title: "Vault Address",
+                        address: vaultAddress,
+                        accessibilityLabel: "Copy vault address",
+                        amountText: "\(balance.formatted()) \(preferences.network.currencySymbol)"
+                    )
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
                 }
             }
 
