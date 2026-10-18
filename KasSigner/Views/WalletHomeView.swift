@@ -1218,6 +1218,22 @@ struct WalletHomeView: View {
                                     vaultNavigationLabel { activeVaultCard(vault) }
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button {
+                                        contextVault = vault
+                                        contextTimeLockedDraft = nil
+                                        contextProtectedVaultSetupDraft = nil
+                                        contextVaultRenameText = vault.displayName
+                                        showingContextVaultRename = true
+                                    } label: {
+                                        Label("Rename Vault", systemImage: "pin")
+                                    }
+                                    Button {
+                                        _ = protectedVaultStore.restore(id: vault.id)
+                                    } label: {
+                                        Label("Restore Vault", systemImage: "arrow.uturn.backward")
+                                    }
+                                }
                             case .timeLockedSetupDraft(let draft):
                                 Button {
                                     openVault(.timeLockedSetupDraft(draft.id, isArchived: true), itemID: draft.id, profileID: draft.profileID)
@@ -1225,6 +1241,22 @@ struct WalletHomeView: View {
                                     vaultNavigationLabel { timeLockedSetupDraftCard(draft) }
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button {
+                                        contextVault = nil
+                                        contextProtectedVaultSetupDraft = nil
+                                        contextTimeLockedDraft = draft
+                                        contextVaultRenameText = draft.displayName
+                                        showingContextVaultRename = true
+                                    } label: {
+                                        Label("Rename Vault", systemImage: "pin")
+                                    }
+                                    Button {
+                                        _ = protectedVaultStore.restoreTimeLockedVault(id: draft.id)
+                                    } label: {
+                                        Label("Restore Vault", systemImage: "arrow.uturn.backward")
+                                    }
+                                }
                             case .setupDraft:
                                 EmptyView()
                             }
@@ -2260,7 +2292,15 @@ private struct TimeLockedVaultStatusView: View {
                         renameText = savedDraft.displayName
                         showingRenamePrompt = true
                     }
-                    if !isArchived && savedDraft.archivedAt == nil {
+                    if isArchived || savedDraft.archivedAt != nil {
+                        Button {
+                            if protectedVaultStore.restoreTimeLockedVault(id: savedDraft.id) {
+                                dismiss()
+                            }
+                        } label: {
+                            Label("Restore Vault", systemImage: "arrow.uturn.backward")
+                        }
+                    } else {
                         Button {
                             showingArchiveConfirmation = true
                         } label: {
@@ -5506,7 +5546,15 @@ private struct ProtectedVaultDetailView: View {
                         renameText = vault.displayName
                         showingRenamePrompt = true
                     }
-                    if !isArchived && vault.archivedAt == nil {
+                    if isArchived || vault.archivedAt != nil {
+                        Button {
+                            if protectedVaultStore.restore(id: vault.id) {
+                                dismiss()
+                            }
+                        } label: {
+                            Label("Restore Vault", systemImage: "arrow.uturn.backward")
+                        }
+                    } else {
                         if vault.status == .localDraft {
                             Button(role: .destructive) {
                                 showingDeleteConfirmation = true

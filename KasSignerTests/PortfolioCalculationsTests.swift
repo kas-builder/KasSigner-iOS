@@ -513,6 +513,14 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
         XCTAssertEqual(relaunched.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt, archivedAt)
         XCTAssertTrue(relaunched.timeLockedSetupDrafts(for: otherProfileID).isEmpty)
         XCTAssertFalse(relaunched.archiveTimeLockedVault(id: UUID(), at: archivedAt))
+
+        XCTAssertTrue(relaunched.restore(id: protectedVault.id))
+        XCTAssertTrue(relaunched.restoreTimeLockedVault(id: timeLockedVault.id))
+        let restored = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertNil(restored.vaults(for: profileID).first?.archivedAt)
+        XCTAssertNil(restored.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt)
+        XCTAssertFalse(restored.restore(id: UUID()))
+        XCTAssertFalse(restored.restoreTimeLockedVault(id: UUID()))
     }
 
     func testRefreshFailureRetainsVerifiedTimestampAndSuccessfulRetryClearsStaleState() throws {

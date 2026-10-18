@@ -1302,6 +1302,21 @@ final class ProtectedVaultStore: ObservableObject {
         return commit { timeLockedSetupDrafts[index].archivedAt = date }
     }
 
+    @discardableResult
+    func restore(id: UUID) -> Bool {
+        guard let index = vaults.firstIndex(where: { $0.id == id }),
+              vaults[index].archivedAt != nil else { return false }
+        return commit { vaults[index].archivedAt = nil }
+    }
+
+    @discardableResult
+    func restoreTimeLockedVault(id: UUID) -> Bool {
+        guard let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }),
+              timeLockedSetupDrafts[index].archivedAt != nil,
+              timeLockedSetupDrafts[index].fundingTransactionID != nil else { return false }
+        return commit { timeLockedSetupDrafts[index].archivedAt = nil }
+    }
+
     func recordOpenedTimeLockedDraft(id: UUID, profileID: UUID, at date: Date = .now) {
         recordOpened(id: id, profileID: profileID, at: date)
     }
