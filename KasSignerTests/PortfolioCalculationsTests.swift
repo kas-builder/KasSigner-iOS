@@ -471,6 +471,135 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
 
 @MainActor
 final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
+    func testRecoveryExportContainsOnlyRequestedProfilesVaults() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultExportScope-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "VaultExportScope.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let requestedProfile = WalletProfile(name: "Requested", kpub: "export-scope-one",
+                                             network: KaspaNetwork.testnet10.rawValue)
+        let otherProfile = WalletProfile(name: "Other", kpub: "export-scope-two",
+                                         network: KaspaNetwork.testnet10.rawValue)
+        let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        let requestedProtectedVault = ProtectedVault(
+            profileID: requestedProfile.id,
+            amount: 2,
+            approvedAddresses: ["kaspatest:requested"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            status: .active
+        )
+        let otherProtectedVault = ProtectedVault(
+            profileID: otherProfile.id,
+            amount: 3,
+            approvedAddresses: ["kaspatest:other"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            status: .active
+        )
+        let requestedTimeLockedVault = TimeLockedVaultSetupDraft(
+            profileID: requestedProfile.id,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: []
+        )
+        let otherTimeLockedVault = TimeLockedVaultSetupDraft(
+            profileID: otherProfile.id,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_100),
+            selectedUTXOIDs: []
+        )
+        let requestedSetupDraft = ProtectedVaultSetupDraft(
+            profileID: requestedProfile.id,
+            approvedAddressCount: 1,
+            approvedAddresses: ["kaspatest:requested"],
+            recoveryAddress: "kaspatest:recovery",
+            recoveryPath: .emergencyAnytime,
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            selectedUTXOIDs: []
+        )
+        let otherSetupDraft = ProtectedVaultSetupDraft(
+            profileID: otherProfile.id,
+            approvedAddressCount: 1,
+            approvedAddresses: ["kaspatest:other"],
+            recoveryAddress: "kaspatest:other-recovery",
+            recoveryPath: .emergencyAnytime,
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            selectedUTXOIDs: []
+        )
+        XCTAssertTrue(store.add(requestedProtectedVault))
+        XCTAssertTrue(store.add(otherProtectedVault))
+        XCTAssertTrue(store.saveSetupDraft(requestedSetupDraft))
+        XCTAssertTrue(store.saveSetupDraft(otherSetupDraft))
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(requestedTimeLockedVault))
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(otherTimeLockedVault))
+
+        let document = try store.recoveryDocument(for: requestedProfile)
+        let backup = try XCTUnwrap(JSONSerialization.jsonObject(with: document.data) as? [String: Any])
+        let protectedVaults = try XCTUnwrap(backup["vaults"] as? [[String: Any]])
+        let setupDrafts = try XCTUnwrap(backup["setupDrafts"] as? [[String: Any]])
+        let timeLockedVaults = try XCTUnwrap(backup["timeLockedSetupDrafts"] as? [[String: Any]])
+        XCTAssertEqual(protectedVaults.compactMap { $0["id"] as? String }, [requestedProtectedVault.id.uuidString])
+        XCTAssertEqual(setupDrafts.compactMap { $0["id"] as? String }, [requestedSetupDraft.id.uuidString])
+        XCTAssertEqual(timeLockedVaults.compactMap { $0["id"] as? String }, [requestedTimeLockedVault.id.uuidString])
+    }
+
+    func testRecoveryImportAssociatesTimeLockedVaultsOnlyWithRequestedProfile() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultImportScope-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "VaultImportScope.\(UUID().uuidString)"
+        let destinationSuiteName = "VaultImportDestination.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            UserDefaults.standard.removePersistentDomain(forName: destinationSuiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let sourceProfile = WalletProfile(name: "Source", kpub: "import-scope-same-wallet",
+                                          network: KaspaNetwork.testnet10.rawValue)
+        let requestedProfile = WalletProfile(name: "Restored", kpub: "import-scope-same-wallet",
+                                             network: KaspaNetwork.testnet10.rawValue)
+        let otherProfile = WalletProfile(name: "Other", kpub: "import-scope-other-wallet",
+                                         network: KaspaNetwork.testnet10.rawValue)
+        let sourceStore = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        let timeLockedVault = TimeLockedVaultSetupDraft(
+            profileID: sourceProfile.id,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [],
+            fundingTransactionID: String(repeating: "c", count: 64),
+            step: .funded
+        )
+        XCTAssertTrue(sourceStore.saveTimeLockedSetupDraft(timeLockedVault))
+        let document = try sourceStore.recoveryDocument(for: sourceProfile)
+
+        let destinationDefaults = try XCTUnwrap(UserDefaults(suiteName: destinationSuiteName))
+        let destinationStore = ProtectedVaultStore(defaults: destinationDefaults,
+                                                   protectedStorage: ProtectedWalletStorage(
+                                                       directoryURL: root.appending(path: "destination", directoryHint: .isDirectory)
+                                                   ))
+        let importedCount = try await destinationStore.restoreRecoveryDocument(
+            document,
+            for: requestedProfile,
+            engine: KasSignerEngine()
+        )
+
+        XCTAssertEqual(importedCount, 1)
+        XCTAssertEqual(destinationStore.timeLockedSetupDrafts(for: requestedProfile.id).map(\.id), [timeLockedVault.id])
+        XCTAssertTrue(destinationStore.timeLockedSetupDrafts(for: otherProfile.id).isEmpty)
+    }
+
     func testArchivedVaultStatePersistsForBothVaultTypesAndRemainsAccountScoped() throws {
         let root = FileManager.default.temporaryDirectory
             .appending(path: "ArchivedVaults-\(UUID().uuidString)", directoryHint: .isDirectory)

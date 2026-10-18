@@ -505,8 +505,8 @@ struct SettingsView: View {
                 document, for: profile, engine: engine
             )
             vaultRecoveryMessage = imported == 0
-                ? "All vault records in this file are already present."
-                : "Restored \(imported) vault record\(imported == 1 ? "" : "s"). Refresh the wallet to verify current on-chain status."
+                ? "No new vault records were added to “\(profile.name)”. Its records from this file are already present."
+                : "Imported \(imported) vault record\(imported == 1 ? "" : "s") to “\(profile.name)”. Refresh the wallet to verify current on-chain status."
         } catch {
             vaultRecoveryMessage = "Vault recovery failed: \(error.localizedDescription)"
         }
