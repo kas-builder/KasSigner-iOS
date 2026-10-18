@@ -1229,7 +1229,7 @@ struct WalletHomeView: View {
                                         Label("Rename Vault", systemImage: "pin")
                                     }
                                     Button {
-                                        _ = protectedVaultStore.restore(id: vault.id)
+                                        _ = protectedVaultStore.setArchived(false, for: vault.id, type: .protected)
                                     } label: {
                                         Label("Restore Vault", systemImage: "arrow.uturn.backward")
                                     }
@@ -1252,7 +1252,7 @@ struct WalletHomeView: View {
                                         Label("Rename Vault", systemImage: "pin")
                                     }
                                     Button {
-                                        _ = protectedVaultStore.restoreTimeLockedVault(id: draft.id)
+                                        _ = protectedVaultStore.setArchived(false, for: draft.id, type: .timeLocked)
                                     } label: {
                                         Label("Restore Vault", systemImage: "arrow.uturn.backward")
                                     }
@@ -1285,14 +1285,14 @@ struct WalletHomeView: View {
                     if contextVault.status == .localDraft {
                         protectedVaultStore.remove(id: contextVault.id)
                     } else {
-                        _ = protectedVaultStore.archive(id: contextVault.id)
+                        _ = protectedVaultStore.setArchived(true, for: contextVault.id, type: .protected)
                     }
                 }
                 if let contextTimeLockedDraft {
                     if contextTimeLockedDraft.fundingTransactionID == nil {
                         protectedVaultStore.removeTimeLockedSetupDraft(id: contextTimeLockedDraft.id)
                     } else {
-                        _ = protectedVaultStore.archiveTimeLockedVault(id: contextTimeLockedDraft.id)
+                        _ = protectedVaultStore.setArchived(true, for: contextTimeLockedDraft.id, type: .timeLocked)
                     }
                 }
                 if let contextProtectedVaultSetupDraft {
@@ -2294,7 +2294,7 @@ private struct TimeLockedVaultStatusView: View {
                     }
                     if isArchived || savedDraft.archivedAt != nil {
                         Button {
-                            if protectedVaultStore.restoreTimeLockedVault(id: savedDraft.id) {
+                            if protectedVaultStore.setArchived(false, for: savedDraft.id, type: .timeLocked) {
                                 dismiss()
                             }
                         } label: {
@@ -2327,7 +2327,7 @@ private struct TimeLockedVaultStatusView: View {
             titleVisibility: .visible
         ) {
             Button("Archive Vault") {
-                if protectedVaultStore.archiveTimeLockedVault(id: savedDraft.id) {
+                if protectedVaultStore.setArchived(true, for: savedDraft.id, type: .timeLocked) {
                     dismiss()
                 }
             }
@@ -5548,7 +5548,7 @@ private struct ProtectedVaultDetailView: View {
                     }
                     if isArchived || vault.archivedAt != nil {
                         Button {
-                            if protectedVaultStore.restore(id: vault.id) {
+                            if protectedVaultStore.setArchived(false, for: vault.id, type: .protected) {
                                 dismiss()
                             }
                         } label: {
@@ -5594,7 +5594,7 @@ private struct ProtectedVaultDetailView: View {
             titleVisibility: .visible
         ) {
             Button("Archive Vault") {
-                if protectedVaultStore.archive(id: vault.id) {
+                if protectedVaultStore.setArchived(true, for: vault.id, type: .protected) {
                     dismiss()
                 }
             }

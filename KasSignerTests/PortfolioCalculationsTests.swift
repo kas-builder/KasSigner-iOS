@@ -502,25 +502,44 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             fundingTransactionID: String(repeating: "b", count: 64),
             step: .funded
         )
+        let protectedDraft = ProtectedVault(
+            profileID: profileID,
+            amount: 1,
+            approvedAddresses: ["kaspatest:draft"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            status: .localDraft
+        )
+        let timeLockedDraft = TimeLockedVaultSetupDraft(
+            profileID: profileID,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_100),
+            selectedUTXOIDs: []
+        )
         let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
         XCTAssertTrue(store.add(protectedVault))
         XCTAssertTrue(store.saveTimeLockedSetupDraft(timeLockedVault))
-        XCTAssertTrue(store.archive(id: protectedVault.id, at: archivedAt))
-        XCTAssertTrue(store.archiveTimeLockedVault(id: timeLockedVault.id, at: archivedAt))
+        XCTAssertTrue(store.add(protectedDraft))
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(timeLockedDraft))
+        XCTAssertFalse(store.setArchived(true, for: protectedDraft.id, type: .protected, at: archivedAt))
+        XCTAssertFalse(store.setArchived(true, for: timeLockedDraft.id, type: .timeLocked, at: archivedAt))
+        XCTAssertTrue(store.setArchived(true, for: protectedVault.id, type: .protected, at: archivedAt))
+        XCTAssertTrue(store.setArchived(true, for: timeLockedVault.id, type: .timeLocked, at: archivedAt))
+        XCTAssertFalse(store.setArchived(true, for: protectedVault.id, type: .protected, at: archivedAt))
 
         let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
         XCTAssertEqual(relaunched.vaults(for: profileID).first?.archivedAt, archivedAt)
         XCTAssertEqual(relaunched.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt, archivedAt)
         XCTAssertTrue(relaunched.timeLockedSetupDrafts(for: otherProfileID).isEmpty)
-        XCTAssertFalse(relaunched.archiveTimeLockedVault(id: UUID(), at: archivedAt))
+        XCTAssertFalse(relaunched.setArchived(true, for: UUID(), type: .timeLocked, at: archivedAt))
 
-        XCTAssertTrue(relaunched.restore(id: protectedVault.id))
-        XCTAssertTrue(relaunched.restoreTimeLockedVault(id: timeLockedVault.id))
+        XCTAssertTrue(relaunched.setArchived(false, for: protectedVault.id, type: .protected))
+        XCTAssertTrue(relaunched.setArchived(false, for: timeLockedVault.id, type: .timeLocked))
         let restored = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
         XCTAssertNil(restored.vaults(for: profileID).first?.archivedAt)
         XCTAssertNil(restored.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt)
-        XCTAssertFalse(restored.restore(id: UUID()))
-        XCTAssertFalse(restored.restoreTimeLockedVault(id: UUID()))
+        XCTAssertFalse(restored.setArchived(false, for: UUID(), type: .protected))
+        XCTAssertFalse(restored.setArchived(false, for: UUID(), type: .timeLocked))
     }
 
     func testRefreshFailureRetainsVerifiedTimestampAndSuccessfulRetryClearsStaleState() throws {

@@ -109,6 +109,11 @@ enum VaultLastOpenedOrder {
     }
 }
 
+enum VaultArchiveRecordType {
+    case protected
+    case timeLocked
+}
+
 @MainActor
 enum ProtectedVaultNodeLabel {
     static func make(preferences: AppPreferences) -> String {
@@ -1289,32 +1294,34 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     @discardableResult
-    func archive(id: UUID, at date: Date = .now) -> Bool {
-        guard let index = vaults.firstIndex(where: { $0.id == id }),
-              vaults[index].status != .localDraft else { return false }
-        return commit { vaults[index].archivedAt = date }
-    }
+    func setArchived(
+        _ archived: Bool,
+        for id: UUID,
+        type: VaultArchiveRecordType,
+        at date: Date = .now
+    ) -> Bool {
+        switch type {
+        case .protected:
+            guard let index = vaults.firstIndex(where: { $0.id == id }) else { return false }
+            if archived {
+                guard vaults[index].status != .localDraft,
+                      vaults[index].archivedAt == nil else { return false }
+                return commit { vaults[index].archivedAt = date }
+            }
+            guard vaults[index].archivedAt != nil else { return false }
+            return commit { vaults[index].archivedAt = nil }
 
-    @discardableResult
-    func archiveTimeLockedVault(id: UUID, at date: Date = .now) -> Bool {
-        guard let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }),
-              timeLockedSetupDrafts[index].fundingTransactionID != nil else { return false }
-        return commit { timeLockedSetupDrafts[index].archivedAt = date }
-    }
-
-    @discardableResult
-    func restore(id: UUID) -> Bool {
-        guard let index = vaults.firstIndex(where: { $0.id == id }),
-              vaults[index].archivedAt != nil else { return false }
-        return commit { vaults[index].archivedAt = nil }
-    }
-
-    @discardableResult
-    func restoreTimeLockedVault(id: UUID) -> Bool {
-        guard let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }),
-              timeLockedSetupDrafts[index].archivedAt != nil,
-              timeLockedSetupDrafts[index].fundingTransactionID != nil else { return false }
-        return commit { timeLockedSetupDrafts[index].archivedAt = nil }
+        case .timeLocked:
+            guard let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }) else { return false }
+            if archived {
+                guard timeLockedSetupDrafts[index].fundingTransactionID != nil,
+                      timeLockedSetupDrafts[index].archivedAt == nil else { return false }
+                return commit { timeLockedSetupDrafts[index].archivedAt = date }
+            }
+            guard timeLockedSetupDrafts[index].fundingTransactionID != nil,
+                  timeLockedSetupDrafts[index].archivedAt != nil else { return false }
+            return commit { timeLockedSetupDrafts[index].archivedAt = nil }
+        }
     }
 
     func recordOpenedTimeLockedDraft(id: UUID, profileID: UUID, at date: Date = .now) {
