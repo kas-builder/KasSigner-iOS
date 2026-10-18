@@ -8,6 +8,18 @@ private extension Notification.Name {
     )
 }
 
+private func vaultSummaryHeader(isArchived: Bool) -> some View {
+    HStack(spacing: 5) {
+        Text("Summary")
+            .foregroundStyle(.secondary)
+        if isArchived {
+            Text("(Archived)")
+                .foregroundStyle(.red)
+                .fontWeight(.semibold)
+        }
+    }
+}
+
 private struct ProtectedVaultAddressDraft: Identifiable {
     let id = UUID()
     var address = ""
@@ -368,10 +380,10 @@ struct WalletHomeView: View {
         case receive(UUID)
         case programmableUTXOTypes(UUID)
         case timeLockedUTXORules(UUID)
-        case timeLockedSetupDraft(UUID)
+        case timeLockedSetupDraft(UUID, isArchived: Bool)
         case protectedVaultRules(UUID)
         case protectedVaultSetupDraft(UUID)
-        case protectedVaultDetail(UUID)
+        case protectedVaultDetail(UUID, isArchived: Bool)
         case spendProtectedVault(UUID)
         case fundProtectedVault(UUID)
         case reviewVaultFunding(UUID)
@@ -404,6 +416,7 @@ struct WalletHomeView: View {
     @State private var contextVaultRenameText = ""
     @State private var showingContextVaultRename = false
     @State private var showingContextVaultRemoval = false
+    @State private var isArchivedVaultsExpanded = false
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -508,13 +521,14 @@ struct WalletHomeView: View {
                     } else {
                         unavailableAccountView
                     }
-                case .timeLockedSetupDraft(let draftID):
+                case .timeLockedSetupDraft(let draftID, let isArchived):
                     if let draft = protectedVaultStore.timeLockedSetupDraft(id: draftID),
                        let profile = walletStore.profiles.first(where: { $0.id == draft.profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
                             TimeLockedVaultSetupDraftResumeView(
                                 draft: draft,
                                 profile: profile,
+                                isArchived: isArchived,
                                 onFundingComplete: presentTimeLockedBroadcast
                             )
                         } else {
@@ -554,7 +568,7 @@ struct WalletHomeView: View {
                     } else {
                         ContentUnavailableView("Draft Unavailable", systemImage: "doc.text.magnifyingglass")
                     }
-                case .protectedVaultDetail(let vaultID):
+                case .protectedVaultDetail(let vaultID, let isArchived):
                     if let vault = protectedVaultStore.vaults.first(where: { $0.id == vaultID }),
                        let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
@@ -568,7 +582,7 @@ struct WalletHomeView: View {
                                         }
                                     }
                                 } else {
-                                    ProtectedVaultDetailView(vault: vault) {
+                                    ProtectedVaultDetailView(vault: vault, isArchived: isArchived) {
                                         navigationPath.append(WalletRoute.fundProtectedVault(vaultID))
                                     } onSpend: {
                                         navigationPath.append(WalletRoute.spendProtectedVault(vaultID))
@@ -757,14 +771,14 @@ struct WalletHomeView: View {
         else { return }
         navigationPath = NavigationPath()
         navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
-        navigationPath.append(WalletRoute.protectedVaultDetail(vaultID))
+        navigationPath.append(WalletRoute.protectedVaultDetail(vaultID, isArchived: false))
     }
 
     private func navigateToTimeLockedVaultStatus(draftID: UUID, profileID: UUID) {
         guard protectedVaultStore.timeLockedSetupDraft(id: draftID)?.profileID == profileID else { return }
         navigationPath = NavigationPath()
         navigationPath.append(WalletRoute.programmableUTXOTypes(profileID))
-        navigationPath.append(WalletRoute.timeLockedSetupDraft(draftID))
+        navigationPath.append(WalletRoute.timeLockedSetupDraft(draftID, isArchived: false))
     }
 
     private func showDelayProgress(vaultID: UUID, warning: String?) {
@@ -1076,7 +1090,7 @@ struct WalletHomeView: View {
                     switch item {
                     case .vault(let vault):
                         Button {
-                            openVault(.protectedVaultDetail(vault.id), itemID: vault.id, profileID: vault.profileID)
+                            openVault(.protectedVaultDetail(vault.id, isArchived: false), itemID: vault.id, profileID: vault.profileID)
                         } label: {
                             vaultNavigationLabel { activeVaultCard(vault) }
                         }
@@ -1109,7 +1123,7 @@ struct WalletHomeView: View {
                         .buttonStyle(.plain)
                     case .timeLockedSetupDraft(let draft):
                         Button {
-                            openVault(.timeLockedSetupDraft(draft.id), itemID: draft.id, profileID: draft.profileID)
+                            openVault(.timeLockedSetupDraft(draft.id, isArchived: false), itemID: draft.id, profileID: draft.profileID)
                         } label: {
                             vaultNavigationLabel { timeLockedSetupDraftCard(draft) }
                         }
@@ -1137,6 +1151,25 @@ struct WalletHomeView: View {
                         }
                     }
                 }
+            }
+
+            Section {
+                DisclosureGroup(isExpanded: $isArchivedVaultsExpanded) {
+                    ContentUnavailableView(
+                        "No Archived Vaults",
+                        systemImage: "archivebox",
+                        description: Text("Archived vaults will appear here.")
+                    )
+                    .frame(maxWidth: .infinity)
+                    .listRowSeparator(.hidden)
+                } label: {
+                    Text("Archived")
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .tint(.secondary)
             }
 
         }
@@ -1806,6 +1839,7 @@ private struct TimeLockedUTXORulesView: View {
 private struct TimeLockedVaultSetupDraftResumeView: View {
     let draft: TimeLockedVaultSetupDraft
     let profile: WalletProfile
+    var isArchived = false
     let onFundingComplete: (UUID, UUID, String, String?) -> Void
 
     @EnvironmentObject private var syncService: WalletSyncService
@@ -1820,7 +1854,7 @@ private struct TimeLockedVaultSetupDraftResumeView: View {
     var body: some View {
         Group {
             if draft.fundingTransactionID != nil {
-                TimeLockedVaultStatusView(draft: draft, profile: profile)
+                TimeLockedVaultStatusView(draft: draft, profile: profile, isArchived: isArchived)
             } else if isValidating {
                 ProgressView("Revalidating saved funding UTXOs…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1920,6 +1954,7 @@ private struct VaultTransactionCard: View {
 private struct TimeLockedVaultStatusView: View {
     let draft: TimeLockedVaultSetupDraft
     let profile: WalletProfile
+    var isArchived = false
 
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
@@ -1997,7 +2032,7 @@ private struct TimeLockedVaultStatusView: View {
 
     var body: some View {
         Form {
-            Section("Summary") {
+            Section {
                 LabeledContent {
                     HStack(spacing: 6) {
                         Image(systemName: statusSymbol)
@@ -2024,6 +2059,8 @@ private struct TimeLockedVaultStatusView: View {
                     "Created",
                     value: savedDraft.createdAt.formatted(date: .abbreviated, time: .shortened)
                 )
+            } header: {
+                vaultSummaryHeader(isArchived: isArchived)
             }
 
             if let descriptor {
@@ -5079,6 +5116,7 @@ private struct ReviewWalletFundingView: View {
 
 private struct ProtectedVaultDetailView: View {
     let vault: ProtectedVault
+    var isArchived = false
     let onFund: () -> Void
     let onSpend: () -> Void
 
@@ -5099,7 +5137,7 @@ private struct ProtectedVaultDetailView: View {
         let refreshState = protectedVaultStore.refreshState(for: vault.id)
         let balance = vault.status == .spent ? Decimal.zero : (vault.lockedAmount ?? vault.amount)
         Form {
-            Section("Summary") {
+            Section {
                 LabeledContent {
                     if vault.status == .spent || vault.status == .active {
                         HStack(spacing: 6) {
@@ -5180,6 +5218,8 @@ private struct ProtectedVaultDetailView: View {
                     }
                     .font(.subheadline)
                 }
+            } header: {
+                vaultSummaryHeader(isArchived: isArchived)
             }
 
             if let vaultAddress = vault.vaultAddress {
