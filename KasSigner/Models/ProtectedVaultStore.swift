@@ -217,6 +217,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
     var covenantID: String?
     var fundingTransactionID: String?
     var claimTransactionID: String?
+    var archivedAt: Date?
     var step: Step
 
     init(
@@ -240,6 +241,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         covenantID: String? = nil,
         fundingTransactionID: String? = nil,
         claimTransactionID: String? = nil,
+        archivedAt: Date? = nil,
         step: Step = .rules
     ) {
         self.id = id
@@ -262,6 +264,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         self.covenantID = covenantID
         self.fundingTransactionID = fundingTransactionID
         self.claimTransactionID = claimTransactionID
+        self.archivedAt = archivedAt
         self.step = step
     }
 
@@ -387,6 +390,7 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
     let fundingOutpoints: [String]
     let covenantIDs: [String]
     let pendingWithdrawals: [PendingWithdrawal]
+    var archivedAt: Date?
 
     init(
         id: UUID = UUID(),
@@ -412,7 +416,8 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         lockedSompi: UInt64? = nil,
         fundingOutpoints: [String] = [],
         covenantIDs: [String] = [],
-        pendingWithdrawals: [PendingWithdrawal] = []
+        pendingWithdrawals: [PendingWithdrawal] = [],
+        archivedAt: Date? = nil
     ) {
         self.id = id
         self.profileID = profileID
@@ -440,6 +445,7 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         self.fundingOutpoints = fundingOutpoints
         self.covenantIDs = covenantIDs
         self.pendingWithdrawals = pendingWithdrawals
+        self.archivedAt = archivedAt
     }
 
     var delaySummary: String {
@@ -469,7 +475,7 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         case id, profileID, name, amount, usesSendMaxFunding, approvedAddress, approvedAddresses, recoveryAddress, recoveryPath, delayDays, delayHours
         case delayMinutes, ownerDerivationIndex, ownerPublicKey, redeemScriptHex
         case vaultAddress, createdAt, status, fundingTransactionID, approvedWithdrawalTransactionID, fundedAt
-        case lockedSompi, fundingOutpoints, covenantIDs, pendingWithdrawals
+        case lockedSompi, fundingOutpoints, covenantIDs, pendingWithdrawals, archivedAt
     }
 
     init(from decoder: Decoder) throws {
@@ -500,6 +506,7 @@ struct ProtectedVault: Identifiable, Codable, Equatable {
         fundingOutpoints = try values.decodeIfPresent([String].self, forKey: .fundingOutpoints) ?? []
         covenantIDs = try values.decodeIfPresent([String].self, forKey: .covenantIDs) ?? []
         pendingWithdrawals = try values.decodeIfPresent([PendingWithdrawal].self, forKey: .pendingWithdrawals) ?? []
+        archivedAt = try values.decodeIfPresent(Date.self, forKey: .archivedAt)
     }
 }
 
@@ -517,7 +524,7 @@ extension ProtectedVault {
              approvedWithdrawalTransactionID: approvedWithdrawalTransactionID,
              fundedAt: fundedAt, lockedSompi: lockedSompi,
              fundingOutpoints: fundingOutpoints, covenantIDs: covenantIDs,
-             pendingWithdrawals: pendingWithdrawals)
+             pendingWithdrawals: pendingWithdrawals, archivedAt: archivedAt)
     }
 }
 
@@ -1281,6 +1288,20 @@ final class ProtectedVaultStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func archive(id: UUID, at date: Date = .now) -> Bool {
+        guard let index = vaults.firstIndex(where: { $0.id == id }),
+              vaults[index].status != .localDraft else { return false }
+        return commit { vaults[index].archivedAt = date }
+    }
+
+    @discardableResult
+    func archiveTimeLockedVault(id: UUID, at date: Date = .now) -> Bool {
+        guard let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == id }),
+              timeLockedSetupDrafts[index].fundingTransactionID != nil else { return false }
+        return commit { timeLockedSetupDrafts[index].archivedAt = date }
+    }
+
     func recordOpenedTimeLockedDraft(id: UUID, profileID: UUID, at date: Date = .now) {
         recordOpened(id: id, profileID: profileID, at: date)
     }
@@ -1658,7 +1679,8 @@ final class ProtectedVaultStore: ObservableObject {
             fundedAt: fundedAt,
             lockedSompi: lockedSompi, fundingOutpoints: fundingOutpoints,
             covenantIDs: covenantIDs,
-            pendingWithdrawals: pendingWithdrawals ?? vault.pendingWithdrawals)
+            pendingWithdrawals: pendingWithdrawals ?? vault.pendingWithdrawals,
+            archivedAt: vault.archivedAt)
     }
 
     private func load() {

@@ -412,6 +412,7 @@ struct WalletHomeView: View {
     @State private var showingCurrencyConverter = false
     @State private var currencyConverterDetent: PresentationDetent = .fraction(0.54)
     @State private var contextVault: ProtectedVault?
+    @State private var contextProtectedVaultSetupDraft: ProtectedVaultSetupDraft?
     @State private var contextTimeLockedDraft: TimeLockedVaultSetupDraft?
     @State private var contextVaultRenameText = ""
     @State private var showingContextVaultRename = false
@@ -573,7 +574,7 @@ struct WalletHomeView: View {
                        let profile = walletStore.profiles.first(where: { $0.id == vault.profileID }) {
                         if profile.network == KaspaNetwork.testnet10.rawValue {
                             Group {
-                                if vault.status == .pendingWithdrawal {
+                                if vault.status == .pendingWithdrawal && !isArchived {
                                     TestnetProtectedVaultSpendView(vaultID: vaultID) { transactionID, warning, startedDelay in
                                         if startedDelay {
                                             showDelayProgress(vaultID: vaultID, warning: warning)
@@ -1066,8 +1067,10 @@ struct WalletHomeView: View {
 
             Section("Vaults") {
                 let vaults = protectedVaultStore.vaults(for: profile.id)
+                    .filter { $0.archivedAt == nil }
                 let setupDrafts = protectedVaultStore.setupDrafts(for: profile.id)
                 let timeLockedDrafts = protectedVaultStore.timeLockedSetupDrafts(for: profile.id)
+                    .filter { $0.archivedAt == nil }
                 if vaults.isEmpty && setupDrafts.isEmpty && timeLockedDrafts.isEmpty {
                     Label("No Active Vaults", systemImage: "lock.open")
                     .foregroundStyle(.secondary)
@@ -1097,6 +1100,7 @@ struct WalletHomeView: View {
                         .buttonStyle(.plain)
                         .contextMenu {
                             Button {
+                                contextProtectedVaultSetupDraft = nil
                                 contextTimeLockedDraft = nil
                                 contextVault = vault
                                 contextVaultRenameText = vault.displayName
@@ -1105,13 +1109,17 @@ struct WalletHomeView: View {
                                 Label("Rename Vault", systemImage: "pin")
                             }
 
-                            Button(role: .destructive) {
+                            Button(role: vault.status == .localDraft ? .destructive : nil) {
+                                contextProtectedVaultSetupDraft = nil
                                 contextTimeLockedDraft = nil
                                 contextVault = vault
                                 showingContextVaultRemoval = true
                             } label: {
-                                Label("Remove Vault Record", systemImage: "trash")
-                                    .foregroundStyle(.red)
+                                if vault.status == .localDraft {
+                                    Label("Delete Vault Draft", systemImage: "trash")
+                                } else {
+                                    Label("Archive Vault", systemImage: "archivebox")
+                                }
                             }
                         }
                     case .setupDraft(let draft):
@@ -1121,6 +1129,16 @@ struct WalletHomeView: View {
                             vaultNavigationLabel { setupDraftCard(draft) }
                         }
                         .buttonStyle(.plain)
+                        .contextMenu {
+                            Button(role: .destructive) {
+                                contextVault = nil
+                                contextTimeLockedDraft = nil
+                                contextProtectedVaultSetupDraft = draft
+                                showingContextVaultRemoval = true
+                            } label: {
+                                Label("Delete Vault Draft", systemImage: "trash")
+                            }
+                        }
                     case .timeLockedSetupDraft(let draft):
                         Button {
                             openVault(.timeLockedSetupDraft(draft.id, isArchived: false), itemID: draft.id, profileID: draft.profileID)
@@ -1132,6 +1150,7 @@ struct WalletHomeView: View {
                             if draft.fundingTransactionID != nil {
                                 Button {
                                     contextVault = nil
+                                    contextProtectedVaultSetupDraft = nil
                                     contextTimeLockedDraft = draft
                                     contextVaultRenameText = draft.displayName
                                     showingContextVaultRename = true
@@ -1139,13 +1158,22 @@ struct WalletHomeView: View {
                                     Label("Rename Vault", systemImage: "pin")
                                 }
 
-                                Button(role: .destructive) {
+                                Button {
                                     contextVault = nil
+                                    contextProtectedVaultSetupDraft = nil
                                     contextTimeLockedDraft = draft
                                     showingContextVaultRemoval = true
                                 } label: {
-                                    Label("Remove Vault Record", systemImage: "trash")
-                                        .foregroundStyle(.red)
+                                    Label("Archive Vault", systemImage: "archivebox")
+                                }
+                            } else {
+                                Button(role: .destructive) {
+                                    contextVault = nil
+                                    contextProtectedVaultSetupDraft = nil
+                                    contextTimeLockedDraft = draft
+                                    showingContextVaultRemoval = true
+                                } label: {
+                                    Label("Delete Vault Draft", systemImage: "trash")
                                 }
                             }
                         }
@@ -1155,13 +1183,53 @@ struct WalletHomeView: View {
 
             Section {
                 DisclosureGroup(isExpanded: $isArchivedVaultsExpanded) {
-                    ContentUnavailableView(
-                        "No Archived Vaults",
-                        systemImage: "archivebox",
-                        description: Text("Archived vaults will appear here.")
-                    )
-                    .frame(maxWidth: .infinity)
-                    .listRowSeparator(.hidden)
+                    let archivedProtectedVaults = protectedVaultStore.vaults(for: profile.id)
+                        .filter { $0.archivedAt != nil }
+                    let archivedTimeLockedVaults = protectedVaultStore.timeLockedSetupDrafts(for: profile.id)
+                        .filter { $0.archivedAt != nil && $0.fundingTransactionID != nil }
+                    let archivedItems = (archivedProtectedVaults.map(VaultListItem.vault)
+                        + archivedTimeLockedVaults.map(VaultListItem.timeLockedSetupDraft))
+                        .sorted { lhs, rhs in
+                            VaultLastOpenedOrder.precedes(
+                                id: lhs.id,
+                                createdAt: lhs.createdAt,
+                                lastOpenedAt: protectedVaultStore.lastOpenedAt(id: lhs.id, profileID: profile.id),
+                                id: rhs.id,
+                                createdAt: rhs.createdAt,
+                                lastOpenedAt: protectedVaultStore.lastOpenedAt(id: rhs.id, profileID: profile.id)
+                            )
+                        }
+
+                    if archivedItems.isEmpty {
+                        ContentUnavailableView(
+                            "No Archived Vaults",
+                            systemImage: "archivebox",
+                            description: Text("Archived vaults will appear here.")
+                        )
+                        .frame(maxWidth: .infinity)
+                        .listRowSeparator(.hidden)
+                    } else {
+                        ForEach(archivedItems) { item in
+                            switch item {
+                            case .vault(let vault):
+                                Button {
+                                    openVault(.protectedVaultDetail(vault.id, isArchived: true), itemID: vault.id, profileID: vault.profileID)
+                                } label: {
+                                    vaultNavigationLabel { activeVaultCard(vault) }
+                                }
+                                .buttonStyle(.plain)
+                            case .timeLockedSetupDraft(let draft):
+                                Button {
+                                    openVault(.timeLockedSetupDraft(draft.id, isArchived: true), itemID: draft.id, profileID: draft.profileID)
+                                } label: {
+                                    vaultNavigationLabel { timeLockedSetupDraftCard(draft) }
+                                }
+                                .buttonStyle(.plain)
+                            case .setupDraft:
+                                EmptyView()
+                            }
+                        }
+                    }
                 } label: {
                     Text("Archived")
                         .font(.body)
@@ -1180,15 +1248,27 @@ struct WalletHomeView: View {
             isPresented: $showingContextVaultRemoval,
             titleVisibility: .visible
         ) {
-            Button(contextTimeLockedDraft == nil ? "Remove Local Record" : "Remove Vault Record", role: .destructive) {
+            Button(contextVaultRemovalAction, role: contextVaultRemovalIsDelete ? .destructive : nil) {
                 if let contextVault {
-                    protectedVaultStore.remove(id: contextVault.id)
+                    if contextVault.status == .localDraft {
+                        protectedVaultStore.remove(id: contextVault.id)
+                    } else {
+                        _ = protectedVaultStore.archive(id: contextVault.id)
+                    }
                 }
                 if let contextTimeLockedDraft {
-                    protectedVaultStore.removeTimeLockedSetupDraft(id: contextTimeLockedDraft.id)
+                    if contextTimeLockedDraft.fundingTransactionID == nil {
+                        protectedVaultStore.removeTimeLockedSetupDraft(id: contextTimeLockedDraft.id)
+                    } else {
+                        _ = protectedVaultStore.archiveTimeLockedVault(id: contextTimeLockedDraft.id)
+                    }
+                }
+                if let contextProtectedVaultSetupDraft {
+                    protectedVaultStore.removeSetupDraft(id: contextProtectedVaultSetupDraft.id)
                 }
                 contextVault = nil
                 contextTimeLockedDraft = nil
+                contextProtectedVaultSetupDraft = nil
             }
         } message: {
             Text(contextVaultRemovalMessage)
@@ -1199,6 +1279,7 @@ struct WalletHomeView: View {
             Button("Cancel", role: .cancel) {
                 contextVault = nil
                 contextTimeLockedDraft = nil
+                contextProtectedVaultSetupDraft = nil
             }
             Button("Save") {
                 if let contextVault {
@@ -1209,6 +1290,7 @@ struct WalletHomeView: View {
                 }
                 contextVault = nil
                 contextTimeLockedDraft = nil
+                contextProtectedVaultSetupDraft = nil
             }
             .disabled(contextVaultRenameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         } message: {
@@ -1217,22 +1299,44 @@ struct WalletHomeView: View {
     }
 
     private var contextVaultRemovalTitle: String {
-        if contextTimeLockedDraft != nil { return "Remove this Time Locked Vault from the app?" }
-        guard let contextVault else { return "Remove this vault from the app?" }
-        return contextVault.status == .localDraft
-            ? "Delete this vault draft?"
-            : "Remove this vault from the app?"
+        if contextProtectedVaultSetupDraft != nil { return "Delete this vault draft?" }
+        if let draft = contextTimeLockedDraft {
+            return draft.fundingTransactionID == nil
+                ? "Delete this vault draft?"
+                : "Archive this Time-Locked Vault?"
+        }
+        guard let contextVault else { return "Archive this vault?" }
+        return contextVault.status == .localDraft ? "Delete this vault draft?" : "Archive this vault?"
+    }
+
+    private var contextVaultRemovalAction: String {
+        if contextProtectedVaultSetupDraft != nil { return "Delete Draft" }
+        if let draft = contextTimeLockedDraft {
+            return draft.fundingTransactionID == nil ? "Delete Draft" : "Archive Vault"
+        }
+        return contextVault?.status == .localDraft ? "Delete Draft" : "Archive Vault"
+    }
+
+    private var contextVaultRemovalIsDelete: Bool {
+        if contextProtectedVaultSetupDraft != nil { return true }
+        if let draft = contextTimeLockedDraft { return draft.fundingTransactionID == nil }
+        return contextVault?.status == .localDraft
     }
 
     private var contextVaultRemovalMessage: String {
-        if contextTimeLockedDraft != nil {
-            return "This removes the saved Time Locked Vault record and its local claim details from this app. It will not move or recover the on-chain funds."
+        if contextProtectedVaultSetupDraft != nil {
+            return "This deletes the unfunded Protected Vault setup draft from this app."
         }
-        guard let contextVault else { return "This removes the saved vault record from this app." }
+        if let draft = contextTimeLockedDraft {
+            return draft.fundingTransactionID == nil
+                ? "This deletes the unfunded Time-Locked Vault setup draft from this app."
+                : "Archiving hides this vault from Active Vaults. Its saved details remain available in Archived, and no on-chain funds are moved or recovered."
+        }
+        guard let contextVault else { return "Archiving hides this vault from Active Vaults and keeps its saved details in Archived. It does not move or recover funds." }
         if contextVault.status == .localDraft {
-            return "This removes the unfunded vault draft from this app."
+            return "This deletes the unfunded vault setup draft from this app."
         }
-        return "This vault has on-chain funds or funding history. Removing its local record will not move or recover funds, and removes the saved vault details needed to manage it in this app."
+        return "Archiving hides this vault from Active Vaults. Its saved details remain available in Archived, and no on-chain funds are moved or recovered."
     }
 
     private func activeVaultCard(_ vault: ProtectedVault) -> some View {
@@ -1956,6 +2060,7 @@ private struct TimeLockedVaultStatusView: View {
     let profile: WalletProfile
     var isArchived = false
 
+    @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
@@ -1973,6 +2078,9 @@ private struct TimeLockedVaultStatusView: View {
     @State private var claimTransactionID: String?
     @State private var showingBroadcastSuccess = false
     @State private var errorMessage: String?
+    @State private var showingArchiveConfirmation = false
+    @State private var showingRenamePrompt = false
+    @State private var renameText = ""
 
     private var savedDraft: TimeLockedVaultSetupDraft {
         protectedVaultStore.timeLockedSetupDraft(id: draft.id) ?? draft
@@ -2060,7 +2168,7 @@ private struct TimeLockedVaultStatusView: View {
                     value: savedDraft.createdAt.formatted(date: .abbreviated, time: .shortened)
                 )
             } header: {
-                vaultSummaryHeader(isArchived: isArchived)
+                vaultSummaryHeader(isArchived: isArchived || savedDraft.archivedAt != nil)
             }
 
             if let descriptor {
@@ -2146,6 +2254,24 @@ private struct TimeLockedVaultStatusView: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button("Rename Vault", systemImage: "pin") {
+                        renameText = savedDraft.displayName
+                        showingRenamePrompt = true
+                    }
+                    if !isArchived && savedDraft.archivedAt == nil {
+                        Button {
+                            showingArchiveConfirmation = true
+                        } label: {
+                            Label("Archive Vault", systemImage: "archivebox")
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("Vault Options")
+            }
             if savedDraft.claimTransactionID == nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Refresh", systemImage: "arrow.clockwise") {
@@ -2154,6 +2280,30 @@ private struct TimeLockedVaultStatusView: View {
                     .disabled(isRefreshing)
                 }
             }
+        }
+        .confirmationDialog(
+            "Archive this vault?",
+            isPresented: $showingArchiveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Archive Vault") {
+                if protectedVaultStore.archiveTimeLockedVault(id: savedDraft.id) {
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("Archiving hides this vault from Active Vaults. Its saved details remain available in Archived, and no on-chain funds are moved or recovered.")
+        }
+        .alert("Rename Vault", isPresented: $showingRenamePrompt) {
+            TextField("Vault name", text: $renameText)
+                .textInputAutocapitalization(.words)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") {
+                protectedVaultStore.renameTimeLockedVault(id: savedDraft.id, to: renameText)
+            }
+            .disabled(renameText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text("Choose a name for this vault.")
         }
         .alert("Claim Time Locked Vault", isPresented: $showingClaimConfirmation) {
             Button("Cancel", role: .cancel) { claimPSKB = nil; claimSummary = nil }
@@ -5126,6 +5276,7 @@ private struct ProtectedVaultDetailView: View {
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var walletStore: WalletStore
     @State private var showingDeleteConfirmation = false
+    @State private var showingArchiveConfirmation = false
     @State private var showingRenamePrompt = false
     @State private var showingConsensusDetails = false
     @State private var renameText = ""
@@ -5219,7 +5370,7 @@ private struct ProtectedVaultDetailView: View {
                     .font(.subheadline)
                 }
             } header: {
-                vaultSummaryHeader(isArchived: isArchived)
+                vaultSummaryHeader(isArchived: isArchived || vault.archivedAt != nil)
             }
 
             if let vaultAddress = vault.vaultAddress {
@@ -5355,11 +5506,21 @@ private struct ProtectedVaultDetailView: View {
                         renameText = vault.displayName
                         showingRenamePrompt = true
                     }
-                    Button(role: .destructive) {
-                        showingDeleteConfirmation = true
-                    } label: {
-                        Label(deleteMenuTitle, systemImage: "trash")
-                            .foregroundStyle(.red)
+                    if !isArchived && vault.archivedAt == nil {
+                        if vault.status == .localDraft {
+                            Button(role: .destructive) {
+                                showingDeleteConfirmation = true
+                            } label: {
+                                Label("Delete Vault Draft", systemImage: "trash")
+                                    .foregroundStyle(.red)
+                            }
+                        } else {
+                            Button {
+                                showingArchiveConfirmation = true
+                            } label: {
+                                Label("Archive Vault", systemImage: "archivebox")
+                            }
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -5378,6 +5539,19 @@ private struct ProtectedVaultDetailView: View {
             }
         } message: {
             Text(deleteConfirmationMessage)
+        }
+        .confirmationDialog(
+            "Archive this vault?",
+            isPresented: $showingArchiveConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Archive Vault") {
+                if protectedVaultStore.archive(id: vault.id) {
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("Archiving hides this vault from Active Vaults. Its saved details remain available in Archived, and no on-chain funds are moved or recovered.")
         }
         .alert("Rename Vault", isPresented: $showingRenamePrompt) {
             TextField("Vault name", text: $renameText)
@@ -5459,11 +5633,6 @@ private struct ProtectedVaultDetailView: View {
         }
     }
 
-    private var hasOnChainState: Bool {
-        vault.status == .active || vault.status == .pendingWithdrawal
-            || vault.status == .fundingBroadcast || vault.status == .incompatibleFunding
-    }
-
     private var hasConsensusDetails: Bool {
         vault.fundingTransactionID != nil
             || !vault.fundingOutpoints.isEmpty
@@ -5473,26 +5642,15 @@ private struct ProtectedVaultDetailView: View {
     }
 
     private var deleteConfirmationTitle: String {
-        if hasOnChainState { return "Remove this vault from the app?" }
-        return vault.status == .spent ? "Remove completed vault?" : "Delete this vault draft?"
-    }
-
-    private var deleteMenuTitle: String {
-        hasOnChainState ? "Remove Vault Record" : "Delete Vault"
+        "Delete this vault draft?"
     }
 
     private var deleteConfirmationAction: String {
-        if hasOnChainState { return "Remove Local Record" }
-        return vault.status == .spent ? "Remove Record" : "Delete Draft"
+        "Delete Draft"
     }
 
     private var deleteConfirmationMessage: String {
-        if hasOnChainState {
-            return "This vault has on-chain funds or funding history. Removing its local record will not move or recover funds, and removes the saved vault details needed to manage it in this app."
-        }
-        return vault.status == .spent
-            ? "This removes the completed vault’s local history from this app."
-            : "This removes the unfunded vault draft from this app."
+        "This deletes the unfunded vault setup draft from this app."
     }
 }
 

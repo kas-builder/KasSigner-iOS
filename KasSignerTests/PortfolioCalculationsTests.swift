@@ -471,6 +471,50 @@ final class ProtectedVaultFundingPlanTests: XCTestCase {
 
 @MainActor
 final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
+    func testArchivedVaultStatePersistsForBothVaultTypesAndRemainsAccountScoped() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "ArchivedVaults-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "ArchivedVaults.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let profileID = UUID()
+        let otherProfileID = UUID()
+        let archivedAt = Date(timeIntervalSince1970: 1_800_000_789)
+        let protectedVault = ProtectedVault(
+            profileID: profileID,
+            amount: 2,
+            approvedAddresses: ["kaspatest:destination"],
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            status: .active,
+            fundingTransactionID: String(repeating: "a", count: 64)
+        )
+        let timeLockedVault = TimeLockedVaultSetupDraft(
+            profileID: profileID,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [],
+            fundingTransactionID: String(repeating: "b", count: 64),
+            step: .funded
+        )
+        let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertTrue(store.add(protectedVault))
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(timeLockedVault))
+        XCTAssertTrue(store.archive(id: protectedVault.id, at: archivedAt))
+        XCTAssertTrue(store.archiveTimeLockedVault(id: timeLockedVault.id, at: archivedAt))
+
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.vaults(for: profileID).first?.archivedAt, archivedAt)
+        XCTAssertEqual(relaunched.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt, archivedAt)
+        XCTAssertTrue(relaunched.timeLockedSetupDrafts(for: otherProfileID).isEmpty)
+        XCTAssertFalse(relaunched.archiveTimeLockedVault(id: UUID(), at: archivedAt))
+    }
+
     func testRefreshFailureRetainsVerifiedTimestampAndSuccessfulRetryClearsStaleState() throws {
         let firstCheck = Date(timeIntervalSince1970: 1_800_000_000)
         let verified = ProtectedVaultRefreshInfo(
