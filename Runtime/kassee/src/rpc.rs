@@ -1071,7 +1071,7 @@ pub async fn broadcast_signed(ws_url: &str, signed_hex: &str) -> Result<String, 
         {
             return Err(format!(
                 "Node rejected: {}",
-                text_check.chars().take(200).collect::<String>()
+                text_check
             ));
         }
     }
@@ -1344,7 +1344,7 @@ pub async fn submit_consensus_tx(
             );
             return Err(format!(
                 "Node rejected: {}",
-                text_check.chars().take(200).collect::<String>()
+                text_check
             ));
         }
     }
@@ -1486,7 +1486,7 @@ pub async fn build_and_broadcast_raw(
         {
             return Err(format!(
                 "Node rejected: {}",
-                text_check.chars().take(300).collect::<String>()
+                text_check
             ));
         }
     }

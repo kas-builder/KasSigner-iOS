@@ -3,6 +3,40 @@ import Foundation
 import XCTest
 @testable import KasSigner
 
+final class StandardSendFeeTests: XCTestCase {
+    func testFeeScalesWithOneThroughEightInputsAndActualOutputCount() throws {
+        for inputs in 1...8 {
+            for outputs in [1, 2, 3, 5, 8] {
+                let mass = 94 + 1_118 * inputs + 412 * outputs
+                XCTAssertEqual(StandardSendFee.estimate(inputCount: inputs,
+                    outputScriptLengths: Array(repeating: 34, count: outputs), rate: 100), UInt64(mass * 100))
+            }
+        }
+        // Exact node rejection from the two-input Send Max regression.
+        XCTAssertEqual(StandardSendFee.estimate(inputCount: 2, outputScriptLengths: [34], rate: 100), 274_200)
+        XCTAssertEqual(StandardSendFee.estimate(inputCount: 2, outputScriptLengths: [35], rate: 100), 275_300)
+    }
+
+    func testRelayFloorRateChangesAndInvalidQuotes() {
+        XCTAssertEqual(StandardSendFee.estimate(inputCount: 2, outputScriptLengths: [34], rate: 0), 274_200)
+        XCTAssertEqual(StandardSendFee.estimate(inputCount: 2, outputScriptLengths: [34], rate: 150), 411_300)
+        XCTAssertNil(StandardSendFee.estimate(inputCount: 0, outputScriptLengths: [34], rate: 100))
+        XCTAssertNil(StandardSendFee.estimate(inputCount: 2, outputScriptLengths: [34], rate: .nan))
+    }
+
+    func testDecodedTransactionIncludesStorageMassAndFeeErrorIsConcise() throws {
+        let summary = PSKTSummary(totalInputSompi: 200_000_000, totalOutputSompi: 100_000,
+            feeSompi: 199_900_000, inputCount: 2, outputCount: 1,
+            inputs: (0..<2).map { PSKTSummaryInput(txID: "tx\($0)", index: 0,
+                amountSompi: 100_000_000, scriptHex: String(repeating: "00", count: 34)) },
+            outputs: [PSKTSummaryOutput(address: "destination", amountSompi: 100_000,
+                scriptHex: String(repeating: "00", count: 34))])
+        XCTAssertEqual(StandardSendFee.requiredFee(summary: summary, rate: 100), 998_000_000)
+        XCTAssertEqual(StandardSendFee.errorMessage("Node rejected: transaction has 230000 fees which is under the required amount of 274200 for compute mass 2742"),
+            "Fee too low. Required: 274200 sompi. Go back to update the transaction.")
+    }
+}
+
 @MainActor
 private final class IsolatedWalletStoreFixture {
     let rootURL: URL

@@ -30,6 +30,68 @@ struct TimeLockedDestinationDescriptor: Decodable {
     }
 }
 
+/// P2PK send sizing, matching the runtime's standard_compute_mass and relay floor.
+/// This preview is local; the Rust builder also checks output-dependent storage mass.
+enum StandardSendFee {
+    static func errorMessage(_ message: String) -> String {
+        if let range = message.range(of: #"required amount of [0-9]+"#, options: .regularExpression),
+           let amount = message[range].split(separator: " ").last {
+            return "Fee too low. Required: \(amount) sompi. Go back to update the transaction."
+        }
+        return message
+    }
+    static func estimate(inputCount: Int, outputScriptLengths: [Int], rate: Double) -> UInt64? {
+        guard (1...8).contains(inputCount), !outputScriptLengths.isEmpty,
+              outputScriptLengths.count <= 12,
+              outputScriptLengths.allSatisfy({ (1...10_000).contains($0) }),
+              rate.isFinite, rate >= 0 else { return nil }
+        let compute = 94 + 1_118 * inputCount
+            + outputScriptLengths.reduce(0) { $0 + 18 + $1 + 10 * (2 + $1) }
+        let transient = 2 * (94 + 118 * inputCount
+            + outputScriptLengths.reduce(0) { $0 + 18 + $1 })
+        let fee = ceil(Double(max(compute, transient)) * max(100, rate))
+        guard fee.isFinite, fee > 0, fee < Double(UInt64.max) else { return nil }
+        return UInt64(fee)
+    }
+
+    static func requiredFee(summary: PSKTSummary, rate: Double) -> UInt64? {
+        guard let inputs = summary.inputs, let outputs = summary.outputs,
+              inputs.count == summary.inputCount, outputs.count == summary.outputCount,
+              inputs.allSatisfy({ $0.scriptHex?.count == 68 && $0.redeemScriptHex == nil }),
+              outputs.allSatisfy({
+                  guard let script = $0.scriptHex else { return false }
+                  return !script.isEmpty && script.count.isMultiple(of: 2) && script.allSatisfy(\.isHexDigit)
+              }),
+              let computeFee = estimate(inputCount: inputs.count,
+                  outputScriptLengths: outputs.map { ($0.scriptHex?.count ?? 0) / 2 }, rate: rate)
+        else { return nil }
+        let amountsIn = inputs.compactMap(\.amountSompi)
+        let amountsOut = outputs.compactMap(\.amountSompi)
+        guard amountsIn.count == inputs.count, amountsOut.count == outputs.count,
+              amountsIn.allSatisfy({ $0 > 0 }), amountsOut.allSatisfy({ $0 > 0 }) else { return nil }
+        // Same plurality-one storage calculation as kspt::storage_mass_estimate.
+        let c: UInt64 = 1_000_000_000_000
+        let harmonicOut = amountsOut.reduce(UInt64(0)) { $0 + c / $1 }
+        let relaxed = inputs.count == 1 || outputs.count == 1 || (inputs.count == 2 && outputs.count == 2)
+        var inputTerm: UInt64 = 0
+        if relaxed {
+            inputTerm = amountsIn.reduce(UInt64(0)) { $0 + c / $1 }
+        } else {
+            var total: UInt64 = 0
+            for amount in amountsIn {
+                let sum = total.addingReportingOverflow(amount)
+                guard !sum.overflow else { return nil }
+                total = sum.partialValue
+            }
+            inputTerm = UInt64(inputs.count) * (c / max(1, total / UInt64(inputs.count)))
+        }
+        let storage = harmonicOut > inputTerm ? harmonicOut - inputTerm : 0
+        let storageFee = ceil(Double(storage) * rate)
+        guard storageFee.isFinite, storageFee >= 0, storageFee < Double(UInt64.max) else { return nil }
+        return max(computeFee, UInt64(storageFee))
+    }
+}
+
 struct FeeEstimate: Decodable, Equatable {
     let lowSompiPerGram: Double
     let normalSompiPerGram: Double

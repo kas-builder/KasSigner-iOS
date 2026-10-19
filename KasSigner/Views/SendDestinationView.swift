@@ -239,6 +239,19 @@ struct SendDestinationView: View {
         parseKasTextToSompi(customFeeText)
     }
 
+    private func estimatedNormalFee(rate: Double) -> UInt64? {
+        let recipientCount = 1 + additionalRecipients.count
+        let changeCount = sendMax ? 0 : max(1, changeOutputs.count)
+        // Before valid addresses are entered, assume ordinary P2PK outputs.
+        // P2SH scripts are one byte longer; the builder verifies the final scripts.
+        let addresses = [destinationAddress] + additionalRecipients.map(\.address)
+            + (sendMax ? [] : changeOutputs.map(\.address))
+        var lengths = addresses.map { $0.lowercased().hasPrefix("\(preferences.network.addressPrefix)p") ? 35 : 34 }
+        while lengths.count < recipientCount + changeCount { lengths.append(34) }
+        return StandardSendFee.estimate(inputCount: selectedUTXOs.count,
+            outputScriptLengths: lengths, rate: rate)
+    }
+
     private var provisionalFeeSompi: UInt64? {
         switch selectedFee {
         case .custom:
@@ -255,20 +268,7 @@ struct SendDestinationView: View {
                 return nil
             }
 
-            // The node's suggested fee is its normal-rate quote. Recover the
-            // quoted transaction mass with ceiling division, then apply the
-            // user's selected node-provided rate to that same mass.
-            let quotedMass = ceil(
-                Double(fee.suggestedFee) / fee.normalSompiPerGram
-            )
-            let selectedFee = quotedMass * selectedRate
-            guard selectedFee.isFinite,
-                  selectedFee > 0,
-                  selectedFee <= Double(UInt64.max)
-            else {
-                return nil
-            }
-            return UInt64(selectedFee)
+            return estimatedNormalFee(rate: selectedRate)
         }
     }
 
@@ -777,9 +777,8 @@ struct SendDestinationView: View {
         let requestedFeeSompi: UInt64?
         if selectedFee == .custom {
             requestedFeeSompi = customFeeSompi
-        } else if freshFeeRate.isFinite, freshFeeRate > 0,
-                  freshEstimate.suggestedFee > 0 {
-            requestedFeeSompi = freshEstimate.suggestedFee
+        } else if freshFeeRate.isFinite, freshFeeRate > 0 {
+            requestedFeeSompi = estimatedNormalFee(rate: freshFeeRate)
         } else {
             requestedFeeSompi = nil
         }
@@ -891,8 +890,7 @@ struct SendDestinationView: View {
                 throw SendVerificationError.changeAmountMismatch
             }
 
-            // Provisional runtime checkpoint only. Final fee selection will use
-            // the exact verified transaction mass.
+            // The runtime calculates the final fee from the actual transaction.
             guard let recipients = sendRecipients else {
                 throw SendDraftError.emptyDestination
             }
@@ -916,6 +914,16 @@ struct SendDestinationView: View {
             let pskb = try await engine.buildUnsignedPSKB(from: draft)
 
             let summary = try await engine.summarizePSKB(pskb, network: preferences.network)
+
+            guard let requiredFee = StandardSendFee.requiredFee(summary: summary, rate: freshFeeRate),
+                  let actualFee = summary.feeSompi else {
+                showBuildError("Could not calculate the transaction fee. Try again.")
+                return
+            }
+            guard actualFee >= requiredFee else {
+                showBuildError("Fee too low. Required: \(formatKas(sompi: requiredFee)). Update the fee and try again.")
+                return
+            }
 
             guard let builtInputs = summary.inputs,
                   builtInputs.count == draft.selectedInputs.count
@@ -949,7 +957,16 @@ struct SendDestinationView: View {
                 throw SendVerificationError.missingOutputs
             }
 
-            let verifiedRecipients = draft.recipients
+            let verifiedRecipients: [SendDraftRecipient]
+            if sendMax, draft.recipients.count == 1,
+               let output = outputs.first, outputs.count == 1,
+               output.address?.caseInsensitiveCompare(draft.destination) == .orderedSame,
+               let amount = output.amountSompi {
+                verifiedRecipients = [SendDraftRecipient(address: draft.destination, amountSompi: amount)]
+                amountText = formatPlainKas(sompi: amount)
+            } else {
+                verifiedRecipients = draft.recipients
+            }
             for recipient in verifiedRecipients {
                 let normalizedAddress = recipient.address.lowercased()
                 let matches = outputs.filter {
@@ -1104,7 +1121,7 @@ struct SendDestinationView: View {
 
     @MainActor
     private func showBuildError(_ message: String) {
-        buildErrorMessage = message
+        buildErrorMessage = StandardSendFee.errorMessage(message)
         showingBuildError = true
     }
 
@@ -2135,6 +2152,14 @@ private struct VerifiedTransactionReviewView: View {
                     review: review
                 )
                 securityChecksCard
+                if preferences.network == .testnet10, let testnetErrorMessage {
+                    Text(testnetErrorMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
                 if preferences.network != .testnet10 {
                     continueButton
                 }
@@ -2269,24 +2294,22 @@ private struct VerifiedTransactionReviewView: View {
             let estimate = try await engine.getFeeEstimate(
                 nodeConfiguration: preferences.nodeConfiguration
             )
-            if !review.usesExactFee,
-               estimate.normalSompiPerGram > review.feeRateSompiPerGram {
-                return "The network fee rose. Go back and continue again to review an updated transaction."
+            let summary = try await engine.summarizePSKB(review.unsignedPSKB, network: preferences.network)
+            guard let requiredFee = StandardSendFee.requiredFee(summary: summary,
+                    rate: review.usesExactFee ? 0 : estimate.normalSompiPerGram) else {
+                return "Could not verify the transaction fee. Go back and try again."
+            }
+            if review.feeSompi < requiredFee {
+                return "Fee too low. Required: \(requiredFee) sompi. Go back to update the transaction."
             }
             return nil
         } catch {
-            return "Could not refresh the network fee. Try again. \(error.localizedDescription)"
+            return "Could not update the network fee. Try again."
         }
     }
 
     private var testnetBroadcastButton: some View {
         VStack(spacing: 10) {
-            if let testnetErrorMessage {
-                Text(testnetErrorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
             Button {
                 Task { await signAndBroadcastTestnet() }
             } label: {
@@ -2429,7 +2452,7 @@ private struct VerifiedTransactionReviewView: View {
                 engine: engine, preferences: preferences, force: true,
                 includeTransactionHistory: false)
         } catch {
-            testnetErrorMessage = error.localizedDescription
+            testnetErrorMessage = StandardSendFee.errorMessage(error.localizedDescription)
         }
     }
 }
