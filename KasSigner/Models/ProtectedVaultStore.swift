@@ -29,6 +29,18 @@ private struct ProtectedVaultRecoveryBackup: Codable {
     var timeLockedSetupDrafts: [TimeLockedVaultSetupDraft]? = nil
 }
 
+struct VaultRecoveryImportResult: Equatable {
+    let protectedVaults: Int
+    let timeLockedVaults: Int
+    let protectedSetupDrafts: Int
+    let timeLockedSetupDrafts: Int
+    let recordsInFile: Int
+
+    var totalImported: Int {
+        protectedVaults + timeLockedVaults + protectedSetupDrafts + timeLockedSetupDrafts
+    }
+}
+
 private struct ProtectedVaultPersistentState: Codable {
     var version = 1
     var vaults: [ProtectedVault] = []
@@ -1121,7 +1133,7 @@ final class ProtectedVaultStore: ObservableObject {
 
     func restoreRecoveryDocument(_ document: ProtectedVaultRecoveryDocument,
                                  for profile: WalletProfile,
-                                 engine: KasSignerEngine) async throws -> Int {
+                                 engine: KasSignerEngine) async throws -> VaultRecoveryImportResult {
         guard storageError == nil else {
             throw KasSignerEngine.EngineError.javascript(storageError ?? "Vault storage is unavailable.")
         }
@@ -1143,6 +1155,9 @@ final class ProtectedVaultStore: ObservableObject {
         let incomingTimeLockedDrafts = backup.timeLockedSetupDrafts ?? []
         guard Set(incomingTimeLockedDrafts.map(\.id)).count == incomingTimeLockedDrafts.count else {
             throw KasSignerEngine.EngineError.javascript("The recovery file contains duplicate time-locked vault drafts.")
+        }
+        for draft in incomingTimeLockedDrafts {
+            try await validateTimeLockedRecoveryDraft(draft, for: profile, engine: engine)
         }
         for incoming in backup.vaults {
             if let current = vaults.first(where: { $0.id == incoming.id }),
@@ -1202,6 +1217,7 @@ final class ProtectedVaultStore: ObservableObject {
         let importedTimeLockedDrafts = incomingTimeLockedDrafts
             .filter { !existingTimeLockedDraftIDs.contains($0.id) }
             .map { $0.reassociated(to: profile.id) }
+        let recordsInFile = backup.vaults.count + backup.setupDrafts.count + incomingTimeLockedDrafts.count
         guard commit({
             vaults.append(contentsOf: imported)
             setupDrafts.append(contentsOf: importedDrafts)
@@ -1210,7 +1226,77 @@ final class ProtectedVaultStore: ObservableObject {
         }) else {
             throw KasSignerEngine.EngineError.javascript("The restored vault records could not be saved.")
         }
-        return imported.count + importedDrafts.count + importedTimeLockedDrafts.count
+        return VaultRecoveryImportResult(
+            protectedVaults: imported.count,
+            timeLockedVaults: importedTimeLockedDrafts.filter { $0.fundingTransactionID != nil }.count,
+            protectedSetupDrafts: importedDrafts.count,
+            timeLockedSetupDrafts: importedTimeLockedDrafts.filter { $0.fundingTransactionID == nil }.count,
+            recordsInFile: recordsInFile
+        )
+    }
+
+    private func validateTimeLockedRecoveryDraft(_ draft: TimeLockedVaultSetupDraft,
+                                                 for profile: WalletProfile,
+                                                 engine: KasSignerEngine) async throws {
+        func invalid(_ message: String = "The recovery file contains an inconsistent Time-Locked Vault record.") -> KasSignerEngine.EngineError {
+            .javascript(message)
+        }
+        func isTransactionID(_ value: String?) -> Bool {
+            guard let value, value.count == 64 else { return false }
+            return value.allSatisfy(\.isHexDigit)
+        }
+
+        guard draft.amountSompi.map({ $0 > 0 }) ?? true,
+              draft.locktimeDAA.map({ $0 > 0 }) ?? true,
+              draft.covenantID.map(isTransactionID) ?? true,
+              draft.fundingTransactionID.map(isTransactionID) ?? true,
+              draft.claimTransactionID.map(isTransactionID) ?? true else {
+            throw invalid()
+        }
+
+        if draft.fundingTransactionID != nil {
+            guard draft.step == .funded || draft.step == .spent,
+                  draft.amountSompi.map({ $0 > 0 }) == true,
+                  draft.covenantID.map(isTransactionID) == true,
+                  draft.claimTransactionID == nil || draft.step == .spent,
+                  draft.step != .spent || draft.claimTransactionID != nil,
+                  let locktime = draft.locktimeDAA, locktime > 0,
+                  let ownerIndex = draft.ownerDerivationIndex,
+                  let ownerKey = draft.ownerPublicKey, !ownerKey.isEmpty,
+                  let script = draft.redeemScriptHex, !script.isEmpty,
+                  let vaultAddress = draft.vaultAddress, !vaultAddress.isEmpty,
+                  let nonce = draft.nonceHex, !nonce.isEmpty,
+                  !draft.destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw invalid("The recovery file contains an incomplete funded Time-Locked Vault descriptor.")
+            }
+            let derived: TimeLockedDestinationDescriptor
+            do {
+                derived = try await engine.deriveTimeLockedDestination(
+                    profile: profile,
+                    receiveIndex: Int(ownerIndex),
+                    destination: draft.destination,
+                    locktimeDAA: locktime,
+                    nonceHex: nonce
+                )
+            } catch {
+                throw invalid("A Time-Locked Vault descriptor could not be verified for this wallet.")
+            }
+            guard derived.ownerDerivationIndex == ownerIndex,
+                  derived.destinationAddress.caseInsensitiveCompare(draft.destination) == .orderedSame,
+                  derived.locktimeDAA == locktime,
+                  derived.nonceHex.caseInsensitiveCompare(nonce) == .orderedSame,
+                  derived.ownerPublicKey.caseInsensitiveCompare(ownerKey) == .orderedSame,
+                  derived.redeemScriptHex.caseInsensitiveCompare(script) == .orderedSame,
+                  derived.vaultAddress.caseInsensitiveCompare(vaultAddress) == .orderedSame else {
+                throw invalid("A Time-Locked Vault descriptor does not match this wallet and its covenant rules.")
+            }
+        } else {
+            guard draft.claimTransactionID == nil,
+                  draft.fundingOutputIndex == nil,
+                  draft.step == .rules || draft.step == .fundingDetails else {
+                throw invalid("The recovery file contains an inconsistent unfunded Time-Locked Vault setup draft.")
+            }
+        }
     }
 
     func vaults(for profileID: UUID) -> [ProtectedVault] {

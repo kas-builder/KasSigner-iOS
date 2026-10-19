@@ -529,18 +529,8 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             changeAddressIndex: 7,
             usesCustomFee: true,
             customFeeText: "0.02",
-            nonceHex: "010203",
-            locktimeDAA: 987_654,
-            ownerDerivationIndex: 8,
-            ownerPublicKey: "owner-public-key",
-            redeemScriptHex: "redeem-script",
-            vaultAddress: "kaspatest:time-locked-vault",
-            amountSompi: 950_000_000,
-            covenantID: "time-locked-covenant",
-            fundingTransactionID: String(repeating: "c", count: 64),
-            claimTransactionID: String(repeating: "d", count: 64),
             archivedAt: archivedAt,
-            step: .spent
+            step: .fundingDetails
         )
         var namedTimeLockedVault = timeLockedVault
         namedTimeLockedVault.name = "Archived Time-Locked"
@@ -582,7 +572,8 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             for: restoredProfile,
             engine: KasSignerEngine()
         )
-        XCTAssertEqual(importedCount, 1)
+        XCTAssertEqual(importedCount.totalImported, 1)
+        XCTAssertEqual(importedCount.timeLockedSetupDrafts, 1)
         XCTAssertEqual(destinationStore.timeLockedSetupDrafts(for: restoredProfile.id), [namedTimeLockedVault.reassociated(to: restoredProfile.id)])
 
         let repeatedImportCount = try await destinationStore.restoreRecoveryDocument(
@@ -590,7 +581,7 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             for: restoredProfile,
             engine: KasSignerEngine()
         )
-        XCTAssertEqual(repeatedImportCount, 0)
+        XCTAssertEqual(repeatedImportCount.totalImported, 0)
         XCTAssertEqual(destinationStore.timeLockedSetupDrafts(for: restoredProfile.id).count, 1)
     }
 
@@ -620,7 +611,7 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             for: profile,
             engine: KasSignerEngine()
         )
-        XCTAssertEqual(importedCount, 0)
+        XCTAssertEqual(importedCount.totalImported, 0)
         XCTAssertTrue(store.timeLockedSetupDrafts(for: profile.id).isEmpty)
     }
 
@@ -731,8 +722,7 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             profileID: sourceProfile.id,
             unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
             selectedUTXOIDs: [],
-            fundingTransactionID: String(repeating: "c", count: 64),
-            step: .funded
+            step: .fundingDetails
         )
         XCTAssertTrue(sourceStore.saveTimeLockedSetupDraft(timeLockedVault))
         let document = try sourceStore.recoveryDocument(for: sourceProfile)
@@ -748,9 +738,102 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             engine: KasSignerEngine()
         )
 
-        XCTAssertEqual(importedCount, 1)
+        XCTAssertEqual(importedCount.totalImported, 1)
         XCTAssertEqual(destinationStore.timeLockedSetupDrafts(for: requestedProfile.id).map(\.id), [timeLockedVault.id])
         XCTAssertTrue(destinationStore.timeLockedSetupDrafts(for: otherProfile.id).isEmpty)
+    }
+
+    func testRecoveryImportReportsVaultAndDraftCountsSeparately() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultRecoveryCounts-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sourceSuite = "VaultRecoveryCounts.Source.\(UUID().uuidString)"
+        let destinationSuite = "VaultRecoveryCounts.Destination.\(UUID().uuidString)"
+        let sourceDefaults = try XCTUnwrap(UserDefaults(suiteName: sourceSuite))
+        let destinationDefaults = try XCTUnwrap(UserDefaults(suiteName: destinationSuite))
+        defer {
+            sourceDefaults.removePersistentDomain(forName: sourceSuite)
+            destinationDefaults.removePersistentDomain(forName: destinationSuite)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        let source = WalletProfile(name: "Source", kpub: "count-test-wallet",
+                                  network: KaspaNetwork.testnet10.rawValue)
+        let target = WalletProfile(name: "Target", kpub: source.kpub,
+                                   network: KaspaNetwork.testnet10.rawValue)
+        let sourceStore = ProtectedVaultStore(defaults: sourceDefaults,
+                                              protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "source")))
+        let destinationStore = ProtectedVaultStore(defaults: destinationDefaults,
+                                                   protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "destination")))
+        let protectedDraft = ProtectedVaultSetupDraft(
+            profileID: source.id, approvedAddressCount: 1,
+            approvedAddresses: ["kaspatest:approved"], recoveryAddress: "kaspatest:recovery",
+            recoveryPath: .emergencyAnytime, delayDays: 1, delayHours: 0, delayMinutes: 0,
+            selectedUTXOIDs: []
+        )
+        let timeLockedDraft = TimeLockedVaultSetupDraft(
+            profileID: source.id, unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [], step: .fundingDetails
+        )
+        XCTAssertTrue(sourceStore.saveSetupDraft(protectedDraft))
+        XCTAssertTrue(sourceStore.saveTimeLockedSetupDraft(timeLockedDraft))
+
+        let imported = try await destinationStore.restoreRecoveryDocument(
+            sourceStore.recoveryDocument(for: source), for: target, engine: KasSignerEngine()
+        )
+        XCTAssertEqual(imported.totalImported, 2)
+        XCTAssertEqual(imported.recordsInFile, 2)
+        XCTAssertEqual(imported.protectedVaults, 0)
+        XCTAssertEqual(imported.timeLockedVaults, 0)
+        XCTAssertEqual(imported.protectedSetupDrafts, 1)
+        XCTAssertEqual(imported.timeLockedSetupDrafts, 1)
+
+        let repeated = try await destinationStore.restoreRecoveryDocument(
+            sourceStore.recoveryDocument(for: source), for: target, engine: KasSignerEngine()
+        )
+        XCTAssertEqual(repeated.totalImported, 0)
+        XCTAssertEqual(repeated.recordsInFile, 2)
+    }
+
+    func testRecoveryRejectsIncompleteFundedTimeLockedRecordWithoutPartialImport() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "VaultRecoveryAtomic-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suiteName = "VaultRecoveryAtomic.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let profile = WalletProfile(name: "Recovery", kpub: "atomic-import-wallet",
+                                    network: KaspaNetwork.testnet10.rawValue)
+        let store = ProtectedVaultStore(defaults: defaults,
+                                        protectedStorage: ProtectedWalletStorage(directoryURL: root))
+        let incomplete = TimeLockedVaultSetupDraft(
+            profileID: profile.id, unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [], fundingTransactionID: String(repeating: "a", count: 64),
+            step: .funded
+        )
+        let setupDraft = ProtectedVaultSetupDraft(
+            profileID: profile.id, approvedAddressCount: 1,
+            approvedAddresses: ["kaspatest:approved"], recoveryAddress: "kaspatest:recovery",
+            recoveryPath: .emergencyAnytime, delayDays: 1, delayHours: 0, delayMinutes: 0,
+            selectedUTXOIDs: []
+        )
+        // Build the payload through a same-profile export, then insert the invalid record.
+        let emptyDocument = try store.recoveryDocument(for: profile)
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: emptyDocument.data) as? [String: Any])
+        let encoder = JSONEncoder()
+        json["setupDrafts"] = try JSONSerialization.jsonObject(with: encoder.encode([setupDraft]))
+        json["timeLockedSetupDrafts"] = try JSONSerialization.jsonObject(with: encoder.encode([incomplete]))
+        let document = ProtectedVaultRecoveryDocument(data: try JSONSerialization.data(withJSONObject: json))
+
+        do {
+            _ = try await store.restoreRecoveryDocument(document, for: profile, engine: KasSignerEngine())
+            XCTFail("An incomplete funded Time-Locked Vault must be rejected.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("incomplete funded"))
+        }
+        XCTAssertTrue(store.setupDrafts(for: profile.id).isEmpty, "Import must be atomic when validation fails.")
+        XCTAssertTrue(store.timeLockedSetupDrafts(for: profile.id).isEmpty)
     }
 
     func testArchivedVaultStatePersistsForBothVaultTypesAndRemainsAccountScoped() throws {

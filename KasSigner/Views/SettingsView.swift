@@ -509,9 +509,18 @@ struct SettingsView: View {
             let imported = try await protectedVaultStore.restoreRecoveryDocument(
                 document, for: profile, engine: engine
             )
-            vaultRecoveryMessage = imported == 0
-                ? "No new vault records were added to “\(profile.name)”. Its records from this file are already present."
-                : "Imported \(imported) vault record\(imported == 1 ? "" : "s") to “\(profile.name)”. Refresh the wallet to verify current on-chain status."
+            if imported.totalImported == 0 {
+                vaultRecoveryMessage = imported.recordsInFile == 0
+                    ? "This file contains no vault records or setup drafts for “\(profile.name)”."
+                    : "No new records were imported to “\(profile.name)”. All records from this file are already present."
+            } else {
+                vaultRecoveryMessage = "Imported to “\(profile.name)”:\n"
+                    + "Protected Vaults: \(imported.protectedVaults)\n"
+                    + "Time-Locked Vaults: \(imported.timeLockedVaults)\n"
+                    + "Protected setup drafts: \(imported.protectedSetupDrafts)\n"
+                    + "Time-Locked setup drafts: \(imported.timeLockedSetupDrafts)\n\n"
+                    + "Refresh the wallet to verify current on-chain status."
+            }
         } catch {
             vaultRecoveryMessage = "Vault recovery failed: \(error.localizedDescription)"
         }
