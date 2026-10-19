@@ -221,6 +221,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
     var amountSompi: UInt64?
     var covenantID: String?
     var fundingTransactionID: String?
+    var fundingOutputIndex: UInt32? = nil
     var claimTransactionID: String?
     var archivedAt: Date?
     var step: Step
@@ -245,6 +246,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         amountSompi: UInt64? = nil,
         covenantID: String? = nil,
         fundingTransactionID: String? = nil,
+        fundingOutputIndex: UInt32? = nil,
         claimTransactionID: String? = nil,
         archivedAt: Date? = nil,
         step: Step = .rules
@@ -268,6 +270,7 @@ struct TimeLockedVaultSetupDraft: Codable, Equatable, Identifiable {
         self.amountSompi = amountSompi
         self.covenantID = covenantID
         self.fundingTransactionID = fundingTransactionID
+        self.fundingOutputIndex = fundingOutputIndex
         self.claimTransactionID = claimTransactionID
         self.archivedAt = archivedAt
         self.step = step
@@ -1260,7 +1263,7 @@ final class ProtectedVaultStore: ObservableObject {
     @discardableResult
     func recordTimeLockedFunding(
         id: UUID, transactionID: String, descriptor: TimeLockedDestinationDescriptor,
-        amountSompi: UInt64, covenantID: String
+        amountSompi: UInt64, covenantID: String, outputIndex: UInt32
     ) -> Bool {
         guard var draft = timeLockedSetupDraft(id: id), draft.fundingTransactionID == nil else { return false }
         draft.destination = descriptor.destinationAddress
@@ -1273,6 +1276,7 @@ final class ProtectedVaultStore: ObservableObject {
         draft.amountSompi = amountSompi
         draft.covenantID = covenantID
         draft.fundingTransactionID = transactionID
+        draft.fundingOutputIndex = outputIndex
         draft.step = .funded
         return saveTimeLockedSetupDraft(draft)
     }

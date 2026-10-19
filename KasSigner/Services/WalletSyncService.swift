@@ -205,6 +205,126 @@ struct Testnet10AddressActivityClient {
     }
 }
 
+/// Looks up the confirmed spender of a time-locked vault's exact funding output.
+/// This is used only when the configured node no longer returns that output as
+/// unspent, so ordinary refreshes remain on the node-backed UTXO path.
+struct Testnet10TimeLockedSpendClient {
+    private static let baseURL = URL(string: "https://api-tn10.kaspa.org")!
+
+    func confirmedClaimTransactionID(
+        fundingTransactionID: String,
+        fundingOutputIndex: UInt32?,
+        vaultAddress: String,
+        destinationAddress: String,
+        amountSompi: UInt64,
+        maximumFeeSompi: UInt64
+    ) async throws -> String? {
+        let normalizedFundingID = fundingTransactionID.lowercased()
+        guard Self.isTransactionID(normalizedFundingID) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+
+        let outputIndex: UInt32
+        if let fundingOutputIndex {
+            outputIndex = fundingOutputIndex
+        } else {
+            // Older recovery files did not save the output index. Recover it
+            // from the funding transaction by its unique address and amount.
+            let funding = try await fetchTransaction(normalizedFundingID)
+            let matchingOutputs = (funding.outputs ?? []).enumerated().filter {
+                $0.element.scriptPublicKeyAddress?.caseInsensitiveCompare(vaultAddress) == .orderedSame
+                    && $0.element.amount == amountSompi
+            }
+            guard matchingOutputs.count == 1,
+                  let index = UInt32(exactly: matchingOutputs[0].offset) else {
+                throw TransactionHistoryError.invalidResponse
+            }
+            outputIndex = index
+        }
+
+        let transactions = try await fetchRecentTransactions(for: vaultAddress)
+        return Testnet10TimeLockedClaimVerifier.confirmedClaimTransactionID(
+            in: transactions,
+            fundingTransactionID: normalizedFundingID,
+            fundingOutputIndex: outputIndex,
+            destinationAddress: destinationAddress,
+            amountSompi: amountSompi,
+            maximumFeeSompi: maximumFeeSompi
+        )
+    }
+
+    private func fetchTransaction(_ transactionID: String) async throws -> IndexedTransaction {
+        let url = Self.baseURL.appending(path: "transactions").appending(path: transactionID)
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Testnet10AddressActivityClient.validate(response)
+        return try JSONDecoder().decode(IndexedTransaction.self, from: data)
+    }
+
+    private func fetchRecentTransactions(for address: String) async throws -> [IndexedTransaction] {
+        let url = Self.baseURL
+            .appending(path: "addresses")
+            .appending(path: address)
+            .appending(path: "full-transactions-page")
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        components.queryItems = [
+            URLQueryItem(name: "limit", value: "100"),
+            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
+        ]
+        guard let pageURL = components.url else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        var request = URLRequest(url: pageURL)
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Testnet10AddressActivityClient.validate(response)
+        return try JSONDecoder().decode([IndexedTransaction].self, from: data)
+    }
+
+    private static func isTransactionID(_ value: String) -> Bool {
+        value.count == 64 && value.allSatisfy(\.isHexDigit)
+    }
+}
+
+enum Testnet10TimeLockedClaimVerifier {
+    static func confirmedClaimTransactionID(
+        in transactions: [IndexedTransaction],
+        fundingTransactionID: String,
+        fundingOutputIndex: UInt32,
+        destinationAddress: String,
+        amountSompi: UInt64,
+        maximumFeeSompi: UInt64
+    ) -> String? {
+        let fundingID = fundingTransactionID.lowercased()
+        let destination = destinationAddress.lowercased()
+        let matches = transactions.compactMap { transaction -> String? in
+            guard transaction.isAccepted == true,
+                  let transactionID = transaction.transactionID?.lowercased(),
+                  transactionID.count == 64,
+                  transactionID.allSatisfy(\.isHexDigit),
+                  let inputs = transaction.inputs,
+                  inputs.count == 1,
+                  let input = inputs.first,
+                  input.previousOutpointHash?.lowercased() == fundingID,
+                  input.previousOutpointIndex == fundingOutputIndex,
+                  let outputs = transaction.outputs,
+                  outputs.count == 1,
+                  let output = outputs.first,
+                  output.scriptPublicKeyAddress?.lowercased() == destination,
+                  output.amount > 0,
+                  output.amount <= amountSompi,
+                  amountSompi - output.amount <= maximumFeeSompi else {
+                return nil
+            }
+            return transactionID
+        }
+        return Set(matches).count == 1 ? matches.first : nil
+    }
+}
+
 private struct TransactionSearchRequest: Encodable {
     let transactionIds: [String]
 }

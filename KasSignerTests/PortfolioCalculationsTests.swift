@@ -1133,6 +1133,84 @@ final class UTXOBadgePersistenceTests: XCTestCase {
 }
 
 final class PortfolioCalculationsTests: XCTestCase {
+    func testTimeLockedRefreshRecognizesOnlyAcceptedExactClaimSpend() {
+        let fundingID = String(repeating: "a", count: 64)
+        let claimID = String(repeating: "b", count: 64)
+        let vaultAddress = "kaspatest:qvault"
+        let destination = "kaspatest:qdestination"
+        let claim = IndexedTransaction(
+            transactionID: claimID,
+            blockTime: nil,
+            isAccepted: true,
+            acceptingBlockTime: nil,
+            acceptingBlockBlueScore: 123,
+            inputs: [IndexedTransactionInput(
+                previousOutpointHash: fundingID,
+                previousOutpointIndex: 1,
+                previousOutpointAddress: vaultAddress,
+                previousOutpointAmount: 1_000_000
+            )],
+            outputs: [IndexedTransactionOutput(
+                amount: 999_000,
+                scriptPublicKeyAddress: destination
+            )]
+        )
+
+        XCTAssertEqual(
+            Testnet10TimeLockedClaimVerifier.confirmedClaimTransactionID(
+                in: [claim],
+                fundingTransactionID: fundingID,
+                fundingOutputIndex: 1,
+                destinationAddress: destination,
+                amountSompi: 1_000_000,
+                maximumFeeSompi: 10_000
+            ),
+            claimID
+        )
+
+        let unaccepted = IndexedTransaction(
+            transactionID: claimID,
+            blockTime: nil,
+            isAccepted: false,
+            acceptingBlockTime: nil,
+            acceptingBlockBlueScore: nil,
+            inputs: claim.inputs,
+            outputs: claim.outputs
+        )
+        XCTAssertNil(Testnet10TimeLockedClaimVerifier.confirmedClaimTransactionID(
+            in: [unaccepted], fundingTransactionID: fundingID,
+            fundingOutputIndex: 1, destinationAddress: destination,
+            amountSompi: 1_000_000, maximumFeeSompi: 10_000
+        ))
+    }
+
+    func testTimeLockedRefreshRejectsWrongOutpointDestinationAndExcessiveFee() {
+        let fundingID = String(repeating: "a", count: 64)
+        let claimID = String(repeating: "b", count: 64)
+        let transaction = IndexedTransaction(
+            transactionID: claimID,
+            blockTime: nil,
+            isAccepted: true,
+            acceptingBlockTime: nil,
+            acceptingBlockBlueScore: 123,
+            inputs: [IndexedTransactionInput(
+                previousOutpointHash: String(repeating: "c", count: 64),
+                previousOutpointIndex: 1,
+                previousOutpointAddress: "kaspatest:qvault",
+                previousOutpointAmount: 1_000_000
+            )],
+            outputs: [IndexedTransactionOutput(
+                amount: 900_000,
+                scriptPublicKeyAddress: "kaspatest:qother"
+            )]
+        )
+        XCTAssertNil(Testnet10TimeLockedClaimVerifier.confirmedClaimTransactionID(
+            in: [transaction], fundingTransactionID: fundingID,
+            fundingOutputIndex: 1, destinationAddress: "kaspatest:qdestination",
+            amountSompi: 1_000_000, maximumFeeSompi: 10_000
+        ))
+    }
+
     func testTransactionGraphRejectsMissingInputOrOutputLists() {
         let client = TransactionHistoryClient()
         let input = IndexedTransactionInput(

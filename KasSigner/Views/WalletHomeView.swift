@@ -2396,13 +2396,48 @@ private struct TimeLockedVaultStatusView: View {
             } else {
                 feeSompi = nil
             }
+            if let utxo = vaultUTXO,
+               savedDraft.fundingOutputIndex == nil,
+               let separator = utxo.id.lastIndex(of: ":"),
+               let index = UInt32(utxo.id[utxo.id.index(after: separator)...]) {
+                var updatedDraft = savedDraft
+                updatedDraft.fundingOutputIndex = index
+                _ = protectedVaultStore.saveTimeLockedSetupDraft(updatedDraft)
+            }
             if vaultUTXO == nil && savedDraft.claimTransactionID == nil {
-                errorMessage = "The funded vault UTXO is not available yet. Refresh after the funding transaction confirms."
+                guard let fundingTransactionID = savedDraft.fundingTransactionID,
+                      let amountSompi = savedDraft.amountSompi else {
+                    errorMessage = "The saved funding details are incomplete, so the vault's on-chain status cannot be verified."
+                    return
+                }
+                let claimTransactionID = try await Testnet10TimeLockedSpendClient()
+                    .confirmedClaimTransactionID(
+                        fundingTransactionID: fundingTransactionID,
+                        fundingOutputIndex: savedDraft.fundingOutputIndex,
+                        vaultAddress: descriptor.vaultAddress,
+                        destinationAddress: descriptor.destinationAddress,
+                        amountSompi: amountSompi,
+                        maximumFeeSompi: descriptor.maximumClaimFeeSompi
+                    )
+                if let claimTransactionID {
+                    guard protectedVaultStore.recordTimeLockedClaim(
+                        id: savedDraft.id,
+                        transactionID: claimTransactionID
+                    ) else {
+                        errorMessage = "Testnet 10 confirms this vault was spent, but the updated status could not be saved on this device."
+                        return
+                    }
+                    currentDAA = currentScore
+                    vaultUTXO = nil
+                    feeSompi = nil
+                    return
+                }
+                errorMessage = "No unspent funding output or confirmed vault spend is visible on Testnet 10 yet. Refresh again after the network index updates."
             } else if feeSompi == nil && savedDraft.claimTransactionID == nil {
                 errorMessage = "The current fee exceeds this vault's maximum claim fee. Try again later."
             }
         } catch {
-            errorMessage = "Could not update the Testnet 10 DAA score, vault balance, or fee. \(error.localizedDescription)"
+            errorMessage = "Could not verify the Testnet 10 DAA score, vault output, spend status, or fee. \(error.localizedDescription)"
         }
     }
 
@@ -3074,6 +3109,7 @@ private struct TimeLockedRuleReviewView: View {
     @State private var fundingPSKB: String?
     @State private var fundingSummary: PSKTSummary?
     @State private var fundingCovenantID: String?
+    @State private var fundingOutputIndex: UInt32?
     @State private var fundingTransactionID: String?
     @State private var fundingError: String?
 
@@ -3206,6 +3242,7 @@ private struct TimeLockedRuleReviewView: View {
         fundingError = nil
         fundingPSKB = nil
         fundingSummary = nil
+        fundingOutputIndex = nil
         defer { isBuildingFunding = false }
 
         await runSecurityChecks()
@@ -3260,7 +3297,12 @@ private struct TimeLockedRuleReviewView: View {
                 expectedChangeAddress: changeSompi > 0 ? changeAddress : nil,
                 requiresExactFee: true
             )
-            guard let covenantID = summary.outputs?.first?.covenantID,
+            guard let vaultOutput = summary.outputs?.enumerated().first(where: {
+                $0.element.address?.caseInsensitiveCompare(descriptor.vaultAddress) == .orderedSame
+                    && $0.element.amountSompi == amountSompi
+                    && $0.element.covenantAuthorizingInput == 0
+            }),
+                  let covenantID = vaultOutput.element.covenantID,
                   covenantID.count == 64, covenantID.allSatisfy(\.isHexDigit) else {
                 fundingError = "The funding output has no valid covenant ID."
                 return
@@ -3268,6 +3310,7 @@ private struct TimeLockedRuleReviewView: View {
             fundingPSKB = pskb
             fundingSummary = summary
             fundingCovenantID = covenantID
+            fundingOutputIndex = UInt32(vaultOutput.offset)
             showingFundingConfirmation = true
         } catch {
             fundingError = error.localizedDescription
@@ -3278,7 +3321,8 @@ private struct TimeLockedRuleReviewView: View {
     private func signAndBroadcastFunding() async {
         guard !isBroadcastingFunding, fundingTransactionID == nil,
               let pskb = fundingPSKB, let unsignedSummary = fundingSummary,
-              let covenantID = fundingCovenantID else { return }
+              let covenantID = fundingCovenantID,
+              let fundingOutputIndex else { return }
         isBroadcastingFunding = true
         fundingError = nil
         defer { isBroadcastingFunding = false }
@@ -3303,7 +3347,8 @@ private struct TimeLockedRuleReviewView: View {
             fundingTransactionID = txid
             let vaultSaved = protectedVaultStore.recordTimeLockedFunding(
                 id: draftID, transactionID: txid, descriptor: descriptor,
-                amountSompi: amountSompi, covenantID: covenantID
+                amountSompi: amountSompi, covenantID: covenantID,
+                outputIndex: fundingOutputIndex
             )
             let walletSaved = walletStore.recordBroadcastedTransaction(
                 profileID: profile.id, transactionID: txid,
