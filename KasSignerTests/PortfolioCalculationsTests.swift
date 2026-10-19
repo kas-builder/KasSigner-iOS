@@ -790,17 +790,28 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             try? FileManager.default.removeItem(at: root)
         }
 
-        let source = WalletProfile(name: "Source", kpub: "count-test-wallet",
+        // Public BIP39 test vector, used only to derive valid recovery descriptors.
+        let engine = KasSignerEngine()
+        let wallet = try await engine.testnetHotWallet(
+            mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        let source = WalletProfile(name: "Source", kpub: wallet.wallet.kpub,
                                   network: KaspaNetwork.testnet10.rawValue)
         let target = WalletProfile(name: "Target", kpub: source.kpub,
                                    network: KaspaNetwork.testnet10.rawValue)
+        let destination = try XCTUnwrap(wallet.wallet.receiveAddresses.first)
+        let recovery = try XCTUnwrap(wallet.wallet.receiveAddresses.dropFirst().first)
+        let descriptor = try await engine.deriveProtectedVault(
+            profile: source, receiveIndex: 0, approvedAddresses: [destination],
+            recoveryAddress: recovery, emergencyAnytime: true, delayDAA: 864_000
+        )
         let sourceStore = ProtectedVaultStore(defaults: sourceDefaults,
                                               protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "source")))
         let destinationStore = ProtectedVaultStore(defaults: destinationDefaults,
                                                    protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "destination")))
         let protectedDraft = ProtectedVaultSetupDraft(
             profileID: source.id, approvedAddressCount: 1,
-            approvedAddresses: ["kaspatest:approved"], recoveryAddress: "kaspatest:recovery",
+            approvedAddresses: [destination], recoveryAddress: recovery,
             recoveryPath: .emergencyAnytime, delayDays: 1, delayHours: 0, delayMinutes: 0,
             selectedUTXOIDs: []
         )
@@ -808,24 +819,174 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             profileID: source.id, unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
             selectedUTXOIDs: [], step: .fundingDetails
         )
+        let protectedVaultDraft = ProtectedVault(
+            profileID: source.id, amount: 0, approvedAddresses: [destination],
+            recoveryAddress: recovery, recoveryPath: .emergencyAnytime,
+            delayDays: 1, delayHours: 0, delayMinutes: 0,
+            ownerDerivationIndex: 0, ownerPublicKey: descriptor.ownerPublicKey,
+            redeemScriptHex: descriptor.redeemScriptHex, vaultAddress: descriptor.vaultAddress,
+            status: .localDraft
+        )
         XCTAssertTrue(sourceStore.saveSetupDraft(protectedDraft))
         XCTAssertTrue(sourceStore.saveTimeLockedSetupDraft(timeLockedDraft))
+        XCTAssertTrue(sourceStore.add(protectedVaultDraft))
 
         let imported = try await destinationStore.restoreRecoveryDocument(
-            sourceStore.recoveryDocument(for: source), for: target, engine: KasSignerEngine()
+            sourceStore.recoveryDocument(for: source), for: target, engine: engine
         )
-        XCTAssertEqual(imported.totalImported, 2)
-        XCTAssertEqual(imported.recordsInFile, 2)
+        XCTAssertEqual(imported.totalImported, 3)
+        XCTAssertEqual(imported.recordsInFile, 3)
         XCTAssertEqual(imported.protectedVaults, 0)
         XCTAssertEqual(imported.timeLockedVaults, 0)
-        XCTAssertEqual(imported.protectedSetupDrafts, 1)
+        XCTAssertEqual(imported.protectedSetupDrafts, 2)
         XCTAssertEqual(imported.timeLockedSetupDrafts, 1)
 
         let repeated = try await destinationStore.restoreRecoveryDocument(
-            sourceStore.recoveryDocument(for: source), for: target, engine: KasSignerEngine()
+            sourceStore.recoveryDocument(for: source), for: target, engine: engine
         )
         XCTAssertEqual(repeated.totalImported, 0)
-        XCTAssertEqual(repeated.recordsInFile, 2)
+        XCTAssertEqual(repeated.recordsInFile, 3)
+    }
+
+    func testStaleTimeLockedSetupSavesPreserveFundedAndSpentRecords() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "TimeLockSetupGuard-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let suite = "TimeLockSetupGuard.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let store = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        var setup = TimeLockedVaultSetupDraft(
+            profileID: UUID(), unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: ["selected-input"], step: .fundingDetails
+        )
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(setup))
+        setup.step = .rules
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(setup))
+        XCTAssertEqual(store.timeLockedSetupDraft(id: setup.id)?.step, .rules)
+
+        let descriptor = TimeLockedDestinationDescriptor(
+            ownerDerivationIndex: 2, ownerPublicKey: "owner", destinationAddress: "destination",
+            locktimeDAA: 700_000_000, maximumClaimFeeSompi: 10_000_000,
+            nonceHex: "0102030405060708", redeemScriptHex: "script", vaultAddress: "vault"
+        )
+        XCTAssertTrue(store.recordTimeLockedFunding(
+            id: setup.id, transactionID: String(repeating: "a", count: 64),
+            descriptor: descriptor, amountSompi: 100_000_000,
+            covenantID: String(repeating: "b", count: 64), outputIndex: 3
+        ))
+        let funded = try XCTUnwrap(store.timeLockedSetupDraft(id: setup.id))
+        for step in [TimeLockedVaultSetupDraft.Step.rules, .fundingDetails] {
+            // Both a captured pre-funding draft and a callback using the latest
+            // record must be unable to downgrade or overwrite funding metadata.
+            setup.step = step
+            XCTAssertTrue(store.saveTimeLockedSetupDraft(setup))
+            var rewritten = funded
+            rewritten.step = step
+            rewritten.fundingOutputIndex = nil
+            rewritten.destination = "stale destination"
+            XCTAssertTrue(store.saveTimeLockedSetupDraft(rewritten))
+            XCTAssertEqual(store.timeLockedSetupDraft(id: setup.id), funded)
+        }
+        XCTAssertTrue(store.recordTimeLockedClaim(
+            id: setup.id, transactionID: String(repeating: "c", count: 64)
+        ))
+        let spent = try XCTUnwrap(store.timeLockedSetupDraft(id: setup.id))
+        XCTAssertTrue(store.saveTimeLockedSetupDraft(setup))
+        XCTAssertEqual(store.timeLockedSetupDraft(id: setup.id), spent)
+        let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
+        XCTAssertEqual(relaunched.timeLockedSetupDraft(id: setup.id), spent)
+    }
+
+    func testLegacyFundedTimeLockedRecordWithoutOutputIndexImportsAndDescriptorIsVerified() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "LegacyFundedTimeLockRecovery-\(UUID().uuidString)", directoryHint: .isDirectory)
+        let sourceSuite = "LegacyFundedTimeLockRecovery.Source.\(UUID().uuidString)"
+        let targetSuite = "LegacyFundedTimeLockRecovery.Target.\(UUID().uuidString)"
+        let tamperedSuite = "LegacyFundedTimeLockRecovery.Tampered.\(UUID().uuidString)"
+        let sourceDefaults = try XCTUnwrap(UserDefaults(suiteName: sourceSuite))
+        let targetDefaults = try XCTUnwrap(UserDefaults(suiteName: targetSuite))
+        let tamperedDefaults = try XCTUnwrap(UserDefaults(suiteName: tamperedSuite))
+        defer {
+            sourceDefaults.removePersistentDomain(forName: sourceSuite)
+            targetDefaults.removePersistentDomain(forName: targetSuite)
+            tamperedDefaults.removePersistentDomain(forName: tamperedSuite)
+            try? FileManager.default.removeItem(at: root)
+        }
+
+        // Public BIP39 test vector; no wallet secret is used or stored.
+        let engine = KasSignerEngine()
+        let wallet = try await engine.testnetHotWallet(
+            mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        )
+        let sourceProfile = WalletProfile(name: "Legacy source", kpub: wallet.wallet.kpub,
+                                          network: KaspaNetwork.testnet10.rawValue)
+        let restoredProfile = WalletProfile(name: "Legacy restored", kpub: wallet.wallet.kpub,
+                                            network: KaspaNetwork.testnet10.rawValue)
+        let destination = try XCTUnwrap(wallet.wallet.receiveAddresses.first)
+        let locktime: UInt64 = 700_000_000
+        let descriptor = try await engine.deriveTimeLockedDestination(
+            profile: sourceProfile, receiveIndex: 0, destination: destination,
+            locktimeDAA: locktime, nonceHex: "0102030405060708"
+        )
+        let legacyFundedRecord = TimeLockedVaultSetupDraft(
+            profileID: sourceProfile.id,
+            unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
+            selectedUTXOIDs: [],
+            destination: descriptor.destinationAddress,
+            amountText: "1",
+            nonceHex: descriptor.nonceHex,
+            locktimeDAA: descriptor.locktimeDAA,
+            ownerDerivationIndex: descriptor.ownerDerivationIndex,
+            ownerPublicKey: descriptor.ownerPublicKey,
+            redeemScriptHex: descriptor.redeemScriptHex,
+            vaultAddress: descriptor.vaultAddress,
+            amountSompi: 100_000_000,
+            covenantID: String(repeating: "c", count: 64),
+            fundingTransactionID: String(repeating: "d", count: 64),
+            fundingOutputIndex: nil,
+            step: .funded
+        )
+        let sourceStore = ProtectedVaultStore(
+            defaults: sourceDefaults,
+            protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "source"))
+        )
+        XCTAssertTrue(sourceStore.saveTimeLockedSetupDraft(legacyFundedRecord))
+        let document = try sourceStore.recoveryDocument(for: sourceProfile)
+
+        let targetStore = ProtectedVaultStore(
+            defaults: targetDefaults,
+            protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "target"))
+        )
+        let imported = try await targetStore.restoreRecoveryDocument(
+            document, for: restoredProfile, engine: engine
+        )
+        XCTAssertEqual(imported.timeLockedVaults, 1)
+        XCTAssertEqual(targetStore.timeLockedSetupDrafts(for: restoredProfile.id).first?.fundingOutputIndex, nil)
+
+        var tamperedJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: document.data) as? [String: Any])
+        var records = try XCTUnwrap(tamperedJSON["timeLockedSetupDrafts"] as? [[String: Any]])
+        records[0]["ownerPublicKey"] = String(repeating: "0", count: descriptor.ownerPublicKey.count)
+        tamperedJSON["timeLockedSetupDrafts"] = records
+        let tamperedDocument = ProtectedVaultRecoveryDocument(
+            data: try JSONSerialization.data(withJSONObject: tamperedJSON)
+        )
+        let tamperedStore = ProtectedVaultStore(
+            defaults: tamperedDefaults,
+            protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "tampered"))
+        )
+        do {
+            _ = try await tamperedStore.restoreRecoveryDocument(
+                tamperedDocument, for: restoredProfile, engine: engine
+            )
+            XCTFail("A funded record with a modified owner key must not be imported.")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("does not match this wallet"))
+        }
+        XCTAssertTrue(tamperedStore.timeLockedSetupDrafts(for: restoredProfile.id).isEmpty)
     }
 
     func testRecoveryRejectsIncompleteFundedTimeLockedRecordWithoutPartialImport() async throws {
@@ -886,11 +1047,13 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
         let archivedAt = Date(timeIntervalSince1970: 1_800_000_789)
         let protectedVault = ProtectedVault(
             profileID: profileID,
+            name: "Archive Protected",
             amount: 2,
             approvedAddresses: ["kaspatest:destination"],
             delayDays: 1,
             delayHours: 0,
             delayMinutes: 0,
+            vaultAddress: "kaspatest:protected-vault",
             status: .active,
             fundingTransactionID: String(repeating: "a", count: 64)
         )
@@ -898,8 +1061,12 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             profileID: profileID,
             unlockDate: Date(timeIntervalSince1970: 1_900_000_000),
             selectedUTXOIDs: [],
+            destination: "kaspatest:claim-destination",
+            amountSompi: 500_000_000,
+            covenantID: String(repeating: "c", count: 64),
             fundingTransactionID: String(repeating: "b", count: 64),
-            step: .funded
+            claimTransactionID: String(repeating: "d", count: 64),
+            step: .spent
         )
         let protectedDraft = ProtectedVault(
             profileID: profileID,
@@ -910,6 +1077,17 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
             delayMinutes: 0,
             status: .localDraft
         )
+        let protectedSetupDraft = ProtectedVaultSetupDraft(
+            profileID: profileID,
+            approvedAddressCount: 1,
+            approvedAddresses: ["kaspatest:setup-draft"],
+            recoveryAddress: "kaspatest:recovery",
+            recoveryPath: .emergencyAnytime,
+            delayDays: 1,
+            delayHours: 0,
+            delayMinutes: 0,
+            selectedUTXOIDs: []
+        )
         let timeLockedDraft = TimeLockedVaultSetupDraft(
             profileID: profileID,
             unlockDate: Date(timeIntervalSince1970: 1_900_000_100),
@@ -919,6 +1097,7 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
         XCTAssertTrue(store.add(protectedVault))
         XCTAssertTrue(store.saveTimeLockedSetupDraft(timeLockedVault))
         XCTAssertTrue(store.add(protectedDraft))
+        XCTAssertTrue(store.saveSetupDraft(protectedSetupDraft))
         XCTAssertTrue(store.saveTimeLockedSetupDraft(timeLockedDraft))
         XCTAssertFalse(store.setArchived(true, for: protectedDraft.id, type: .protected, at: archivedAt))
         XCTAssertFalse(store.setArchived(true, for: timeLockedDraft.id, type: .timeLocked, at: archivedAt))
@@ -927,16 +1106,40 @@ final class ProtectedVaultRecoveryPersistenceTests: XCTestCase {
         XCTAssertFalse(store.setArchived(true, for: protectedVault.id, type: .protected, at: archivedAt))
 
         let relaunched = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
-        XCTAssertEqual(relaunched.vaults(for: profileID).first?.archivedAt, archivedAt)
-        XCTAssertEqual(relaunched.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt, archivedAt)
+        XCTAssertEqual(relaunched.vaults(for: profileID).first(where: { $0.id == protectedVault.id })?.archivedAt,
+                       archivedAt)
+        let archivedProtected = try XCTUnwrap(relaunched.vaults(for: profileID).first { $0.id == protectedVault.id })
+        XCTAssertEqual(archivedProtected.displayName, "Archive Protected")
+        XCTAssertEqual(archivedProtected.vaultAddress, "kaspatest:protected-vault")
+        XCTAssertEqual(archivedProtected.fundingTransactionID, protectedVault.fundingTransactionID)
+        let archivedTimeLocked = try XCTUnwrap(relaunched.timeLockedSetupDraft(id: timeLockedVault.id))
+        XCTAssertEqual(archivedTimeLocked.archivedAt, archivedAt)
+        XCTAssertEqual(archivedTimeLocked.destination, timeLockedVault.destination)
+        XCTAssertEqual(archivedTimeLocked.covenantID, timeLockedVault.covenantID)
+        XCTAssertEqual(archivedTimeLocked.fundingTransactionID, timeLockedVault.fundingTransactionID)
+        XCTAssertEqual(archivedTimeLocked.claimTransactionID, timeLockedVault.claimTransactionID)
+        XCTAssertEqual(archivedTimeLocked.step, .spent)
         XCTAssertTrue(relaunched.timeLockedSetupDrafts(for: otherProfileID).isEmpty)
         XCTAssertFalse(relaunched.setArchived(true, for: UUID(), type: .timeLocked, at: archivedAt))
+        relaunched.remove(id: protectedDraft.id)
+        relaunched.removeSetupDraft(id: protectedSetupDraft.id)
+        relaunched.removeTimeLockedSetupDraft(id: timeLockedDraft.id)
+        XCTAssertNil(relaunched.vaults(for: profileID).first { $0.id == protectedDraft.id })
+        XCTAssertNil(relaunched.setupDraft(id: protectedSetupDraft.id))
+        XCTAssertNil(relaunched.timeLockedSetupDraft(id: timeLockedDraft.id))
 
         XCTAssertTrue(relaunched.setArchived(false, for: protectedVault.id, type: .protected))
         XCTAssertTrue(relaunched.setArchived(false, for: timeLockedVault.id, type: .timeLocked))
         let restored = ProtectedVaultStore(defaults: defaults, protectedStorage: storage)
-        XCTAssertNil(restored.vaults(for: profileID).first?.archivedAt)
-        XCTAssertNil(restored.timeLockedSetupDraft(id: timeLockedVault.id)?.archivedAt)
+        XCTAssertNil(restored.vaults(for: profileID).first(where: { $0.id == protectedVault.id })?.archivedAt)
+        let restoredTimeLocked = try XCTUnwrap(restored.timeLockedSetupDraft(id: timeLockedVault.id))
+        XCTAssertNil(restoredTimeLocked.archivedAt)
+        XCTAssertEqual(restoredTimeLocked.destination, timeLockedVault.destination)
+        XCTAssertEqual(restoredTimeLocked.claimTransactionID, timeLockedVault.claimTransactionID)
+        XCTAssertTrue(restored.setupDrafts(for: profileID).isEmpty)
+        XCTAssertNil(restored.vaults(for: profileID).first { $0.id == protectedDraft.id })
+        XCTAssertNil(restored.setupDraft(id: protectedSetupDraft.id))
+        XCTAssertNil(restored.timeLockedSetupDraft(id: timeLockedDraft.id))
         XCTAssertFalse(restored.setArchived(false, for: UUID(), type: .protected))
         XCTAssertFalse(restored.setArchived(false, for: UUID(), type: .timeLocked))
     }

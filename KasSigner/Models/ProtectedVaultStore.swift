@@ -1227,9 +1227,9 @@ final class ProtectedVaultStore: ObservableObject {
             throw KasSignerEngine.EngineError.javascript("The restored vault records could not be saved.")
         }
         return VaultRecoveryImportResult(
-            protectedVaults: imported.count,
+            protectedVaults: imported.filter { $0.status != .localDraft }.count,
             timeLockedVaults: importedTimeLockedDrafts.filter { $0.fundingTransactionID != nil }.count,
-            protectedSetupDrafts: importedDrafts.count,
+            protectedSetupDrafts: importedDrafts.count + imported.filter { $0.status == .localDraft }.count,
             timeLockedSetupDrafts: importedTimeLockedDrafts.filter { $0.fundingTransactionID == nil }.count,
             recordsInFile: recordsInFile
         )
@@ -1337,7 +1337,14 @@ final class ProtectedVaultStore: ObservableObject {
 
     @discardableResult
     func saveTimeLockedSetupDraft(_ draft: TimeLockedVaultSetupDraft) -> Bool {
-        commit {
+        // Setup views may finish navigation callbacks after funding has saved.
+        // Treat those stale setup saves as no-ops, preserving the on-chain record.
+        if let current = timeLockedSetupDraft(id: draft.id),
+           current.fundingTransactionID != nil,
+           draft.step == .rules || draft.step == .fundingDetails {
+            return true
+        }
+        return commit {
             if let index = timeLockedSetupDrafts.firstIndex(where: { $0.id == draft.id }) {
                 timeLockedSetupDrafts[index] = draft
             } else {

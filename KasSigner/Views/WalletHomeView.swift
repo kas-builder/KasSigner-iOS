@@ -1928,6 +1928,9 @@ private struct TimeLockedUTXORulesView: View {
         let latestDraft = activeDraft.flatMap {
             protectedVaultStore.timeLockedSetupDraft(id: $0.id)
         } ?? activeDraft
+        if let latestDraft, latestDraft.fundingTransactionID != nil {
+            return latestDraft
+        }
         let sameUnlockDate = latestDraft?.unlockDate == unlockDate
         return TimeLockedVaultSetupDraft(
             id: latestDraft?.id ?? UUID(),
@@ -2872,6 +2875,7 @@ private struct TimeLockedFundingDetailsView: View {
 
     private func persistDraft(nonceHex: String? = nil) {
         var updated = protectedVaultStore.timeLockedSetupDraft(id: setupDraft.id) ?? setupDraft
+        guard updated.fundingTransactionID == nil else { return }
         updated.destination = destination
         updated.amountText = amountText
         updated.changeAddressIndex = selectedChangeIndex
