@@ -24,6 +24,7 @@ struct SettingsView: View {
     @State private var seedRevealError: String?
     @State private var vaultRecoveryDocument: ProtectedVaultRecoveryDocument?
     @State private var vaultRecoveryProfile: WalletProfile?
+    @State private var vaultRecoveryExportFilename = "Vault-Recovery-Account"
     @State private var showingVaultExport = false
     @State private var showingVaultImport = false
     @State private var vaultRecoveryMessage: String?
@@ -368,7 +369,7 @@ struct SettingsView: View {
             .fileExporter(isPresented: $showingVaultExport,
                           document: vaultRecoveryDocument,
                           contentType: .json,
-                          defaultFilename: "KasSigner-Vault-Recovery") { result in
+                          defaultFilename: vaultRecoveryExportFilename) { result in
                 if case .failure(let error) = result {
                     vaultRecoveryMessage = "Could not export the vault recovery file: \(error.localizedDescription)"
                 }
@@ -486,6 +487,10 @@ struct SettingsView: View {
     private func exportVaultRecoveryFile(for profile: WalletProfile) {
         do {
             vaultRecoveryDocument = try protectedVaultStore.recoveryDocument(for: profile)
+            let allowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: " -_()"))
+            let safeAccountName = String(profile.name.unicodeScalars.filter(allowedCharacters.contains))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            vaultRecoveryExportFilename = "Vault-Recovery-\(safeAccountName.isEmpty ? "Account" : safeAccountName)"
             showingVaultExport = true
         } catch {
             vaultRecoveryMessage = "Could not prepare the vault recovery file: \(error.localizedDescription)"
