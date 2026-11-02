@@ -508,6 +508,7 @@ struct SendSession: Identifiable, Equatable {
     var sendMax: Bool
     var feeChoice: String
     var customFeeText: String
+    var labelDraft = SendLabelDraft()
     var unsignedPSKB: String?
     var verifiedDigest: String?
     var stage: SendSessionStage

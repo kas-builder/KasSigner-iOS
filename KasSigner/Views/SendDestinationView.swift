@@ -48,9 +48,7 @@ struct SendDestinationView: View {
     @State private var sendMax = false
     @State private var selectedFee: SendFeeChoice = .normal
     @State private var customFeeText = ""
-    @State private var draftLabel = ""
-    @State private var includesLabelInTransactionCard = false
-    @State private var includesLabelInUTXOCard = false
+    @State private var labelDraft = SendLabelDraft()
     @State private var addressScanRequest: SendAddressScanRequest?
     @State private var unsignedPSKB: String?
     @State private var showingBuildError = false
@@ -456,6 +454,9 @@ struct SendDestinationView: View {
         .onChange(of: amountText) { _, _ in
             persistSendSession()
             scheduleLivePlanResolution()
+        }
+        .onChange(of: labelDraft) { _, _ in
+            persistSendSession()
         }
         .onChange(of: sendMax) { _, enabled in
             persistSendSession()
@@ -1092,6 +1093,7 @@ struct SendDestinationView: View {
                 session.verifiedDigest = SHA256.hash(
                     data: Data(pskb.utf8)
                 ).map { String(format: "%02x", $0) }.joined()
+                session.labelDraft = labelDraft
                 session.stage = .verified
                 walletStore.updateSendSession(session)
             }
@@ -1117,7 +1119,11 @@ struct SendDestinationView: View {
                 selectedInputsVerified: true,
                 destinationVerified: true,
                 changeVerified: true,
-                feeVerified: true
+                feeVerified: true,
+                labelAssignment: BroadcastLabelAssignment.make(
+                    profile: activeProfile, draft: labelDraft,
+                    changeOutputs: verifiedChangeOutputs, outputs: outputs
+                )
             )
         } catch {
             showBuildError(error.localizedDescription)
@@ -1135,6 +1141,7 @@ struct SendDestinationView: View {
             id: sessionID,
             profileID: profile.id
         ) else { return }
+        labelDraft = session.labelDraft
         destinationAddress = session.destination
         amountText = session.amountText
         if let primaryRecipient = session.recipients.first {
@@ -1159,6 +1166,7 @@ struct SendDestinationView: View {
             id: sessionID,
             profileID: profile.id
         ) else { return }
+        session.labelDraft = labelDraft
         session.destination = destinationAddress
         session.amountText = amountText
         if session.recipients.isEmpty {
@@ -1188,6 +1196,7 @@ struct SendDestinationView: View {
         destinationAddress = ""
         amountText = ""
         customFeeText = ""
+        labelDraft = SendLabelDraft()
         showingSendFlow = false
     }
 
@@ -1693,12 +1702,22 @@ struct SendDestinationView: View {
         .sendStyleCard()
     }
 
+    private var labelChangeOutputCount: Int {
+        guard !sendMax else { return 0 }
+        if requiresLiveChangePlan {
+            guard !isResolvingLivePlan, livePlanError == nil, resolvedChangeFeeSompi != nil else { return 0 }
+            return changeOutputs.filter { $0.amountSompi > 0 }.count
+        }
+        guard let availableChangeSompi, availableChangeSompi > 0 else { return 0 }
+        return max(1, changeOutputs.count)
+    }
+
     private var labelCard: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Label")
                 .font(.headline)
 
-            TextField("Optional label", text: $draftLabel, axis: .vertical)
+            TextField("Optional label", text: $labelDraft.text, axis: .vertical)
                 .font(.subheadline)
                 .lineLimit(1...3)
                 .padding(12)
@@ -1715,18 +1734,24 @@ struct SendDestinationView: View {
             VStack(spacing: 0) {
                 labelCheckbox(
                     "Include label in transaction card",
-                    isChecked: $includesLabelInTransactionCard
+                    isChecked: $labelDraft.includeInTransactionCard
                 )
                 labelCheckbox(
-                    "Include label in UTXO card",
-                    isChecked: $includesLabelInUTXOCard
+                    labelChangeOutputCount > 1
+                        ? "Include label in change UTXO cards"
+                        : "Include label in change UTXO card",
+                    isChecked: Binding(
+                        get: { labelChangeOutputCount > 0 && labelDraft.includeInChangeUTXOCards },
+                        set: { labelDraft.includeInChangeUTXOCards = $0 }
+                    ),
+                    isEnabled: labelChangeOutputCount > 0
                 )
             }
         }
         .sendStyleCard()
     }
 
-    private func labelCheckbox(_ title: String, isChecked: Binding<Bool>) -> some View {
+    private func labelCheckbox(_ title: String, isChecked: Binding<Bool>, isEnabled: Bool = true) -> some View {
         Button {
             isChecked.wrappedValue.toggle()
         } label: {
@@ -1747,8 +1772,10 @@ struct SendDestinationView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.4)
         .accessibilityLabel(title)
-        .accessibilityValue(isChecked.wrappedValue ? "Checked" : "Unchecked")
+        .accessibilityValue(isEnabled ? (isChecked.wrappedValue ? "Checked" : "Unchecked") : "Unavailable")
         .accessibilityAddTraits(isChecked.wrappedValue ? .isSelected : [])
     }
 
@@ -2128,6 +2155,7 @@ struct VerifiedTransactionReview: Identifiable, Hashable {
     let destinationVerified: Bool
     let changeVerified: Bool
     let feeVerified: Bool
+    var labelAssignment: BroadcastLabelAssignment? = nil
 
     var recipientTotalSompi: UInt64 {
         recipients.reduce(0) { $0 &+ $1.amountSompi }
@@ -2193,6 +2221,8 @@ private struct VerifiedTransactionReviewView: View {
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var appLockService: AppLockService
+
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
 
     @State private var showingSigning = false
     @State private var isCheckingReviewFee = false
@@ -2496,6 +2526,11 @@ private struct VerifiedTransactionReviewView: View {
             let txid = try await engine.broadcastSignedPSKB(signed,
                 nodeConfiguration: preferences.nodeConfiguration)
             testnetTransactionID = txid
+            let labelsForBroadcast = review.labelAssignment.flatMap {
+                BroadcastLabelAssignment.make(profile: $0.profile, draft: $0.draft,
+                                              changeOutputs: $0.changeOutputs, outputs: signedSummary.outputs ?? [])
+            }
+            coinControlStore.saveBroadcastLabels(labelsForBroadcast, transactionID: txid)
             let recorded = walletStore.recordBroadcastedTransaction(
                 profileID: review.profileID, transactionID: txid,
                 destination: review.recipients.count == 1
@@ -2602,7 +2637,34 @@ private struct VerifiedTransactionSummaryCards: View {
                     accessibilityLabel: "Copy change address"
                 )
             }
+            if let draft = review.labelAssignment?.draft, draft.hasSelection {
+                labelCard(draft.trimmedText)
+            }
         }
+    }
+
+    private func labelCard(_ label: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Label")
+                .font(.title3.weight(.semibold))
+
+            Text(label)
+                .font(.body)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color(.tertiarySystemGroupedBackground),
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 
     private func changeOutputTitle(index: Int, count: Int) -> String {
@@ -2741,6 +2803,7 @@ struct VerifiedSigningPreparationView: View {
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var coinControlStore: UTXOCoinControlStore
 
     let review: VerifiedTransactionReview
     let onComplete: () -> Void
@@ -3197,6 +3260,20 @@ struct VerifiedSigningPreparationView: View {
         }
 
         do {
+            // Use the final signed output order for outpoint labels. The signer
+            // may return outputs in a different order from the original draft.
+            let labelsForBroadcast: BroadcastLabelAssignment?
+            if let requested = review.labelAssignment {
+                let network: KaspaNetwork = requested.profile.network == "testnet-10" ? .testnet10 : .mainnet
+                let summary = try await engine.summarizePSKB(verifiedSignedPSKBForBroadcast, network: network)
+                guard let outputs = summary.outputs else { throw SendVerificationError.missingOutputs }
+                labelsForBroadcast = BroadcastLabelAssignment.make(
+                    profile: requested.profile, draft: requested.draft,
+                    changeOutputs: requested.changeOutputs, outputs: outputs
+                )
+            } else {
+                labelsForBroadcast = nil
+            }
             let rawTransactionID: String
             if protectedVaultMode {
                 rawTransactionID = try await engine.broadcastSignedPSKB(
@@ -3212,6 +3289,7 @@ struct VerifiedSigningPreparationView: View {
                 in: CharacterSet.whitespacesAndNewlines
             )
 
+            coinControlStore.saveBroadcastLabels(labelsForBroadcast, transactionID: transactionID)
             let recorded = walletStore.recordBroadcastedTransaction(
                 profileID: review.profileID,
                 transactionID: transactionID,

@@ -647,3 +647,203 @@ final class WalletCardMetadataPersistenceTests: XCTestCase {
         XCTAssertEqual(restored.kycStatus(for: utxo("incoming")), .kyc)
     }
 }
+
+@MainActor
+final class SendLabelPersistenceTests: XCTestCase {
+    private var root: URL!
+    private var defaults: UserDefaults!
+    private var suite: String!
+    private var storage: ProtectedWalletStorage { ProtectedWalletStorage(directoryURL: root) }
+
+    override func setUp() async throws {
+        try await super.setUp()
+        root = FileManager.default.temporaryDirectory.appending(path: "SendLabels-\(UUID().uuidString)")
+        suite = "SendLabels.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suite)!
+    }
+
+    override func tearDown() async throws {
+        defaults.removePersistentDomain(forName: suite)
+        if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+        try await super.tearDown()
+    }
+
+    private func profile(_ network: String = "mainnet") -> WalletProfile {
+        WalletProfile(name: "Wallet", kpub: "send-labels", network: network,
+                      receiveAddresses: ["owned-receive"], changeAddresses: ["owned-change", "owned-change-2"])
+    }
+    private func output(_ address: String?, amount: UInt64 = 100) -> PSKTSummaryOutput {
+        PSKTSummaryOutput(address: address, amountSompi: amount)
+    }
+    private func change(_ address: String = "owned-change", amount: UInt64 = 100, index: Int = 0) -> PlannedChangeOutput {
+        PlannedChangeOutput(addressIndex: index, address: address, amountSompi: amount)
+    }
+    private func utxo(_ id: String, _ index: UInt32 = 0) -> WalletUTXO {
+        WalletUTXO(txID: id, index: index, amount: 100, scriptPublicKey: [], blockDAAScore: 1, covenantID: nil)
+    }
+    private func makeStore() -> UTXOCoinControlStore {
+        UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+    }
+
+    func testAllCheckboxCombinationsPersistOnlySelectedCardsOnBothNetworks() throws {
+        for network in ["mainnet", "testnet-10"] {
+            let wallet = profile(network)
+            let coins = makeStore()
+            coins.activate(profile: wallet)
+            coins.setLabel("Input stays", for: utxo("input"))
+            coins.setKYCStatus(.nonKYC, for: utxo("input"))
+            for transactionCard in [false, true] {
+                for utxoCard in [false, true] {
+                    let id = "tx-\(transactionCard)-\(utxoCard)"
+                    let draft = SendLabelDraft(text: "  Payment label  ", includeInTransactionCard: transactionCard,
+                                              includeInChangeUTXOCards: utxoCard)
+                    let assignment = BroadcastLabelAssignment.make(profile: wallet, draft: draft,
+                        changeOutputs: [change()], outputs: [output("owned-change"), output("external"), output("owned-receive"), output(nil)])
+                    XCTAssertTrue(coins.saveBroadcastLabels(assignment, transactionID: " \(id.uppercased()) "))
+                    coins.removeProfileSession(profileID: wallet.id)
+                    let restored = makeStore()
+                    restored.activate(profile: WalletProfile(name: "Reimport", kpub: wallet.kpub, network: network))
+                    XCTAssertEqual(restored.label(forTransactionID: id), transactionCard ? "Payment label" : "")
+                    XCTAssertEqual(restored.label(for: utxo(id, 0)), utxoCard ? "Payment label" : "")
+                    XCTAssertEqual(restored.label(for: utxo(id, 2)), "")
+                    XCTAssertEqual(restored.label(for: utxo(id, 1)), "")
+                    XCTAssertEqual(restored.label(for: utxo(id, 3)), "")
+                    XCTAssertEqual(restored.label(for: utxo("input")), "Input stays")
+                    XCTAssertEqual(restored.kycStatus(for: utxo("input")), .nonKYC)
+                }
+            }
+        }
+    }
+
+    func testDraftCreationBlankLabelsAndUncheckedBoxesDoNotWriteOrEraseExistingLabels() throws {
+        let wallet = profile()
+        let coins = makeStore()
+        coins.activate(profile: wallet)
+        coins.setLabel("Keep transaction", forTransactionID: "broadcast")
+        coins.setLabel("Keep UTXO", for: utxo("broadcast"))
+        let file = root.appending(path: "wallet-card-metadata-\(wallet.stableIdentity).json")
+        let before = try Data(contentsOf: file)
+        let unusedDraft = BroadcastLabelAssignment.make(profile: wallet,
+            draft: SendLabelDraft(text: "Draft only", includeInTransactionCard: true, includeInChangeUTXOCards: true),
+            changeOutputs: [change()], outputs: [output("owned-change")])
+        XCTAssertNotNil(unusedDraft)
+        XCTAssertEqual(try Data(contentsOf: file), before) // Not saved before broadcast.
+        for draft in [SendLabelDraft(), SendLabelDraft(text: "Unchecked", includeInTransactionCard: false),
+                      SendLabelDraft(text: " \n ", includeInTransactionCard: true, includeInChangeUTXOCards: true)] {
+            let assignment = BroadcastLabelAssignment.make(profile: wallet, draft: draft, changeOutputs: [change()], outputs: [output("owned-change")])
+            XCTAssertNil(assignment)
+            XCTAssertTrue(coins.saveBroadcastLabels(assignment, transactionID: "broadcast"))
+            XCTAssertEqual(try Data(contentsOf: file), before)
+        }
+    }
+
+    func testActualOutputIndexesMatchOnlyVerifiedChangeIncludingMultipleAddresses() throws {
+        let wallet = profile()
+        let draft = SendLabelDraft(text: "Change label", includeInTransactionCard: false, includeInChangeUTXOCards: true)
+        let plan = [change(), change("owned-change-2", amount: 200, index: 1)]
+        let original = try XCTUnwrap(BroadcastLabelAssignment.make(profile: wallet, draft: draft,
+            changeOutputs: plan,
+            outputs: [output("owned-change"), output("external"), output("owned-receive"),
+                      output("owned-change-2", amount: 200), output("owned-change", amount: 999)]))
+        XCTAssertEqual(original.changeOutputIndices, [0, 3])
+        let signedOrder = try XCTUnwrap(BroadcastLabelAssignment.make(profile: wallet, draft: draft,
+            changeOutputs: plan,
+            outputs: [output("external"), output(" OWNED-RECEIVE "), output("owned-change-2", amount: 200),
+                      output(" OWNED-CHANGE "), output("owned-change", amount: 999)]))
+        XCTAssertEqual(signedOrder.changeOutputIndices, [2, 3])
+        let coins = makeStore()
+        coins.activate(profile: wallet)
+        XCTAssertTrue(coins.saveBroadcastLabels(signedOrder, transactionID: "broadcast"))
+        XCTAssertEqual(coins.label(for: utxo("broadcast", 2)), "Change label")
+        XCTAssertEqual(coins.label(for: utxo("broadcast", 3)), "Change label")
+        XCTAssertEqual(coins.label(for: utxo("broadcast", 1)), "")
+        XCTAssertEqual(coins.label(for: utxo("broadcast", 4)), "")
+        XCTAssertEqual(coins.label(forTransactionID: "broadcast"), "")
+    }
+
+    func testNoChangeIgnoresStaleCheckboxAndStillLabelsTransactionByDefault() throws {
+        let wallet = profile()
+        let draft = SendLabelDraft(text: "Send Max", includeInChangeUTXOCards: true)
+        // Even a payment to a known change address is not a change output when
+        // the verified change plan is empty, as with Send Max.
+        let assignment = try XCTUnwrap(BroadcastLabelAssignment.make(profile: wallet, draft: draft,
+            changeOutputs: [], outputs: [output("owned-change")]))
+        XCTAssertTrue(assignment.draft.includeInTransactionCard)
+        XCTAssertFalse(assignment.draft.includeInChangeUTXOCards)
+        XCTAssertTrue(assignment.changeOutputIndices.isEmpty)
+        let coins = makeStore()
+        coins.activate(profile: wallet)
+        XCTAssertTrue(coins.saveBroadcastLabels(assignment, transactionID: "send-max"))
+        XCTAssertEqual(coins.label(forTransactionID: "send-max"), "Send Max")
+        XCTAssertEqual(coins.label(for: utxo("send-max")), "")
+        let changeOnly = SendLabelDraft(text: "Unused", includeInTransactionCard: false, includeInChangeUTXOCards: true)
+        XCTAssertNil(BroadcastLabelAssignment.make(profile: wallet, draft: changeOnly,
+                                                  changeOutputs: [], outputs: [output("external")]))
+    }
+
+    func testBroadcastSaveTargetsOriginatingWalletAfterSelectionChangesOrRemoval() throws {
+        let origin = profile()
+        let current = profile("testnet-10") // Same kpub, different network.
+        let assignment = try XCTUnwrap(BroadcastLabelAssignment.make(profile: origin,
+            draft: SendLabelDraft(text: "Origin label", includeInTransactionCard: true, includeInChangeUTXOCards: true),
+            changeOutputs: [change()], outputs: [output("owned-change")]))
+        let coins = makeStore()
+        coins.activate(profile: origin)
+        coins.removeProfileSession(profileID: origin.id)
+        coins.activate(profile: current)
+        coins.setLabel("Current wallet", forTransactionID: "broadcast")
+        XCTAssertTrue(coins.saveBroadcastLabels(assignment, transactionID: "broadcast"))
+        XCTAssertEqual(coins.label(forTransactionID: "broadcast"), "Current wallet")
+        XCTAssertEqual(coins.label(for: utxo("broadcast")), "")
+        let restored = makeStore()
+        restored.activate(profile: WalletProfile(name: "Reimport", kpub: origin.kpub))
+        XCTAssertEqual(restored.label(forTransactionID: "broadcast"), "Origin label")
+        XCTAssertEqual(restored.label(for: utxo("broadcast")), "Origin label")
+    }
+
+    func testSaveFailurePreservesExistingLabelsAndReportsBroadcastSucceeded() throws {
+        let wallet = profile()
+        let coins = makeStore()
+        coins.activate(profile: wallet)
+        coins.setLabel("Previous transaction", forTransactionID: "broadcast")
+        coins.setLabel("Previous output", for: utxo("broadcast"))
+        let assignment = try XCTUnwrap(BroadcastLabelAssignment.make(profile: wallet,
+            draft: SendLabelDraft(text: "Replacement", includeInTransactionCard: true, includeInChangeUTXOCards: true),
+            changeOutputs: [change()], outputs: [output("owned-change")]))
+        let file = root.appending(path: "wallet-card-metadata-\(wallet.stableIdentity).json")
+        let bytes = try Data(contentsOf: file)
+        let backup = root.appending(path: "backup.json")
+        try FileManager.default.moveItem(at: file, to: backup)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        XCTAssertFalse(coins.saveBroadcastLabels(assignment, transactionID: "broadcast"))
+        XCTAssertEqual(coins.label(forTransactionID: "broadcast"), "Previous transaction")
+        XCTAssertEqual(coins.label(for: utxo("broadcast")), "Previous output")
+        XCTAssertTrue(coins.persistenceAlert?.contains("transaction was broadcast") == true)
+        XCTAssertEqual(try Data(contentsOf: backup), bytes)
+    }
+
+    func testSendSessionKeepsLabelChoicesInMemoryAndNewSessionsUseAgreedDefaults() throws {
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"))
+        let profile = profile()
+        XCTAssertTrue(wallet.add(profile))
+        var session = try XCTUnwrap(wallet.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo("input")]))
+        XCTAssertEqual(session.labelDraft, SendLabelDraft())
+        XCTAssertTrue(session.labelDraft.includeInTransactionCard)
+        XCTAssertFalse(session.labelDraft.includeInChangeUTXOCards)
+        let draft = SendLabelDraft(text: "Session label", includeInTransactionCard: true, includeInChangeUTXOCards: true)
+        session.labelDraft = draft
+        wallet.updateSendSession(session)
+        XCTAssertEqual(wallet.sendSession(id: session.id, profileID: profile.id)?.labelDraft, draft)
+        wallet.cancelSendSession(id: session.id, profileID: profile.id)
+        let fresh = try XCTUnwrap(wallet.beginSendSession(profileID: profile.id, selectedUTXOs: [utxo("input")]))
+        XCTAssertEqual(fresh.labelDraft, SendLabelDraft())
+        XCTAssertTrue(fresh.labelDraft.includeInTransactionCard)
+        XCTAssertFalse(fresh.labelDraft.includeInChangeUTXOCards)
+        let restarted = WalletStore(protectedStorage: storage, defaults: defaults,
+                                    transactionCacheDirectoryURL: root.appending(path: "history"))
+        XCTAssertTrue(restarted.sendSessions.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath:
+            root.appending(path: "wallet-card-metadata-\(profile.stableIdentity).json").path))
+    }
+}

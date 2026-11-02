@@ -108,6 +108,54 @@ enum UTXOKYCStatus: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+struct SendLabelDraft: Equatable {
+    var text = ""
+    var includeInTransactionCard = true
+    var includeInChangeUTXOCards = false
+
+    var trimmedText: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    var hasSelection: Bool {
+        !trimmedText.isEmpty && (includeInTransactionCard || includeInChangeUTXOCards)
+    }
+}
+
+/// Local metadata only: never encoded into the PSKT or signing QR payload.
+struct BroadcastLabelAssignment {
+    let profile: WalletProfile
+    let draft: SendLabelDraft
+    let changeOutputs: [PlannedChangeOutput]
+    let changeOutputIndices: [UInt32]
+
+    static func make(profile: WalletProfile, draft: SendLabelDraft,
+                     changeOutputs: [PlannedChangeOutput],
+                     outputs: [PSKTSummaryOutput]) -> BroadcastLabelAssignment? {
+        let ownedChangeAddresses = Set(profile.changeAddresses.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        })
+        let eligibleChange = changeOutputs.filter {
+            $0.amountSompi > 0 && ownedChangeAddresses.contains($0.address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        }
+        // Match the verified change plan by address AND amount, consuming each
+        // planned output once. A wallet-owned payment is not automatically change.
+        var remaining: [String: Int] = [:]
+        for change in eligibleChange {
+            remaining["\(change.address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(change.amountSompi)", default: 0] += 1
+        }
+        let indices = outputs.enumerated().compactMap { index, output -> UInt32? in
+            guard let address = output.address, let amount = output.amountSompi else { return nil }
+            let key = "\(address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())|\(amount)"
+            guard remaining[key, default: 0] > 0, let outputIndex = UInt32(exactly: index) else { return nil }
+            remaining[key, default: 0] -= 1
+            return outputIndex
+        }
+        var effectiveDraft = draft
+        effectiveDraft.includeInChangeUTXOCards = draft.includeInChangeUTXOCards && !indices.isEmpty
+        guard effectiveDraft.hasSelection else { return nil }
+        return BroadcastLabelAssignment(profile: profile, draft: effectiveDraft,
+                                        changeOutputs: eligibleChange, changeOutputIndices: indices)
+    }
+}
+
 private struct WalletCardMetadata: Codable {
     var labels: [String: String] = [:]
     var kycStatuses: [String: UTXOKYCStatus] = [:]
@@ -265,6 +313,41 @@ final class UTXOCoinControlStore: ObservableObject {
     func removeProfileSession(profileID: UUID) {
         defaults.removeObject(forKey: "kassigner.utxoSelection.v1." + profileID.uuidString)
         if activeProfile?.id == profileID { activate(profile: nil) }
+    }
+
+    /// Call only after broadcast succeeds. Save both card choices atomically,
+    /// using the originating wallet, independently of the current selection.
+    @discardableResult
+    func saveBroadcastLabels(_ assignment: BroadcastLabelAssignment?, transactionID: String) -> Bool {
+        guard let assignment, assignment.draft.hasSelection else { return true }
+        let transactionID = normalized(transactionID)
+        guard !transactionID.isEmpty else {
+            persistenceAlert = "The transaction was broadcast, but its label could not be saved because its transaction ID was missing."
+            return false
+        }
+        do {
+            var saved = try loadMetadata(for: assignment.profile)
+            if assignment.draft.includeInTransactionCard {
+                saved.labels[transactionLabelKey(transactionID)] = assignment.draft.trimmedText
+            }
+            if assignment.draft.includeInChangeUTXOCards {
+                for index in assignment.changeOutputIndices {
+                    saved.labels["\(transactionID):\(index)"] = assignment.draft.trimmedText
+                }
+            }
+            guard protectedStorage.save(saved, fileName: fileName(assignment.profile)) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            if activeProfile?.stableIdentity == assignment.profile.stableIdentity {
+                metadata = saved
+                labels = saved.labels
+                kycStatuses = saved.kycStatuses
+            }
+            return true
+        } catch {
+            persistenceAlert = "The transaction was broadcast, but its label could not be saved. Check device storage before editing its labels again."
+            return false
+        }
     }
 
     private func loadMetadata(for profile: WalletProfile) throws -> WalletCardMetadata {
