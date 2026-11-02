@@ -379,12 +379,6 @@ struct ActivityView: View {
             )
         }
 
-        if profile.network == KaspaNetwork.testnet10.rawValue {
-            await syncService.refreshVirtualBlueScore(force: force)
-            walletStore.reloadCachedTransactions(profileID: profileID)
-            return
-        }
-
         await syncService.refreshTransactionHistory(
             profile: profile,
             walletStore: walletStore,

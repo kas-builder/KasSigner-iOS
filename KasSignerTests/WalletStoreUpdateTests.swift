@@ -847,3 +847,710 @@ final class SendLabelPersistenceTests: XCTestCase {
             root.appending(path: "wallet-card-metadata-\(profile.stableIdentity).json").path))
     }
 }
+
+@MainActor
+final class TestnetAccountImportCoordinatorTests: XCTestCase {
+    private var root: URL!
+    private var defaults: UserDefaults!
+    private var suite: String!
+    private var storage: ProtectedWalletStorage { ProtectedWalletStorage(directoryURL: root.appending(path: "accounts")) }
+    private var result: TestnetHotWalletImportResult {
+        TestnetHotWalletImportResult(mnemonic: "synthetic import fixture", wallet:
+            WalletImportResult(kpub: "testnet-import-fixture", receiveAddresses: ["receive"], changeAddresses: ["change"]))
+    }
+    private var failure: NSError { NSError(domain: "ImportFixture", code: 1) }
+
+    override func setUp() async throws {
+        try await super.setUp()
+        root = FileManager.default.temporaryDirectory.appending(path: "TestnetImport-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        suite = "TestnetImport.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suite)!
+    }
+    override func tearDown() async throws {
+        defaults.removePersistentDomain(forName: suite)
+        try FileManager.default.removeItem(at: root)
+        try await super.tearDown()
+    }
+    private func makeWallet() -> WalletStore {
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        wallet.activateNetwork(.testnet10)
+        return wallet
+    }
+
+    func testSuccessfulImportPublishesProgressAndSavesExactlyOneAccountAndSeed() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        var stages: [TestnetAccountImportCoordinator.Stage] = []
+        let subscription = coordinator.$stage.sink { stages.append($0) }
+        defer { subscription.cancel() }
+        var seedIDs: [UUID] = []
+        var recovered: [UUID] = []
+        let success = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in seedIDs.append(id) }, removeSeed: { _ in XCTFail("Saved seed must be retained") },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { recovered.append($0.id) })
+        XCTAssertTrue(success)
+        let profile = try XCTUnwrap(wallet.profiles.first)
+        XCTAssertEqual(wallet.profiles.count, 1)
+        XCTAssertEqual(seedIDs, [profile.id])
+        XCTAssertEqual(recovered, [profile.id])
+        XCTAssertFalse(profile.requiresTestnetVaultRecovery)
+        XCTAssertFalse(profile.requiresInitialDiscovery)
+        XCTAssertFalse(profile.requiresInitialHistorySync)
+        XCTAssertEqual(profile.network, "testnet-10")
+        XCTAssertEqual(coordinator.savedProfileID, profile.id)
+        XCTAssertTrue(stages.contains(.savingAccount))
+        XCTAssertTrue(stages.contains(.restoringVaults))
+        XCTAssertTrue(stages.contains(.checkingOlderVaults))
+        XCTAssertEqual(coordinator.stage, .complete)
+        XCTAssertNil(coordinator.errorMessage)
+        XCTAssertTrue(coordinator.close(removeSeed: { _ in XCTFail("Close keeps saved account") }))
+        coordinator.reset()
+        XCTAssertEqual(wallet.profiles.count, 1)
+    }
+
+    func testRetryAfterReassociationFailureReusesAccountAndSeed() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        var seeds: [UUID] = []
+        let first = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in seeds.append(id) }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in false }, recoverLegacyVaults: { _ in XCTFail() })
+        XCTAssertFalse(first)
+        let saved = try XCTUnwrap(wallet.profiles.first)
+        XCTAssertTrue(saved.requiresTestnetVaultRecovery)
+        var premature = saved
+        premature.requiresTestnetVaultRecovery = false
+        XCTAssertTrue(wallet.update(premature))
+        XCTAssertTrue(wallet.profiles[0].requiresTestnetVaultRecovery)
+        XCTAssertTrue(coordinator.hasSavedAccount)
+        XCTAssertTrue(coordinator.errorMessage?.contains("account was saved") == true)
+        let retry = await coordinator.finish(result: result, name: "Retry name", walletStore: wallet,
+            saveSeed: { _, _ in XCTFail("Must not save another seed") }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { profile in XCTAssertEqual(profile.id, saved.id); return true },
+            recoverLegacyVaults: { profile in XCTAssertEqual(profile.id, saved.id) })
+        XCTAssertTrue(retry)
+        XCTAssertEqual(seeds, [saved.id])
+        XCTAssertEqual(wallet.profiles.count, 1)
+        XCTAssertEqual(wallet.profiles.first?.id, saved.id)
+        XCTAssertEqual(wallet.profiles.first?.name, "Imported")
+        XCTAssertFalse(wallet.profiles[0].requiresTestnetVaultRecovery)
+        XCTAssertTrue(wallet.update(saved)) // A late balance sync must not revive the checkpoint.
+        XCTAssertFalse(wallet.profiles[0].requiresTestnetVaultRecovery)
+    }
+
+    func testLegacyRecoveryFailureCanCloseAndRetryAfterRelaunchWithoutCreatingAnotherAccount() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        let failed = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, _ in }, removeSeed: { _ in XCTFail() }, reassociateVaults: { _ in true },
+            recoverLegacyVaults: { _ in throw self.failure })
+        XCTAssertFalse(failed)
+        let id = try XCTUnwrap(coordinator.savedProfileID)
+        XCTAssertTrue(coordinator.errorMessage?.contains("older vault records") == true)
+        XCTAssertTrue(coordinator.close(removeSeed: { _ in XCTFail("Closing a saved account must keep its seed") }))
+        coordinator.reset()
+        let relaunchedWallet = makeWallet()
+        XCTAssertTrue(relaunchedWallet.profiles[0].requiresTestnetVaultRecovery)
+        let retry = TestnetAccountImportCoordinator()
+        let finished = await retry.finish(result: result, name: "Retry", walletStore: relaunchedWallet,
+            saveSeed: { _, _ in XCTFail() }, removeSeed: { _ in XCTFail() }, reassociateVaults: { _ in true },
+            recoverLegacyVaults: { profile in XCTAssertEqual(profile.id, id) })
+        XCTAssertTrue(finished)
+        XCTAssertEqual(relaunchedWallet.profiles.map(\.id), [id])
+        XCTAssertFalse(relaunchedWallet.profiles[0].requiresTestnetVaultRecovery)
+    }
+
+    func testDuplicateAddedBeforeFinalSubmissionIsReusedWithoutSeedWrites() async throws {
+        let wallet = makeWallet()
+        let existing = WalletProfile(name: "Existing", kpub: result.wallet.kpub, network: "testnet-10")
+        XCTAssertTrue(wallet.add(existing))
+        let coordinator = TestnetAccountImportCoordinator()
+        let finished = await coordinator.finish(result: result, name: "Duplicate", walletStore: wallet,
+            saveSeed: { _, _ in XCTFail() }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in XCTFail(); return false }, recoverLegacyVaults: { _ in XCTFail() })
+        XCTAssertTrue(finished)
+        XCTAssertEqual(coordinator.savedProfileID, existing.id)
+        XCTAssertEqual(wallet.profiles, [existing])
+    }
+
+    func testMainnetAccountDoesNotBlockTestnetImportWithSamePublicKey() async throws {
+        let wallet = makeWallet()
+        XCTAssertTrue(wallet.add(WalletProfile(name: "Main", kpub: result.wallet.kpub)))
+        let coordinator = TestnetAccountImportCoordinator()
+        let finished = await coordinator.finish(result: result, name: "Test", walletStore: wallet,
+            saveSeed: { _, _ in }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+        XCTAssertTrue(finished)
+        XCTAssertEqual(wallet.profiles.count, 2)
+        XCTAssertEqual(Set(wallet.profiles.map(\.network)), ["mainnet", "testnet-10"])
+    }
+
+    func testSecureStorageFailureLeavesNoAccountAndRetriesSameCandidateID() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        var attemptedIDs: [UUID] = []
+        let failed = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in attemptedIDs.append(id); throw self.failure }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in XCTFail(); return true }, recoverLegacyVaults: { _ in XCTFail() })
+        XCTAssertFalse(failed)
+        XCTAssertTrue(wallet.profiles.isEmpty)
+        XCTAssertFalse(coordinator.hasSavedAccount)
+        XCTAssertFalse(coordinator.needsSeedCleanup)
+        XCTAssertTrue(coordinator.errorMessage?.contains("account was not saved") == true)
+        let retried = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in attemptedIDs.append(id) }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+        XCTAssertTrue(retried)
+        XCTAssertEqual(attemptedIDs.count, 2)
+        XCTAssertEqual(attemptedIDs[0], attemptedIDs[1])
+        XCTAssertEqual(wallet.profiles.count, 1)
+    }
+
+    func testFailedAccountSaveRollsBackSeedAndCancelLeavesNoAccount() async throws {
+        let wallet = makeWallet()
+        // Obstruct protected account storage after initialization.
+        try FileManager.default.removeItem(at: storage.directoryURL)
+        try Data("blocked".utf8).write(to: storage.directoryURL)
+        let coordinator = TestnetAccountImportCoordinator()
+        var seedID: UUID?
+        var removedIDs: [UUID] = []
+        let failed = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in seedID = id }, removeSeed: { removedIDs.append($0) },
+            reassociateVaults: { _ in XCTFail(); return false }, recoverLegacyVaults: { _ in XCTFail() })
+        XCTAssertFalse(failed)
+        XCTAssertEqual(removedIDs, [try XCTUnwrap(seedID)])
+        XCTAssertTrue(wallet.profiles.isEmpty)
+        XCTAssertFalse(coordinator.needsSeedCleanup)
+        XCTAssertTrue(coordinator.close(removeSeed: { _ in XCTFail() }))
+        coordinator.reset()
+        XCTAssertNil(coordinator.errorMessage)
+    }
+
+    func testCleanupFailureBlocksDiscardAndRetryDoesNotWriteAnotherSeed() async throws {
+        let wallet = makeWallet()
+        try FileManager.default.removeItem(at: storage.directoryURL)
+        try Data("blocked".utf8).write(to: storage.directoryURL)
+        let coordinator = TestnetAccountImportCoordinator()
+        var writtenID: UUID?
+        let failed = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, id in writtenID = id }, removeSeed: { _ in throw self.failure },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+        XCTAssertFalse(failed)
+        XCTAssertTrue(coordinator.needsSeedCleanup)
+        XCTAssertFalse(coordinator.close(removeSeed: { _ in throw self.failure }))
+        coordinator.reset()
+        XCTAssertTrue(coordinator.needsSeedCleanup)
+        try FileManager.default.removeItem(at: storage.directoryURL)
+        try FileManager.default.createDirectory(at: storage.directoryURL, withIntermediateDirectories: true)
+        let retried = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, _ in XCTFail("Reuse the seed already stored for this candidate") }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+        XCTAssertTrue(retried)
+        XCTAssertEqual(wallet.profiles.first?.id, writtenID)
+        XCTAssertFalse(coordinator.needsSeedCleanup)
+    }
+
+    func testBusySubmissionAndDismissalCannotRunTwice() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        var gate: CheckedContinuation<Void, Never>?
+        var finishedRunning = false
+        let task = Task { @MainActor in
+            defer { finishedRunning = true }
+            return await coordinator.finish(result: self.result, name: "Imported", walletStore: wallet,
+                saveSeed: { _, _ in }, removeSeed: { _ in XCTFail() }, reassociateVaults: { _ in true },
+                recoverLegacyVaults: { _ in await withCheckedContinuation { gate = $0 } })
+        }
+        while gate == nil && !finishedRunning { await Task.yield() }
+        guard let gate else {
+            XCTFail("Import did not reach the expected recovery stage")
+            _ = await task.value
+            return
+        }
+        XCTAssertTrue(coordinator.isRunning)
+        XCTAssertEqual(coordinator.stage, .checkingOlderVaults)
+        let repeated = await coordinator.finish(result: result, name: "Duplicate", walletStore: wallet,
+            saveSeed: { _, _ in XCTFail() }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in XCTFail(); return true }, recoverLegacyVaults: { _ in XCTFail() })
+        XCTAssertFalse(repeated)
+        XCTAssertFalse(coordinator.close(removeSeed: { _ in XCTFail() }))
+        coordinator.reset()
+        XCTAssertTrue(coordinator.isRunning)
+        gate.resume()
+        let finished = await task.value
+        XCTAssertTrue(finished)
+        XCTAssertEqual(wallet.profiles.count, 1)
+    }
+
+    func testCompletionSaveFailureKeepsDurableRecoveryCheckpoint() async throws {
+        let wallet = makeWallet()
+        let coordinator = TestnetAccountImportCoordinator()
+        let stateFile = storage.directoryURL.appending(path: "wallet-state.json")
+        let backup = root.appending(path: "saved-state.json")
+        let finished = await coordinator.finish(result: result, name: "Imported", walletStore: wallet,
+            saveSeed: { _, _ in }, removeSeed: { _ in XCTFail() }, reassociateVaults: { _ in true },
+            recoverLegacyVaults: { _ in
+                try FileManager.default.moveItem(at: stateFile, to: backup)
+                try FileManager.default.createDirectory(at: stateFile, withIntermediateDirectories: false)
+            })
+        XCTAssertFalse(finished)
+        XCTAssertTrue(coordinator.hasSavedAccount)
+        XCTAssertTrue(wallet.profiles[0].requiresTestnetVaultRecovery)
+        XCTAssertTrue(coordinator.errorMessage?.contains("completion could not be saved") == true)
+        try FileManager.default.removeItem(at: stateFile)
+        try FileManager.default.moveItem(at: backup, to: stateFile)
+        XCTAssertTrue(makeWallet().profiles[0].requiresTestnetVaultRecovery)
+        let retried = await coordinator.finish(result: result, name: "Retry", walletStore: wallet,
+            saveSeed: { _, _ in XCTFail() }, removeSeed: { _ in XCTFail() },
+            reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+        XCTAssertTrue(retried)
+        XCTAssertEqual(wallet.profiles.count, 1)
+    }
+
+    func testOlderProfilesDecodeWithoutRecoveryCheckpoint() throws {
+        let profile = WalletProfile(name: "Older", kpub: "older", network: "testnet-10")
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(profile)) as? [String: Any])
+        object.removeValue(forKey: "requiresTestnetVaultRecovery")
+        let decoded = try JSONDecoder().decode(WalletProfile.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertFalse(decoded.requiresTestnetVaultRecovery)
+        XCTAssertEqual(decoded.stableIdentity, profile.stableIdentity)
+    }
+}
+
+private final class TestnetActivityFixtureProtocol: URLProtocol {
+    private static let fixtureLock = NSLock()
+    private static var fixture: (@Sendable (URLRequest) throws -> (Int, Data))?
+    private static var responseHeaders: @Sendable (URLRequest) -> [String: String] = { _ in [:] }
+
+    static func install(_ handler: (@Sendable (URLRequest) throws -> (Int, Data))?,
+                        headers: @escaping @Sendable (URLRequest) -> [String: String] = { _ in [:] }) {
+        fixtureLock.withLock { fixture = handler; responseHeaders = headers }
+    }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        do {
+            let (handler, headerProvider) = Self.fixtureLock.withLock { (Self.fixture, Self.responseHeaders) }
+            guard let handler else { throw URLError(.badServerResponse) }
+            let (status, bytes) = try handler(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
+                                           headerFields: headerProvider(request).merging(["Content-Type": "application/json"]) { _, json in json })!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: bytes)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch { client?.urlProtocol(self, didFailWithError: error) }
+    }
+    override func stopLoading() {}
+    static func body(_ request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        return data
+    }
+}
+
+@MainActor
+final class TestnetDiscoveryAndIndexerTests: XCTestCase {
+    private func session() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [TestnetActivityFixtureProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+    private func candidates(_ network: KaspaNetwork) -> WalletImportResult {
+        WalletImportResult(kpub: "discovery-fixture",
+            receiveAddresses: (0..<512).map { "\(network.addressPrefix)receive-\($0)" },
+            changeAddresses: (0..<512).map { "\(network.addressPrefix)change-\($0)" })
+    }
+    private func profile(_ network: KaspaNetwork) -> WalletProfile {
+        let derived = candidates(network)
+        return WalletProfile(name: "Restore", kpub: derived.kpub, network: network.rawValue,
+            receiveAddresses: Array(derived.receiveAddresses.prefix(20)),
+            changeAddresses: Array(derived.changeAddresses.prefix(20)), requiresInitialDiscovery: true)
+    }
+
+    func testIndexerRequestContractsKeepNetworksSeparateAndPreservePagination() throws {
+        for network in KaspaNetwork.allCases {
+            let address = network.addressPrefix + "address"
+            let expectedHost = network == .testnet10 ? "api-tn10.kaspa.org" : "api.kaspa.org"
+            let page = KaspaIndexerAPI.historyPage(address: address, network: network, before: "123456")
+            XCTAssertEqual(page.url?.host, expectedHost)
+            XCTAssertEqual(page.url?.path, "/addresses/\(address)/full-transactions-page")
+            let query = URLComponents(url: page.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertTrue(query.contains(URLQueryItem(name: "before", value: "123456")))
+            XCTAssertTrue(query.contains(URLQueryItem(name: "limit", value: "500")))
+            XCTAssertTrue(query.contains(URLQueryItem(name: "resolve_previous_outpoints", value: "light")))
+            let single = KaspaIndexerAPI.transaction(id: "ABC", network: network)
+            XCTAssertEqual(single.url?.host, expectedHost)
+            XCTAssertEqual(single.url?.path, "/transactions/abc")
+            let batch = try KaspaIndexerAPI.transactionSearch(ids: ["ABC"], network: network)
+            XCTAssertEqual(batch.url?.host, expectedHost)
+            XCTAssertEqual(batch.httpMethod, "POST")
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: batch.httpBody!) as? [String: [String]])
+            XCTAssertEqual(payload["transactionIds"], ["abc"])
+            let activity = try KaspaIndexerAPI.activityRequests(addresses: [address], network: network)
+            XCTAssertEqual(activity.first?.url?.host, expectedHost)
+        }
+        XCTAssertThrowsError(try Testnet10AddressActivityClient.requests(for: ["kaspa:wrong-network"]))
+    }
+
+    func testHistoricalActivityChecksAllBatchesAndIncludesSpentOnlyAddresses() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil) }
+        let addresses = candidates(.testnet10).receiveAddresses + candidates(.testnet10).changeAddresses
+        let used: Set<String> = [addresses[301], addresses[512 + 187]]
+        TestnetActivityFixtureProtocol.install { request in
+            XCTAssertEqual(request.url?.host, "api-tn10.kaspa.org")
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: TestnetActivityFixtureProtocol.body(request)) as? [String: [String]])
+            let batch = try XCTUnwrap(payload["addresses"])
+            XCTAssertLessThanOrEqual(batch.count, 250)
+            let rows = batch.map { ["address": $0, "active": used.contains($0), "lastTxBlockTime": 1] as [String: Any] }
+            return (200, try JSONSerialization.data(withJSONObject: rows))
+        }
+        let found = try await Testnet10AddressActivityClient(session: session).activeAddresses(in: addresses)
+        XCTAssertEqual(found, used)
+    }
+
+    func testIncompleteDuplicateAndServerResponsesAreRejectedInsteadOfResettingIndexes() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil) }
+        let addresses = ["kaspatest:first", "kaspatest:second"]
+        let cases: [(Int, [[String: Any]])] = [
+            (200, []), (200, [["address": addresses[0], "active": false]]),
+            (200, [["address": addresses[0], "active": true], ["address": addresses[0], "active": true]]),
+            (403, []), (429, []), (503, [])
+        ]
+        for (status, rows) in cases {
+            let bytes = try JSONSerialization.data(withJSONObject: rows)
+            TestnetActivityFixtureProtocol.install { _ in (status, bytes) }
+            do {
+                _ = try await Testnet10AddressActivityClient(session: session).activeAddresses(in: addresses)
+                XCTFail("Incomplete or unavailable activity must not be treated as an unused wallet")
+            } catch {
+                if status != 200 { XCTAssertTrue(error.localizedDescription.contains("HTTP \(status)")) }
+            }
+        }
+    }
+
+    func testRestorationDiscoversHistoricalActivityBeyondInitialRangeOnBothChainsAndNetworks() async throws {
+        for network in KaspaNetwork.allCases {
+            let source = profile(network)
+            let derived = candidates(network)
+            let timestamp = Date(timeIntervalSince1970: 123456)
+            var progress: [Double] = []
+            let discovered = try await WalletSyncService.discoverHistoricalAddresses(profile: source,
+                extendAddresses: { wallet, receive, change in
+                    XCTAssertEqual(wallet.id, source.id)
+                    XCTAssertEqual(receive, 492)
+                    XCTAssertEqual(change, 492)
+                    return derived
+                }, activityLookup: { selectedNetwork, addresses in
+                    XCTAssertEqual(selectedNetwork, network)
+                    XCTAssertEqual(addresses.count, 1024)
+                    // Historical activity remains active even if every output was spent.
+                    return [derived.receiveAddresses[301], derived.changeAddresses[187]]
+                }, now: timestamp, progress: { progress.append($0.fraction) })
+            XCTAssertEqual(discovered.profile.nextReceiveIndex, 302)
+            XCTAssertEqual(discovered.profile.nextChangeIndex, 188)
+            XCTAssertEqual(discovered.profile.receiveAddresses.count, 352)
+            XCTAssertEqual(discovered.profile.changeAddresses.count, 238)
+            XCTAssertEqual(discovered.profile.lastHistoricalDiscoveryAt, timestamp)
+            XCTAssertEqual(discovered.profile.earliestFreshReceiveIndex, 0)
+            XCTAssertFalse(discovered.plan.reachedSafetyLimit)
+            XCTAssertEqual(progress, [0.12, 0.42])
+            XCTAssertEqual(source.receiveAddresses.count, 20)
+        }
+    }
+
+    func testEmptyHistoryKeepsFreshGapAndSafetyBoundaryIsExplicit() async throws {
+        let source = profile(.testnet10)
+        let derived = candidates(.testnet10)
+        let empty = try await WalletSyncService.discoverHistoricalAddresses(profile: source,
+            extendAddresses: { _, _, _ in derived }, activityLookup: { _, _ in [] })
+        XCTAssertEqual(empty.profile.receiveAddresses.count, 50)
+        XCTAssertEqual(empty.profile.changeAddresses.count, 50)
+        XCTAssertEqual(empty.profile.nextReceiveIndex, 0)
+        let boundary = try await WalletSyncService.discoverHistoricalAddresses(profile: source,
+            extendAddresses: { _, _, _ in derived }, activityLookup: { _, _ in [derived.receiveAddresses[511]] })
+        XCTAssertEqual(boundary.profile.nextReceiveIndex, 512)
+        XCTAssertEqual(boundary.profile.receiveAddresses.count, 512)
+        XCTAssertTrue(boundary.plan.reachedSafetyLimit)
+    }
+
+    func testDiscoveryFailureCancellationAndWrongNetworkDoNotReturnAPartialProfile() async throws {
+        let source = profile(.testnet10)
+        let derived = candidates(.testnet10)
+        for mode in 0..<3 {
+            do {
+                _ = try await WalletSyncService.discoverHistoricalAddresses(profile: source,
+                    extendAddresses: { _, _, _ in
+                        mode == 2 ? self.candidates(.mainnet) : derived
+                    }, activityLookup: { _, _ in
+                        if mode == 0 { throw URLError(.notConnectedToInternet) }
+                        if mode == 1 { throw CancellationError() }
+                        XCTFail("Wrong-network derivation must fail before HTTP activity lookup")
+                        return []
+                    })
+                XCTFail("Discovery should not return partially validated addresses")
+            } catch {}
+        }
+        XCTAssertEqual(source.nextReceiveIndex, 0)
+        XCTAssertEqual(source.receiveAddresses.count, 20)
+        XCTAssertNil(source.lastHistoricalDiscoveryAt)
+    }
+
+    func testRestoredAccountsRequireDiscoveryWhileGeneratedWalletsKeepLightweightSync() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "RestoreDiscovery-\(UUID().uuidString)")
+        let suite = "RestoreDiscovery.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        for restoring in [false, true] {
+            let derived = candidates(.testnet10)
+            let result = TestnetHotWalletImportResult(mnemonic: "synthetic fixture", wallet:
+                WalletImportResult(kpub: "fixture-\(restoring)", receiveAddresses: Array(derived.receiveAddresses.prefix(20)),
+                                   changeAddresses: Array(derived.changeAddresses.prefix(20))))
+            let coordinator = TestnetAccountImportCoordinator()
+            let saved = await coordinator.finish(result: result, name: "Wallet", isRestoring: restoring, walletStore: wallet,
+                saveSeed: { _, _ in }, removeSeed: { _ in XCTFail() }, reassociateVaults: { _ in true }, recoverLegacyVaults: { _ in })
+            XCTAssertTrue(saved)
+            let profile = try XCTUnwrap(wallet.profiles.first { $0.kpub == result.wallet.kpub })
+            XCTAssertEqual(profile.requiresInitialDiscovery, restoring)
+            XCTAssertEqual(profile.requiresInitialHistorySync, restoring)
+        }
+    }
+}
+
+private final class HistoryRequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Int] = [:]
+    func increment(_ key: String) -> Int {
+        lock.withLock { values[key, default: 0] += 1; return values[key]! }
+    }
+}
+
+@MainActor
+final class TestnetFullHistoryTests: XCTestCase {
+    private func session() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [TestnetActivityFixtureProtocol.self]
+        return URLSession(configuration: config)
+    }
+    private func profile(_ network: KaspaNetwork, kpub: String = "history-fixture") -> WalletProfile {
+        WalletProfile(name: "Restored", kpub: kpub, network: network.rawValue,
+            receiveAddresses: [network.addressPrefix + "receive"], changeAddresses: [network.addressPrefix + "change"],
+            requiresInitialHistorySync: true)
+    }
+    private func rows(_ network: KaspaNetwork) -> [[String: Any]] {
+        let receive = network.addressPrefix + "receive"
+        let change = network.addressPrefix + "change"
+        let outside = network.addressPrefix + "external"
+        return [
+            ["transaction_id": "incoming", "block_time": 1000, "is_accepted": true,
+             "accepting_block_blue_score": 42, "accepting_block_time": 1000,
+             "inputs": [["previous_outpoint_hash": "outside", "previous_outpoint_index": 0,
+                         "previous_outpoint_address": outside, "previous_outpoint_amount": 1000]],
+             "outputs": [["amount": 1000, "script_public_key_address": receive]]],
+            ["transaction_id": "outgoing", "block_time": 2000, "is_accepted": true,
+             "accepting_block_blue_score": 43, "accepting_block_time": 2000,
+             "inputs": [["previous_outpoint_hash": "source", "previous_outpoint_index": 0,
+                         "previous_outpoint_address": receive, "previous_outpoint_amount": 1000]],
+             "outputs": [["amount": 600, "script_public_key_address": outside],
+                         ["amount": 390, "script_public_key_address": change]]],
+            ["transaction_id": "internal", "block_time": 3000, "is_accepted": true,
+             "accepting_block_blue_score": 44, "accepting_block_time": 3000,
+             "inputs": [["previous_outpoint_hash": "outgoing", "previous_outpoint_index": 1,
+                         "previous_outpoint_address": change, "previous_outpoint_amount": 390]],
+             "outputs": [["amount": 380, "script_public_key_address": receive]]]
+        ]
+    }
+    nonisolated private static func activity(_ request: URLRequest) throws -> Data {
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: TestnetActivityFixtureProtocol.body(request)) as? [String: [String]])
+        return try JSONSerialization.data(withJSONObject: (object["addresses"] ?? []).map {
+            ["address": $0, "active": true] as [String: Any]
+        })
+    }
+
+    func testPagedHistoryMapsIncomingOutgoingAndInternalTransfersOnBothNetworks() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil) }
+        for network in KaspaNetwork.allCases {
+            let row = rows(network)
+            let first = try JSONSerialization.data(withJSONObject: Array(row.prefix(2)))
+            let second = try JSONSerialization.data(withJSONObject: Array(row.suffix(2)))
+            let all = try JSONSerialization.data(withJSONObject: row)
+            let one = try JSONSerialization.data(withJSONObject: row[0])
+            let host = network == .testnet10 ? "api-tn10.kaspa.org" : "api.kaspa.org"
+            TestnetActivityFixtureProtocol.install({ request in
+                XCTAssertEqual(request.url?.host, host)
+                let path = request.url!.path
+                if path == "/addresses/active" { return (200, try Self.activity(request)) }
+                if path == "/transactions/search" { return (200, all) }
+                if path.hasPrefix("/transactions/") { return (200, one) }
+                let before = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "before" } == true
+                return (200, before ? second : first)
+            }, headers: { request in
+                let before = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?.contains { $0.name == "before" } == true
+                return request.url!.path.contains("full-transactions-page") && !before ? ["X-Next-Page-Before": "123"] : [:]
+            })
+            let client = TransactionHistoryClient(session: session, pause: { _ in })
+            let wallet = profile(network)
+            let result = try await client.transactions(for: wallet)
+            XCTAssertEqual(result.transactions.count, 3)
+            XCTAssertEqual(result.graphs.count, 3)
+            XCTAssertEqual(result.transactions.first { $0.transactionID == "outgoing" }?.amountSompi, 600)
+            XCTAssertEqual(result.transactions.first { $0.transactionID == "outgoing" }?.feeSompi, 10)
+            XCTAssertEqual(result.transactions.first { $0.transactionID == "internal" }?.kind, .internalTransfer)
+            let single = try await client.transaction(id: "incoming", for: wallet)
+            XCTAssertEqual(single?.kind, .received)
+            let graph = try await client.transactionGraph(id: "incoming", for: wallet)
+            XCTAssertEqual(graph?.outputs.count, 1)
+            let batch = try await client.transactions(ids: ["incoming", "outgoing", "internal"], for: wallet)
+            XCTAssertEqual(batch.count, 3)
+            let spend = try await client.recentTransactions(for: wallet.receiveAddresses, spending: ["source:0"], profile: wallet)
+            XCTAssertEqual(spend.map(\.transactionID), ["outgoing"])
+        }
+    }
+
+    func testPaginationCyclesMalformedHistoryAndServerFailureNeverReturnPartialSuccess() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil) }
+        let data = try JSONSerialization.data(withJSONObject: rows(.testnet10))
+        let malformed = try JSONSerialization.data(withJSONObject: [["transaction_id": "incomplete"]])
+        for mode in 0..<3 {
+            TestnetActivityFixtureProtocol.install({ request in
+                if request.url!.path == "/addresses/active" { return (200, try Self.activity(request)) }
+                return (mode == 2 ? 503 : 200, mode == 1 ? malformed : data)
+            }, headers: { request in
+                request.url!.path.contains("full-transactions-page") && mode == 0 ? ["X-Next-Page-Before": "repeated"] : [:]
+            })
+            do {
+                _ = try await TransactionHistoryClient(session: session, pause: { _ in }).transactions(for: profile(.testnet10))
+                XCTFail("Partial or malformed history must not be reported complete")
+            } catch {
+                if mode == 0 { XCTAssertTrue(error.localizedDescription.contains("incomplete pagination")) }
+                if mode == 2 { XCTAssertTrue(error.localizedDescription.contains("HTTP 503")) }
+            }
+        }
+    }
+
+    func testThrottledRequestsRetryWithoutLosingTransactionsAndCancellationStopsFetching() async throws {
+        let session = session()
+        defer { session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil) }
+        let data = try JSONSerialization.data(withJSONObject: rows(.testnet10))
+        let counter = HistoryRequestCounter()
+        TestnetActivityFixtureProtocol.install({ request in
+            if counter.increment(request.url!.path) == 1 { return (429, Data()) }
+            if request.url!.path == "/addresses/active" { return (200, try Self.activity(request)) }
+            return (200, data)
+        }, headers: { _ in ["Retry-After": "0"] })
+        let client = TransactionHistoryClient(session: session, pause: { _ in })
+        let result = try await client.transactions(for: profile(.testnet10))
+        XCTAssertEqual(result.transactions.count, 3)
+        let source = profile(.testnet10)
+        let canceled = Task { @MainActor in try await client.transactions(for: source) }
+        canceled.cancel()
+        do { _ = try await canceled.value; XCTFail("Canceled history must not complete") }
+        catch { XCTAssertTrue(error is CancellationError || (error as? URLError)?.code == .cancelled) }
+    }
+
+    func testPreviouslyImportedTestnetWalletsUpgradeOnceWithoutChangingMainnetOrNewWalletDefaults() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "HistoryUpgrade-\(UUID().uuidString)")
+        let suite = "HistoryUpgrade.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        let main = WalletProfile(name: "Main", kpub: "main")
+        let old = WalletProfile(name: "Test", kpub: "old-test", network: "testnet-10")
+        XCTAssertTrue(wallet.add(main))
+        XCTAssertTrue(wallet.add(old))
+        XCTAssertTrue(wallet.prepareTestnetHistoryUpgrade())
+        XCTAssertEqual(wallet.profiles.first { $0.id == main.id }, main)
+        XCTAssertTrue(wallet.profiles.first { $0.id == old.id }!.requiresInitialDiscovery)
+        XCTAssertTrue(wallet.profiles.first { $0.id == old.id }!.requiresInitialHistorySync)
+        let fresh = WalletProfile(name: "Fresh", kpub: "fresh", network: "testnet-10")
+        XCTAssertTrue(wallet.add(fresh))
+        XCTAssertTrue(wallet.prepareTestnetHistoryUpgrade())
+        XCTAssertEqual(wallet.profiles.first { $0.id == fresh.id }, fresh)
+        let restarted = WalletStore(protectedStorage: storage, defaults: defaults,
+                                    transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        XCTAssertTrue(restarted.profiles.first { $0.id == old.id }!.requiresInitialHistorySync)
+        XCTAssertEqual(restarted.profiles.first { $0.id == fresh.id }, fresh)
+    }
+
+    func testHistoryRestoresAfterRemovalAndMetadataSurvivesInitialSyncFailureAndRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "FullTestnetHistory-\(UUID().uuidString)")
+        let suite = "FullTestnetHistory.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let original = profile(.testnet10)
+        let restored = profile(.testnet10)
+        let session = session()
+        defer {
+            session.invalidateAndCancel()
+            TestnetActivityFixtureProtocol.install(nil)
+            TransactionGraphCache.shared.remove(profileID: original.id)
+            TransactionGraphCache.shared.remove(profileID: restored.id)
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+            transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        wallet.activateNetwork(.testnet10)
+        XCTAssertTrue(wallet.add(original))
+        let coins = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        coins.activate(profile: original)
+        let output = WalletUTXO(txID: "incoming", index: 0, amount: 1000, scriptPublicKey: [], blockDAAScore: 1, covenantID: nil)
+        coins.setLabel("Transaction label", forTransactionID: "incoming")
+        coins.setLabel("Output label", for: output)
+        coins.setKYCStatus(.nonKYC, for: output)
+        XCTAssertTrue(coins.prepareForRemoval(original))
+        XCTAssertEqual(wallet.deleteAccount(profileID: original.id) { coins.removeProfileSession(profileID: $0) }, .deleted)
+        XCTAssertTrue(wallet.add(restored))
+        XCTAssertTrue(wallet.recordBroadcastedTransaction(profileID: restored.id, transactionID: "pending",
+            destination: "kaspatest:external", amountSompi: 5, feeSompi: 1, committedChangeIndices: []))
+        let client = TransactionHistoryClient(session: session, pause: { _ in })
+        let sync = WalletSyncService(defaults: defaults, networkAvailability: { true }, historyClient: client)
+        sync.preload(profile: restored)
+        TestnetActivityFixtureProtocol.install { request in
+            if request.url!.path == "/addresses/active" { return (200, try Self.activity(request)) }
+            return (403, Data())
+        }
+        await sync.runOrJoinInitialHistory(profile: restored, walletStore: wallet)
+        XCTAssertTrue(wallet.profiles[0].requiresInitialHistorySync)
+        XCTAssertTrue(sync.transactionHistoryError?.contains("HTTP 403") == true)
+        XCTAssertTrue(wallet.transactions.contains { $0.transactionID == "pending" })
+        let data = try JSONSerialization.data(withJSONObject: rows(.testnet10))
+        TestnetActivityFixtureProtocol.install { request in
+            if request.url!.path == "/addresses/active" { return (200, try Self.activity(request)) }
+            return (200, data)
+        }
+        await sync.runOrJoinInitialHistory(profile: restored, walletStore: wallet)
+        sync.completeTransactionHistoryReconciliation(profileID: restored.id, walletStore: wallet)
+        XCTAssertFalse(wallet.profiles[0].requiresInitialHistorySync)
+        XCTAssertNil(sync.transactionHistoryError)
+        XCTAssertTrue(wallet.transactions.contains { $0.transactionID == "pending" })
+        XCTAssertTrue(wallet.transactions.contains { $0.transactionID == "incoming" })
+        let reloaded = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+        reloaded.activate(profile: restored)
+        XCTAssertEqual(reloaded.label(forTransactionID: "incoming"), "Transaction label")
+        XCTAssertEqual(reloaded.label(for: output), "Output label")
+        XCTAssertEqual(reloaded.kycStatus(for: output), .nonKYC)
+    }
+}

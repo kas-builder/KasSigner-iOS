@@ -115,6 +115,7 @@ struct AddWalletView: View {
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var protectedVaultStore: ProtectedVaultStore
     @EnvironmentObject private var engine: KasSignerEngine
+    @EnvironmentObject private var syncService: WalletSyncService
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var discoveryPresentation:
         AccountDiscoveryPresentationModel
@@ -133,6 +134,8 @@ struct AddWalletView: View {
     @State private var pendingTestnetWallet: TestnetHotWalletImportResult?
     @State private var showingTestnetWords = false
     @State private var didCopyTestnetWords = false
+    @State private var isRestoringTestnetWallet = false
+    @StateObject private var testnetImport = TestnetAccountImportCoordinator()
 
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
@@ -192,6 +195,7 @@ struct AddWalletView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
+                        .disabled(preferences.network == .testnet10 && isImporting)
                 }
                 ToolbarItem(placement: .principal) {
                     Text("Add Account")
@@ -250,7 +254,7 @@ struct AddWalletView: View {
                     )
                 }
             }
-            .sheet(isPresented: $showingTestnetWords) {
+            .sheet(isPresented: $showingTestnetWords, onDismiss: clearTestnetImportDraft) {
                 NavigationStack {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 20) {
@@ -275,14 +279,34 @@ struct AddWalletView: View {
                                 .buttonStyle(.bordered)
                                 .sensoryFeedback(.success, trigger: didCopyTestnetWords)
 
-                                Button("Add Account") {
+                                Button {
                                     Task { await finishTestnetWallet() }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        if testnetImport.isRunning {
+                                            ProgressView()
+                                                .tint(.white)
+                                        }
+                                        Text(testnetImport.errorMessage == nil ? "Add Account" : "Retry")
+                                    }
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .frame(maxWidth: .infinity)
-                                .disabled(isImporting)
+                                .disabled(testnetImport.isRunning)
                             }
                             .frame(maxWidth: .infinity)
+
+                            if testnetImport.isRunning {
+                                Text(testnetImport.stage.title)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if let message = testnetImport.errorMessage {
+                                Text(message)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.red)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         .padding()
                     }
@@ -290,16 +314,18 @@ struct AddWalletView: View {
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
-                            Button("Cancel") {
+                            Button(testnetImport.hasSavedAccount ? "Close" : "Cancel") {
+                                guard testnetImport.close(removeSeed: removeUnsavedTestnetSeed) else { return }
                                 showingTestnetWords = false
-                                pendingTestnetWallet = nil
-                                recoveryWords = ""
                             }
+                            .disabled(testnetImport.isRunning)
                         }
                     }
                 }
+                .interactiveDismissDisabled(testnetImport.isRunning || testnetImport.needsSeedCleanup)
             }
         }
+        .interactiveDismissDisabled(preferences.network == .testnet10 && (isImporting || testnetImport.isRunning))
         .tint(teal)
     }
 
@@ -312,6 +338,7 @@ struct AddWalletView: View {
 
     @MainActor
     private func prepareTestnetWallet(restore: Bool) async {
+        guard !isImporting else { return }
         isImporting = true
         errorMessage = nil
         defer { isImporting = false }
@@ -320,62 +347,69 @@ struct AddWalletView: View {
             if let existing = walletStore.profiles.first(where: {
                 $0.network == KaspaNetwork.testnet10.rawValue && $0.kpub == result.wallet.kpub
             }) {
-                duplicateProfile = existing
-                return
+                if walletStore.pendingAccountDeletionIDs.contains(existing.id) {
+                    errorMessage = "Account cleanup is still pending. Reopen the app before importing this account again."
+                    return
+                }
+                if !existing.requiresTestnetVaultRecovery {
+                    duplicateProfile = existing
+                    return
+                }
             }
+            testnetImport.reset()
             didCopyTestnetWords = false
             pendingTestnetWallet = result
+            isRestoringTestnetWallet = restore
             showingTestnetWords = true
         } catch {
             errorMessage = error.localizedDescription
         }
     }
 
+    @MainActor
     private func finishTestnetWallet() async {
-        guard let result = pendingTestnetWallet, !isImporting else { return }
-        isImporting = true
-        defer { isImporting = false }
-        errorMessage = nil
-        let profile = WalletProfile(
-            name: walletName.trimmingCharacters(in: .whitespacesAndNewlines),
-            kpub: result.wallet.kpub,
-            network: KaspaNetwork.testnet10.rawValue,
-            receiveAddresses: result.wallet.receiveAddresses,
-            changeAddresses: result.wallet.changeAddresses
-        )
-        do {
-            try TestnetSeedStore.save(result.mnemonic, for: profile.id)
-        } catch {
-            errorMessage = "Could not securely store the recovery words: \(error.localizedDescription)"
-            return
-        }
-        guard walletStore.add(profile) else {
-            do {
-                try TestnetSeedStore.remove(for: profile.id)
-                errorMessage = "The account could not be saved. Check device storage and try again."
-            } catch {
-                errorMessage = "The account could not be saved, and its recovery words could not be removed from secure storage: \(error.localizedDescription)"
+        guard let result = pendingTestnetWallet else { return }
+        let completed = await testnetImport.finish(
+            result: result, name: walletName, isRestoring: isRestoringTestnetWallet, walletStore: walletStore,
+            saveSeed: { try TestnetSeedStore.save($0, for: $1) },
+            removeSeed: removeUnsavedTestnetSeed,
+            reassociateVaults: { protectedVaultStore.reassociateVaults(to: $0) },
+            recoverLegacyVaults: { profile in
+                _ = try await protectedVaultStore.recoverLegacyOrphanedVaults(
+                    to: profile, knownProfileIDs: Set(walletStore.profiles.map(\.id)), engine: engine
+                )
             }
-            return
-        }
-        guard protectedVaultStore.reassociateVaults(to: profile) else {
-            errorMessage = "The account was saved, but its vault records could not be restored. Do not delete the account; check device storage and reopen the app."
-            return
-        }
-        do {
-            _ = try await protectedVaultStore.recoverLegacyOrphanedVaults(
-                to: profile,
-                knownProfileIDs: Set(walletStore.profiles.map(\.id)),
-                engine: engine
-            )
-        } catch {
-            errorMessage = "The account was saved, but older vault records could not be checked: \(error.localizedDescription)"
-            return
-        }
+        )
+        guard completed else { return }
+        showingTestnetWords = false
+    }
+
+    private func removeUnsavedTestnetSeed(_ profileID: UUID) throws {
+        try TestnetSeedStore.remove(for: profileID)
+        try TestnetSeedStore.verifyAbsent(for: profileID)
+    }
+
+    private func clearTestnetImportDraft() {
+        let savedID = testnetImport.savedProfileID
+        let saved = savedID != nil
         pendingTestnetWallet = nil
         recoveryWords = ""
-        showingTestnetWords = false
-        dismiss()
+        didCopyTestnetWords = false
+        testnetImport.reset()
+        isRestoringTestnetWallet = false
+        if saved {
+            if let profile = walletStore.selectedProfile, profile.id == savedID,
+               profile.requiresInitialDiscovery || profile.requiresInitialHistorySync {
+                Task { @MainActor in
+                    await syncService.refresh(profile: profile, walletStore: walletStore, engine: engine,
+                        preferences: preferences, force: false, includeTransactionHistory: true,
+                        addressDiscoveryPolicy: profile.requiresInitialDiscovery ? .comprehensive : .lightweight)
+                    guard !Task.isCancelled, walletStore.selectedProfileID == profile.id else { return }
+                    syncService.completeTransactionHistoryReconciliation(profileID: profile.id, walletStore: walletStore)
+                }
+            }
+            dismiss()
+        }
     }
 
     @MainActor

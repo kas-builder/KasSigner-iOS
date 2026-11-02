@@ -697,6 +697,29 @@ final class WalletStore: ObservableObject {
         }
     }
 
+    /// Earlier releases did not rebuild Testnet history. Upgrade their profiles
+    /// once, preserving public identity, labels, preferences, and existing cache.
+    @discardableResult
+    func prepareTestnetHistoryUpgrade() -> Bool {
+        let key = "kassigner.testnetHistoryUpgrade.v1"
+        guard !defaults.bool(forKey: key) else { return true }
+        let previous = profiles
+        let previousState = persistentState
+        for index in profiles.indices where profiles[index].network == "testnet-10" {
+            profiles[index].requiresInitialHistorySync = true
+            if profiles[index].lastHistoricalDiscoveryAt == nil {
+                profiles[index].requiresInitialDiscovery = true
+            }
+        }
+        if profiles != previous, !save() {
+            profiles = previous
+            persistentState = previousState
+            return false
+        }
+        defaults.set(true, forKey: key)
+        return true
+    }
+
     func activateNetwork(_ network: KaspaNetwork) {
         guard activeNetwork != network else { return }
         activeNetwork = network
@@ -757,11 +780,16 @@ final class WalletStore: ObservableObject {
     }
 
     @discardableResult
-    func update(_ profile: WalletProfile) -> Bool {
+    func update(_ profile: WalletProfile, completingTestnetVaultRecovery: Bool = false) -> Bool {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
         let previousProfile = profiles[index]
         let previousState = persistentState
-        profiles[index] = profile
+        var updated = profile
+        // Balance/address refreshes may finish with an older profile snapshot.
+        // Only the import coordinator may complete its recovery checkpoint.
+        updated.requiresTestnetVaultRecovery = completingTestnetVaultRecovery
+            ? false : previousProfile.requiresTestnetVaultRecovery
+        profiles[index] = updated
         guard save() else {
             profiles[index] = previousProfile
             persistentState = previousState
@@ -1367,8 +1395,8 @@ final class WalletStore: ObservableObject {
             }
         }
 
-        let incompleteProfiles = persistentState.profiles.filter(\.requiresInitialDiscovery)
-        profiles = persistentState.profiles.filter { !$0.requiresInitialDiscovery }
+        let incompleteProfiles = persistentState.profiles.filter { $0.requiresInitialDiscovery && $0.network == "mainnet" }
+        profiles = persistentState.profiles.filter { !$0.requiresInitialDiscovery || $0.network != "mainnet" }
         let interruptedImport = incompleteProfiles.first {
             $0.id == persistentState.selectedProfileID
         }

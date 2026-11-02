@@ -1583,7 +1583,7 @@ struct WalletHomeView: View {
             preferences: preferences,
             force: true
         )
-        if force && profile.network == KaspaNetwork.mainnet.rawValue {
+        if force {
             await syncService.checkHistoricalAddressesIfNeeded(
                 profile: profile,
                 walletStore: walletStore,
@@ -1595,7 +1595,6 @@ struct WalletHomeView: View {
     }
 
     private func historicalCoverageMessage(for profile: WalletProfile) -> String? {
-        guard profile.network == KaspaNetwork.mainnet.rawValue else { return nil }
         if let error = syncService.historicalDiscoveryError { return error }
         if max(profile.nextReceiveIndex, profile.nextChangeIndex) >= 462 {
             return "This account is near the supported 512-address limit. A full 50-address buffer may no longer be available."

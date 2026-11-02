@@ -15,6 +15,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var lastHistoricalDiscoveryAt: Date?
     var requiresInitialDiscovery: Bool
     var requiresInitialHistorySync: Bool
+    var requiresTestnetVaultRecovery: Bool
 
     /// Stable across imports and renames. Keep this encoding compatible with
     /// existing protected-vault fingerprints; kpubs are case-sensitive.
@@ -38,7 +39,8 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         earliestFreshReceiveIndex: Int? = nil,
         lastHistoricalDiscoveryAt: Date? = nil,
         requiresInitialDiscovery: Bool = false,
-        requiresInitialHistorySync: Bool = false
+        requiresInitialHistorySync: Bool = false,
+        requiresTestnetVaultRecovery: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -53,6 +55,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         self.lastHistoricalDiscoveryAt = lastHistoricalDiscoveryAt
         self.requiresInitialDiscovery = requiresInitialDiscovery
         self.requiresInitialHistorySync = requiresInitialHistorySync
+        self.requiresTestnetVaultRecovery = requiresTestnetVaultRecovery
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -69,6 +72,7 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         case lastHistoricalDiscoveryAt
         case requiresInitialDiscovery
         case requiresInitialHistorySync
+        case requiresTestnetVaultRecovery
     }
 
     init(from decoder: Decoder) throws {
@@ -103,6 +107,9 @@ struct WalletProfile: Identifiable, Codable, Equatable {
         requiresInitialHistorySync = try container.decodeIfPresent(
             Bool.self,
             forKey: .requiresInitialHistorySync
+        ) ?? false
+        requiresTestnetVaultRecovery = try container.decodeIfPresent(
+            Bool.self, forKey: .requiresTestnetVaultRecovery
         ) ?? false
     }
 }

@@ -145,7 +145,7 @@ struct TransactionHistorySyncResult {
     let graphs: [TransactionGraphDetails]
 }
 
-private struct ActiveAddressRequest: Encodable {
+private struct ActiveAddressRequest: Codable {
     let addresses: [String]
 }
 
@@ -154,25 +154,90 @@ private struct ActiveAddressResponse: Decodable {
     let active: Bool
 }
 
-/// Testnet 10-only activity lookup, kept separate from Mainnet's transaction-history client.
+/// Request contracts shared by discovery and the network-specific history work.
+/// These endpoints were checked against each network's published API schema.
+enum KaspaIndexerAPI {
+    static func baseURL(network: KaspaNetwork) -> URL {
+        URL(string: network == .testnet10 ? "https://api-tn10.kaspa.org" : "https://api.kaspa.org")!
+    }
+
+    static func activityRequests(addresses: [String], network: KaspaNetwork) throws -> [URLRequest] {
+        var seen = Set<String>()
+        let addresses = addresses.map { $0.lowercased() }.filter { seen.insert($0).inserted }
+        guard addresses.allSatisfy({ $0.hasPrefix(network.addressPrefix) }) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        return try stride(from: 0, to: addresses.count, by: 250).map { start in
+            var request = URLRequest(url: baseURL(network: network).appending(path: "addresses/active"))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 20
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(ActiveAddressRequest(
+                addresses: Array(addresses[start..<min(start + 250, addresses.count)])
+            ))
+            return request
+        }
+    }
+
+    static func historyPage(address: String, network: KaspaNetwork, before: String? = nil, limit: Int = 500) -> URLRequest {
+        var components = URLComponents(url: baseURL(network: network).appending(path: "addresses")
+            .appending(path: address).appending(path: "full-transactions-page"), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "limit", value: String(limit)),
+                                URLQueryItem(name: "resolve_previous_outpoints", value: "light")]
+        if let before { components.queryItems?.append(URLQueryItem(name: "before", value: before)) }
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 30
+        return request
+    }
+
+    static func transaction(id: String, network: KaspaNetwork) -> URLRequest {
+        var components = URLComponents(url: baseURL(network: network).appending(path: "transactions")
+            .appending(path: id.lowercased()), resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "resolve_previous_outpoints", value: "light")]
+        var request = URLRequest(url: components.url!)
+        request.timeoutInterval = 15
+        return request
+    }
+
+    static func transactionSearch(ids: [String], network: KaspaNetwork) throws -> URLRequest {
+        var components = URLComponents(url: baseURL(network: network).appending(path: "transactions/search"),
+                                       resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "resolve_previous_outpoints", value: "light")]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(TransactionSearchRequest(transactionIds: ids.map { $0.lowercased() }))
+        return request
+    }
+}
+
+/// Testnet 10-only historical activity lookup. A partial response must never
+/// turn an unknown address into a supposedly fresh address during restoration.
 struct Testnet10AddressActivityClient {
-    private let baseURL = URL(string: "https://api-tn10.kaspa.org")!
+    let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
 
     func activeAddresses(in addresses: [String]) async throws -> Set<String> {
         var active = Set<String>()
-        for request in try Self.requests(for: addresses, baseURL: baseURL) {
-            let (data, response) = try await URLSession.shared.data(for: request)
+        for request in try Self.requests(for: addresses) {
+            try Task.checkCancellation()
+            let expected = Set(try JSONDecoder().decode(ActiveAddressRequest.self, from: request.httpBody!).addresses)
+            let (data, response) = try await session.data(for: request)
             try Self.validate(response)
-            active.formUnion(try Self.activeAddresses(from: data))
+            let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: data)
+            guard entries.count == expected.count,
+                  Set(entries.map { $0.address.lowercased() }) == expected else {
+                throw TransactionHistoryError.incompleteAddressActivity
+            }
+            active.formUnion(entries.filter(\.active).map { $0.address.lowercased() })
         }
         return active
     }
 
     static func requests(for addresses: [String]) throws -> [URLRequest] {
-        try requests(
-            for: addresses,
-            baseURL: URL(string: "https://api-tn10.kaspa.org")!
-        )
+        try KaspaIndexerAPI.activityRequests(addresses: addresses, network: .testnet10)
     }
 
     static func activeAddresses(from data: Data) throws -> Set<String> {
@@ -181,27 +246,8 @@ struct Testnet10AddressActivityClient {
     }
 
     static func validate(_ response: URLResponse) throws {
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw TransactionHistoryError.invalidResponse
-        }
-    }
-
-    private static func requests(
-        for addresses: [String],
-        baseURL: URL
-    ) throws -> [URLRequest] {
-        try stride(from: 0, to: addresses.count, by: 250).map { start in
-            let end = min(start + 250, addresses.count)
-            var request = URLRequest(url: baseURL.appending(path: "addresses/active"))
-            request.httpMethod = "POST"
-            request.timeoutInterval = 20
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(
-                ActiveAddressRequest(addresses: Array(addresses[start..<end]))
-            )
-            return request
-        }
+        guard let response = response as? HTTPURLResponse else { throw TransactionHistoryError.invalidResponse }
+        guard (200..<300).contains(response.statusCode) else { throw TransactionHistoryError.server(response.statusCode) }
     }
 }
 
@@ -332,15 +378,24 @@ private struct TransactionSearchRequest: Encodable {
 private enum TransactionHistoryError: LocalizedError {
     case unsupportedNetwork
     case invalidResponse
+    case incompleteAddressActivity
+    case incompleteHistory
+    case discoveryRangeExceeded
     case server(Int)
     case rateLimited
 
     var errorDescription: String? {
         switch self {
         case .unsupportedNetwork:
-            "Complete transaction history is currently available for mainnet accounts only."
+            "The account network is not supported by the transaction-history service."
         case .invalidResponse:
             "The transaction history service returned an invalid response."
+        case .incompleteAddressActivity:
+            "The address-history service returned incomplete activity data. Retry discovery; address indexes have not been reset."
+        case .incompleteHistory:
+            "The history service returned incomplete pagination. Retry synchronization; the saved history has been kept."
+        case .discoveryRangeExceeded:
+            "This account exceeds the supported 512-address discovery range. Existing addresses have been kept."
         case .server(let status):
             "The transaction history service returned HTTP \(status)."
         case .rateLimited:
@@ -350,7 +405,15 @@ private enum TransactionHistoryError: LocalizedError {
 }
 
 struct TransactionHistoryClient: Sendable {
-    private let baseURL = URL(string: "https://api.kaspa.org")!
+    private let baseURL = KaspaIndexerAPI.baseURL(network: .mainnet)
+    private let session: URLSession
+    private let pause: @Sendable (TimeInterval) async throws -> Void
+
+    init(session: URLSession = .shared,
+         pause: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }) {
+        self.session = session
+        self.pause = pause
+    }
 
     func virtualBlueScore(network: KaspaNetwork = .mainnet) async throws -> UInt64 {
         let scoreBaseURL = network == .testnet10
@@ -373,7 +436,7 @@ struct TransactionHistoryClient: Sendable {
             _ isRetryingThrottledAddresses: Bool
         ) -> Void)? = nil
     ) async throws -> TransactionHistorySyncResult {
-        guard profile.network.lowercased() == "mainnet" else {
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else {
             throw TransactionHistoryError.unsupportedNetwork
         }
 
@@ -381,7 +444,7 @@ struct TransactionHistoryClient: Sendable {
         guard !addresses.isEmpty else {
             return TransactionHistorySyncResult(transactions: [], graphs: [])
         }
-        let activeAddresses = try await activeAddresses(in: addresses).sorted()
+        let activeAddresses = try await activeAddresses(in: addresses, network: network).sorted()
         guard !activeAddresses.isEmpty else {
             return TransactionHistorySyncResult(transactions: [], graphs: [])
         }
@@ -402,7 +465,7 @@ struct TransactionHistoryClient: Sendable {
                 nextAddressIndex += 1
                 group.addTask {
                     do {
-                        return (try await fetchTransactions(for: address), nil)
+                        return (try await fetchTransactions(for: address, network: network), nil)
                     } catch TransactionHistoryError.rateLimited {
                         return ([], address)
                     }
@@ -430,14 +493,14 @@ struct TransactionHistoryClient: Sendable {
         // a cooldown. Healthy imports never enter this slower path.
         for retryRound in 0..<2 where !throttledAddresses.isEmpty {
             await progress?(completedAddressCount, activeAddresses.count, true)
-            try await Task.sleep(for: .seconds(retryRound == 0 ? 15 : 30))
+            try await pause(retryRound == 0 ? 15 : 30)
 
             var stillThrottled: [String] = []
             for address in throttledAddresses {
                 try Task.checkCancellation()
                 do {
                     indexedTransactions.append(
-                        contentsOf: try await fetchTransactions(for: address)
+                        contentsOf: try await fetchTransactions(for: address, network: network)
                     )
                     completedAddressCount += 1
                     await progress?(completedAddressCount, activeAddresses.count, true)
@@ -478,29 +541,10 @@ struct TransactionHistoryClient: Sendable {
         id: String,
         for profile: WalletProfile
     ) async throws -> WalletTransaction? {
-        let transactionBaseURL: URL
-        switch profile.network.lowercased() {
-        case KaspaNetwork.mainnet.rawValue:
-            transactionBaseURL = baseURL
-        case KaspaNetwork.testnet10.rawValue:
-            transactionBaseURL = URL(string: "https://api-tn10.kaspa.org")!
-        default:
-            return nil
-        }
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else { return nil }
         let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedID.isEmpty else { return nil }
-
-        var components = URLComponents(
-            url: transactionBaseURL.appending(path: "transactions").appending(path: normalizedID),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
-        ]
-        guard let url = components.url else { return nil }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        let request = KaspaIndexerAPI.transaction(id: normalizedID, network: network)
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
         return mapTransactions(
@@ -515,25 +559,13 @@ struct TransactionHistoryClient: Sendable {
         id: String,
         for profile: WalletProfile
     ) async throws -> TransactionGraphDetails? {
-        guard profile.network.lowercased() == "mainnet" else {
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else {
             throw TransactionHistoryError.unsupportedNetwork
         }
         let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedID.isEmpty else { return nil }
 
-        var components = URLComponents(
-            url: baseURL.appending(path: "transactions").appending(path: normalizedID),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
-        ]
-        guard let url = components.url else {
-            throw TransactionHistoryError.invalidResponse
-        }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15
+        let request = KaspaIndexerAPI.transaction(id: normalizedID, network: network)
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
         if let responseID = indexed.transactionID,
@@ -591,28 +623,11 @@ struct TransactionHistoryClient: Sendable {
         ids: [String],
         for profile: WalletProfile
     ) async throws -> [WalletTransaction] {
-        guard profile.network.lowercased() == "mainnet" else { return [] }
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else { return [] }
         let uniqueIDs = Array(Set(ids.map { $0.lowercased() })).prefix(32)
         guard !uniqueIDs.isEmpty else { return [] }
 
-        var components = URLComponents(
-            url: baseURL.appending(path: "transactions/search"),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
-        ]
-        guard let url = components.url else {
-            throw TransactionHistoryError.invalidResponse
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            TransactionSearchRequest(transactionIds: Array(uniqueIDs))
-        )
+        let request = try KaspaIndexerAPI.transactionSearch(ids: Array(uniqueIDs), network: network)
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode([IndexedTransaction].self, from: data)
         return mapTransactions(
@@ -628,13 +643,13 @@ struct TransactionHistoryClient: Sendable {
         spending outpointIDs: Set<String>,
         profile: WalletProfile
     ) async throws -> [WalletTransaction] {
-        guard profile.network.lowercased() == "mainnet" else { return [] }
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else { return [] }
         let uniqueAddresses = Array(Set(addresses)).sorted()
         guard !uniqueAddresses.isEmpty else { return [] }
 
         var indexed: [IndexedTransaction] = []
         for address in uniqueAddresses {
-            indexed.append(contentsOf: try await fetchRecentTransactions(for: address))
+            indexed.append(contentsOf: try await fetchRecentTransactions(for: address, network: network))
         }
         let matching = indexed.filter { transaction in
             (transaction.inputs ?? []).contains { input in
@@ -651,91 +666,49 @@ struct TransactionHistoryClient: Sendable {
         )
     }
 
-    func activeAddresses(in addresses: [String]) async throws -> Set<String> {
-        var active: [String] = []
-        for start in stride(from: 0, to: addresses.count, by: 250) {
-            let end = min(start + 250, addresses.count)
-            var request = URLRequest(url: baseURL.appending(path: "addresses/active"))
-            request.httpMethod = "POST"
-            request.timeoutInterval = 20
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONEncoder().encode(
-                ActiveAddressRequest(addresses: Array(addresses[start..<end]))
-            )
-
-            let (data, _) = try await data(for: request)
-            let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: data)
-            active.append(contentsOf: entries.filter(\.active).map(\.address))
+    func activeAddresses(in addresses: [String], network: KaspaNetwork = .mainnet) async throws -> Set<String> {
+        var active = Set<String>()
+        for request in try KaspaIndexerAPI.activityRequests(addresses: addresses, network: network) {
+            try Task.checkCancellation()
+            let expected = Set(try JSONDecoder().decode(ActiveAddressRequest.self, from: request.httpBody!).addresses)
+            let (bytes, _) = try await data(for: request)
+            let entries = try JSONDecoder().decode([ActiveAddressResponse].self, from: bytes)
+            guard entries.count == expected.count, Set(entries.map { $0.address.lowercased() }) == expected else {
+                throw TransactionHistoryError.incompleteAddressActivity
+            }
+            active.formUnion(entries.filter(\.active).map { $0.address.lowercased() })
         }
-        return Set(active.map { $0.lowercased() })
+        return active
     }
 
-    private func fetchTransactions(for address: String) async throws -> [IndexedTransaction] {
+    private func fetchTransactions(for address: String, network: KaspaNetwork) async throws -> [IndexedTransaction] {
         var before: String?
         var seenCursors = Set<String>()
         var transactions: [IndexedTransaction] = []
-
         for _ in 0..<100 {
-            var components = URLComponents(
-                url: baseURL
-                    .appending(path: "addresses")
-                    .appending(path: address)
-                    .appending(path: "full-transactions-page"),
-                resolvingAgainstBaseURL: false
-            )!
-            var queryItems = [
-                URLQueryItem(name: "limit", value: "500"),
-                URLQueryItem(name: "resolve_previous_outpoints", value: "light")
-            ]
-            if let before {
-                queryItems.append(URLQueryItem(name: "before", value: before))
-            }
-            components.queryItems = queryItems
-            guard let url = components.url else {
+            try Task.checkCancellation()
+            let request = KaspaIndexerAPI.historyPage(address: address, network: network, before: before)
+            let (bytes, response) = try await data(for: request)
+            guard let response = response as? HTTPURLResponse else { throw TransactionHistoryError.invalidResponse }
+            let page = try JSONDecoder().decode([IndexedTransaction].self, from: bytes)
+            guard page.allSatisfy({ !($0.transactionID ?? "").isEmpty && $0.inputs != nil && $0.outputs != nil }) else {
                 throw TransactionHistoryError.invalidResponse
             }
-
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 30
-            let (data, response) = try await data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw TransactionHistoryError.invalidResponse
+            transactions.append(contentsOf: page)
+            guard let next = response.value(forHTTPHeaderField: "X-Next-Page-Before"), !next.isEmpty else {
+                return transactions
             }
-            transactions.append(
-                contentsOf: try JSONDecoder().decode([IndexedTransaction].self, from: data)
-            )
-
-            guard let next = httpResponse.value(forHTTPHeaderField: "X-Next-Page-Before"),
-                  !next.isEmpty,
-                  seenCursors.insert(next).inserted else {
-                break
-            }
+            guard seenCursors.insert(next).inserted else { throw TransactionHistoryError.incompleteHistory }
             before = next
-            try await Task.sleep(for: .milliseconds(100))
+            try await pause(0.1)
         }
-        return transactions
+        throw TransactionHistoryError.incompleteHistory
     }
 
-    private func fetchRecentTransactions(for address: String) async throws -> [IndexedTransaction] {
-        var components = URLComponents(
-            url: baseURL
-                .appending(path: "addresses")
-                .appending(path: address)
-                .appending(path: "full-transactions-page"),
-            resolvingAgainstBaseURL: false
-        )!
-        components.queryItems = [
-            URLQueryItem(name: "limit", value: "25"),
-            URLQueryItem(name: "resolve_previous_outpoints", value: "light")
-        ]
-        guard let url = components.url else {
-            throw TransactionHistoryError.invalidResponse
-        }
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 15
-        let (data, _) = try await data(for: request)
-        return try JSONDecoder().decode([IndexedTransaction].self, from: data)
+    private func fetchRecentTransactions(for address: String, network: KaspaNetwork) async throws -> [IndexedTransaction] {
+        let request = KaspaIndexerAPI.historyPage(address: address, network: network, limit: 25)
+        let (bytes, _) = try await data(for: request)
+        return try JSONDecoder().decode([IndexedTransaction].self, from: bytes)
     }
 
     private func data(for request: URLRequest) async throws -> (Data, URLResponse) {
@@ -743,13 +716,13 @@ struct TransactionHistoryClient: Sendable {
         for attempt in 0..<6 {
             let result: (Data, URLResponse)
             do {
-                result = try await URLSession.shared.data(for: request)
+                result = try await session.data(for: request)
             } catch {
                 lastError = error
                 guard attempt < 5, isTransientTransportError(error) else {
                     throw error
                 }
-                try await Task.sleep(for: .seconds(min(1 << attempt, 15)))
+                try await pause(TimeInterval(min(1 << attempt, 15)))
                 continue
             }
 
@@ -767,7 +740,7 @@ struct TransactionHistoryClient: Sendable {
                     .flatMap(TimeInterval.init)
                 let fallbackDelay = TimeInterval(1 << attempt)
                 let delay = min(max(retryAfter ?? fallbackDelay, 1), 15)
-                try await Task.sleep(for: .seconds(delay))
+                try await pause(delay)
                 continue
             }
 
@@ -1308,7 +1281,7 @@ final class WalletSyncService: ObservableObject {
     private var latestObservedVirtualBlueScore: UInt64?
     private var activeNetwork: KaspaNetwork = .mainnet
     private var lastVirtualBlueScorePersistenceAt: Date?
-    private let transactionHistoryClient = TransactionHistoryClient()
+    private let transactionHistoryClient: TransactionHistoryClient
     private let defaults: UserDefaults
     private let outgoingReconciliationKeyPrefix =
         "kassigner.outgoingReconciliation.v1."
@@ -1397,8 +1370,9 @@ final class WalletSyncService: ObservableObject {
         guard isNetworkAvailable else {
             return
         }
-        guard profile.network.lowercased() == "mainnet" else {
-            historicalDiscoveryError = "Historical address coverage is available for mainnet accounts only."
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else { return }
+        guard latest.receiveAddresses.count <= 512, latest.changeAddresses.count <= 512 else {
+            historicalDiscoveryError = TransactionHistoryError.discoveryRangeExceeded.localizedDescription
             return
         }
         guard preferences.activeNodeMode == .automatic else {
@@ -1427,7 +1401,7 @@ final class WalletSyncService: ObservableObject {
                 )
                 try Task.checkCancellation()
                 let active = try await self.transactionHistoryClient.activeAddresses(
-                    in: candidates.receiveAddresses + candidates.changeAddresses
+                    in: candidates.receiveAddresses + candidates.changeAddresses, network: network
                 )
                 try Task.checkCancellation()
                 guard self.activeProfileID == profile.id,
@@ -1575,9 +1549,11 @@ final class WalletSyncService: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults = .standard, networkAvailability: (() -> Bool)? = nil) {
+    init(defaults: UserDefaults = .standard, networkAvailability: (() -> Bool)? = nil,
+         historyClient: TransactionHistoryClient = TransactionHistoryClient()) {
         self.defaults = defaults
         self.networkAvailability = networkAvailability
+        self.transactionHistoryClient = historyClient
         virtualBlueScore = defaults.string(forKey: Self.cachedVirtualBlueScoreKey)
             .flatMap(UInt64.init)
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -1621,8 +1597,8 @@ final class WalletSyncService: ObservableObject {
             force: force,
             retryInitialDiscoveryWhenOffline: retryInitialDiscoveryWhenOffline,
             minimumInterval: minimumInterval,
-            includeTransactionHistory: includeTransactionHistory && profile.network == "mainnet",
-            forceTransactionHistory: forceTransactionHistory && profile.network == "mainnet",
+            includeTransactionHistory: includeTransactionHistory,
+            forceTransactionHistory: forceTransactionHistory,
             keepTransactionProgressThroughReconciliation: keepTransactionProgressThroughReconciliation,
             addressDiscoveryPolicy: addressDiscoveryPolicy,
             onWalletReady: onWalletReady.map { [$0] } ?? []
@@ -2478,84 +2454,78 @@ final class WalletSyncService: ObservableObject {
         profile: WalletProfile,
         engine: KasSignerEngine
     ) async throws -> WalletProfile {
-        let maximumAddressesPerChain = 512
-        let trailingGap = 50
-
         initialDiscoveryError = nil
         discoveryNotice = nil
-        if profile.requiresInitialDiscovery {
-            initialDiscoveryCheckpoint = nil
+        if profile.requiresInitialDiscovery { initialDiscoveryCheckpoint = nil }
+        let result = try await Self.discoverHistoricalAddresses(
+            profile: profile,
+            extendAddresses: { profile, receiveCount, changeCount in
+                try await engine.extendAddresses(for: profile, receiveCount: receiveCount, changeCount: changeCount)
+            },
+            activityLookup: { network, addresses in
+                return try await self.transactionHistoryClient.activeAddresses(in: addresses, network: network)
+            },
+            progress: { progress in
+                self.initialDiscoveryProgress = progress
+                self.initialDiscoveryStage = progress.fraction < 0.4 ? "Deriving wallet addresses" : "Scanning address history"
+            }
+        )
+        if result.plan.reachedSafetyLimit {
+            discoveryNotice = "This account has reached the supported 512-address discovery range. Existing discovered addresses remain usable, but KasSigner cannot safely prepare a full 50-address buffer beyond this point."
         }
-        initialDiscoveryStage = "Deriving wallet addresses"
-        initialDiscoveryProgress = DiscoveryProgress(
-            title: "Discovering wallet",
-            detail: "Deriving receive and change addresses…",
-            fraction: 0.12
-        )
+        initialDiscoveryProgress = DiscoveryProgress(title: "Synchronizing wallet",
+            detail: "Loading current UTXOs from the selected Kaspa node…", fraction: 0.68)
+        initialDiscoveryStage = "Synchronizing UTXOs"
+        return result.profile
+    }
 
-        let receiveNeeded = max(
-            0,
-            maximumAddressesPerChain - profile.receiveAddresses.count
-        )
-        let changeNeeded = max(
-            0,
-            maximumAddressesPerChain - profile.changeAddresses.count
-        )
-        let candidates = try await engine.extendAddresses(
-            for: profile,
-            receiveCount: receiveNeeded,
-            changeCount: changeNeeded
-        )
+    static func discoverHistoricalAddresses(
+        profile: WalletProfile,
+        extendAddresses: (WalletProfile, Int, Int) async throws -> WalletImportResult,
+        activityLookup: (KaspaNetwork, [String]) async throws -> Set<String>,
+        now: Date = Date(),
+        progress: (DiscoveryProgress) -> Void = { _ in }
+    ) async throws -> (profile: WalletProfile, plan: DiscoveryPlan) {
         try Task.checkCancellation()
-
-        initialDiscoveryProgress = DiscoveryProgress(
-            title: "Scanning address history",
-            detail: "Checking historical activity across both address chains…",
-            fraction: 0.42
-        )
-        initialDiscoveryStage = "Scanning address history"
+        guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else {
+            throw TransactionHistoryError.unsupportedNetwork
+        }
+        let maximum = 512
+        guard profile.receiveAddresses.count <= maximum, profile.changeAddresses.count <= maximum else {
+            throw TransactionHistoryError.discoveryRangeExceeded
+        }
+        progress(DiscoveryProgress(title: "Discovering wallet", detail: "Deriving receive and change addresses…", fraction: 0.12))
+        let candidates = try await extendAddresses(profile, max(0, maximum - profile.receiveAddresses.count),
+                                                   max(0, maximum - profile.changeAddresses.count))
+        try Task.checkCancellation()
         let allCandidates = candidates.receiveAddresses + candidates.changeAddresses
-        let active = try await transactionHistoryClient.activeAddresses(
-            in: allCandidates
-        )
+        guard candidates.kpub == profile.kpub,
+              candidates.receiveAddresses.count >= maximum,
+              candidates.changeAddresses.count >= maximum,
+              allCandidates.allSatisfy({ $0.lowercased().hasPrefix(network.addressPrefix) }) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        progress(DiscoveryProgress(title: "Scanning address history",
+            detail: "Checking historical activity across both address chains…", fraction: 0.42))
+        let active = try await activityLookup(network, allCandidates)
         try Task.checkCancellation()
-
-        let plan = Self.discoveryPlan(
-            receiveAddresses: candidates.receiveAddresses,
-            changeAddresses: candidates.changeAddresses,
-            activeAddresses: active,
-            currentNextReceiveIndex: profile.nextReceiveIndex,
-            currentNextChangeIndex: profile.nextChangeIndex,
-            trailingGap: trailingGap,
-            maximumAddressesPerChain: maximumAddressesPerChain
-        )
-
+        let normalizedActive = Set(active.map { $0.lowercased() })
+        guard normalizedActive.isSubset(of: Set(allCandidates.map { $0.lowercased() })) else {
+            throw TransactionHistoryError.invalidResponse
+        }
+        let plan = discoveryPlan(receiveAddresses: candidates.receiveAddresses, changeAddresses: candidates.changeAddresses,
+            activeAddresses: active, currentNextReceiveIndex: profile.nextReceiveIndex,
+            currentNextChangeIndex: profile.nextChangeIndex, trailingGap: 50, maximumAddressesPerChain: maximum)
         var discovered = profile
-        discovered.receiveAddresses = Array(
-            candidates.receiveAddresses.prefix(plan.receiveCount)
-        )
-        discovered.changeAddresses = Array(
-            candidates.changeAddresses.prefix(plan.changeCount)
-        )
+        discovered.receiveAddresses = Array(candidates.receiveAddresses.prefix(plan.receiveCount))
+        discovered.changeAddresses = Array(candidates.changeAddresses.prefix(plan.changeCount))
         discovered.nextReceiveIndex = plan.nextReceiveIndex
         discovered.nextChangeIndex = plan.nextChangeIndex
-        discovered.lastHistoricalDiscoveryAt = Date()
-        let normalizedActive = Set(active.map { $0.lowercased() })
+        discovered.lastHistoricalDiscoveryAt = now
         discovered.earliestFreshReceiveIndex = discovered.receiveAddresses.firstIndex {
             !normalizedActive.contains($0.lowercased())
         }
-
-        if plan.reachedSafetyLimit {
-            discoveryNotice = "This account has reached the supported 512-address discovery range. Existing discovered addresses remain usable, but KasSigner cannot safely prepare a full 50-address buffer beyond this point."
-        }
-
-        initialDiscoveryProgress = DiscoveryProgress(
-            title: "Synchronizing wallet",
-            detail: "Loading current UTXOs from the selected Kaspa node…",
-            fraction: 0.68
-        )
-        initialDiscoveryStage = "Synchronizing UTXOs"
-        return discovered
+        return (discovered, plan)
     }
 
     nonisolated static func discoveryPlan(

@@ -508,6 +508,9 @@ struct RootView: View {
         presentedTabs
         .onAppear {
             preferences.migrateExistingWallets(walletStore.profiles)
+            if !walletStore.prepareTestnetHistoryUpgrade() {
+                preferences.persistenceAlert = "Testnet history setup could not be saved. Check device storage and reopen the app."
+            }
             walletStore.activateNetwork(preferences.network)
             preferences.activate(walletStore.selectedProfile)
             syncService.preload(profile: walletStore.selectedProfile)
@@ -570,8 +573,7 @@ struct RootView: View {
                 try? await Task.sleep(for: .seconds(5 * 60))
                 guard !Task.isCancelled else { return }
                 guard scenePhase == .active,
-                      let profile = walletStore.selectedProfile,
-                      profile.network == KaspaNetwork.mainnet.rawValue else { continue }
+                      let profile = walletStore.selectedProfile else { continue }
                 await syncService.checkHistoricalAddressesIfNeeded(
                     profile: profile,
                     walletStore: walletStore,
@@ -636,8 +638,10 @@ struct RootView: View {
                       let profile = walletStore.selectedProfile else { return }
                 // Initial import is owned by the launch/history coordinator.
                 // A connectivity bounce must not start a second discovery.
-                guard !profile.requiresInitialDiscovery,
-                      !profile.requiresInitialHistorySync else { return }
+                if profile.requiresInitialDiscovery || profile.requiresInitialHistorySync {
+                    await refreshAfterLaunchOrActivation()
+                    return
+                }
                 await syncService.refresh(
                     profile: profile,
                     walletStore: walletStore,
@@ -703,9 +707,7 @@ struct RootView: View {
                     .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
 
                     Button("Cancel Import", role: .destructive) {
-                        discoveryPresentation.cancel()
-                        syncService.reset()
-                        walletStore.discardPendingImport()
+                        cancelInitialDiscoveryImport()
                     }
                 }
                 .padding(28)
@@ -716,6 +718,34 @@ struct RootView: View {
                 progress: discoveryPresentation.progress,
                 detail: discoveryPresentation.detail
             )
+        }
+    }
+
+    private func cancelInitialDiscoveryImport() {
+        if walletStore.pendingImportedProfile != nil {
+            discoveryPresentation.cancel()
+            syncService.reset()
+            walletStore.discardPendingImport()
+            return
+        }
+        guard let profile = walletStore.selectedProfile,
+              profile.network == "testnet-10", profile.requiresInitialDiscovery,
+              coinControlStore.prepareForRemoval(profile) else { return }
+        guard protectedVaultStore.registerWallet(profile) else {
+            coinControlStore.persistenceAlert = "Vault records could not be preserved. Import cancellation was stopped; check device storage and retry."
+            return
+        }
+        let result = walletStore.deleteAccount(profileID: profile.id) { id in
+            WalletSnapshotCache.shared.remove(profileID: id)
+            coinControlStore.removeProfileSession(profileID: id)
+        }
+        if result == .deleted || walletStore.selectedProfile?.id != profile.id {
+            syncService.reset()
+            discoveryPresentation.cancel()
+        }
+        if result != .deleted {
+            coinControlStore.persistenceAlert = walletStore.accountDeletionRecoveryMessage
+                ?? "The import could not be canceled. Check device storage and retry."
         }
     }
 
@@ -800,8 +830,7 @@ struct RootView: View {
             preferences: preferences,
             force: false,
             minimumInterval: 9,
-            includeTransactionHistory: shouldAutomaticallyRefreshHistory
-                && profile.network == KaspaNetwork.mainnet.rawValue,
+            includeTransactionHistory: shouldAutomaticallyRefreshHistory,
             keepTransactionProgressThroughReconciliation: isInitialImportedWalletSync,
             addressDiscoveryPolicy: profile.requiresInitialDiscovery
                 ? .comprehensive : .lightweight,
@@ -826,8 +855,7 @@ struct RootView: View {
             automaticallyRefreshedHistoryProfileID = profile.id
         }
 
-        if profile.network == KaspaNetwork.mainnet.rawValue,
-           !isInitialImportedWalletSync,
+        if !isInitialImportedWalletSync,
            walletStore.selectedProfileID == profile.id {
             Task { @MainActor in
                 await syncService.checkHistoricalAddressesIfNeeded(
