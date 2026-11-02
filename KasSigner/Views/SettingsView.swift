@@ -172,7 +172,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Preferences")
                 } footer: {
-                    Text("These preferences apply to the selected wallet. Address status checks whether receive addresses are fresh or used using the selected network's public API.")
+                    Text("Checks each displayed receive address using the selected network's public API to determine whether it is fresh or has been used.")
                 }
                 .disabled(walletStore.selectedProfile == nil)
 
@@ -266,8 +266,6 @@ struct SettingsView: View {
                     NavigationLink("Saved Wallet Settings") {
                         SavedWalletSettingsView()
                     }
-                } footer: {
-                    Text("Preferences are saved automatically for each wallet and retained when an account is removed.")
                 }
 
                 Section("About") {
