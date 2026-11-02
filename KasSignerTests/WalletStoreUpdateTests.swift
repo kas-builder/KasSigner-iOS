@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import XCTest
 @testable import KasSigner
 
@@ -383,3 +384,62 @@ final class WalletPreferencesPersistenceTests: XCTestCase {
     }
 }
 
+@MainActor
+final class InitialDiscoveryRetryTests: XCTestCase {
+    func testManualRetryReachesDiscoveryDespiteOfflineMonitorAndClearsOldError() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "DiscoveryRetry-\(UUID().uuidString)")
+        let suite = "DiscoveryRetry.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let storage = ProtectedWalletStorage(directoryURL: root)
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"))
+        let preferences = AppPreferences(defaults: defaults, storage: storage)
+        // This configuration rejects initial discovery before any engine/network
+        // work. Reaching that validation proves retry passed the offline gate.
+        preferences.nodeMode = .custom
+        let engine = KasSignerEngine()
+        let sync = WalletSyncService(defaults: defaults, networkAvailability: { false })
+        let profile = WalletProfile(name: "Pending", kpub: "retry-test",
+                                    requiresInitialDiscovery: true, requiresInitialHistorySync: true)
+        wallet.beginPendingImport(profile)
+        await sync.refresh(profile: profile, walletStore: wallet, engine: engine,
+                           preferences: preferences, force: true, includeTransactionHistory: false,
+                           addressDiscoveryPolicy: .comprehensive)
+        XCTAssertEqual(sync.initialDiscoveryError,
+                       "Connect to the internet and retry discovery. The wallet has not been opened.")
+        var errors: [String?] = []
+        var states: [WalletSyncService.State] = []
+        let errorSubscription = sync.$initialDiscoveryError.sink { errors.append($0) }
+        let stateSubscription = sync.$state.sink { states.append($0) }
+        defer {
+            errorSubscription.cancel()
+            stateSubscription.cancel()
+        }
+        await sync.refresh(profile: profile, walletStore: wallet, engine: engine,
+                           preferences: preferences, force: true, retryInitialDiscoveryWhenOffline: true,
+                           includeTransactionHistory: false, addressDiscoveryPolicy: .comprehensive)
+        XCTAssertEqual(sync.state, .failed("Complete discovery requires Automatic Nodes."))
+        XCTAssertTrue(sync.initialDiscoveryError?.contains("select Automatic Nodes") == true)
+        XCTAssertTrue(errors.contains(where: { $0 == nil }))
+        XCTAssertTrue(states.contains(.syncing))
+        XCTAssertNotNil(wallet.pendingImportedProfile)
+        XCTAssertTrue(wallet.profiles.isEmpty)
+        XCTAssertNil(sync.snapshot)
+
+        // The exception is scoped to this explicit retry, not future refreshes.
+        await sync.refresh(profile: profile, walletStore: wallet, engine: engine,
+                           preferences: preferences, force: true, includeTransactionHistory: false)
+        XCTAssertEqual(sync.state, .failed("No internet connection."))
+
+        // A completed account cannot use the initial-import exception.
+        let completed = WalletProfile(name: "Existing", kpub: "existing")
+        await sync.refresh(profile: completed, walletStore: wallet, engine: engine,
+                           preferences: preferences, force: true, retryInitialDiscoveryWhenOffline: true,
+                           includeTransactionHistory: false)
+        XCTAssertEqual(sync.state, .failed("No internet connection."))
+    }
+}

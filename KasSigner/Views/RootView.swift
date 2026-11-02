@@ -728,6 +728,7 @@ struct RootView: View {
                 engine: engine,
                 preferences: preferences,
                 force: true,
+                retryInitialDiscoveryWhenOffline: true,
                 includeTransactionHistory: false,
                 addressDiscoveryPolicy: .comprehensive
             )

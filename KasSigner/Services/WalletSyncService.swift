@@ -1189,6 +1189,7 @@ final class WalletSyncService: ObservableObject {
         var engine: KasSignerEngine
         var preferences: AppPreferences
         var force: Bool
+        var retryInitialDiscoveryWhenOffline: Bool
         var minimumInterval: TimeInterval
         var includeTransactionHistory: Bool
         var forceTransactionHistory: Bool
@@ -1200,6 +1201,7 @@ final class WalletSyncService: ObservableObject {
             profile = other.profile
             preferences = other.preferences
             force = force || other.force
+            retryInitialDiscoveryWhenOffline = retryInitialDiscoveryWhenOffline || other.retryInitialDiscoveryWhenOffline
             minimumInterval = min(minimumInterval, other.minimumInterval)
             includeTransactionHistory = includeTransactionHistory || other.includeTransactionHistory
             forceTransactionHistory = forceTransactionHistory || other.forceTransactionHistory
@@ -1310,6 +1312,7 @@ final class WalletSyncService: ObservableObject {
     private let defaults: UserDefaults
     private let outgoingReconciliationKeyPrefix =
         "kassigner.outgoingReconciliation.v1."
+    private let networkAvailability: (() -> Bool)?
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "org.kassigner.KasSigner.network-monitor")
 
@@ -1572,8 +1575,9 @@ final class WalletSyncService: ObservableObject {
         }
     }
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, networkAvailability: (() -> Bool)? = nil) {
         self.defaults = defaults
+        self.networkAvailability = networkAvailability
         virtualBlueScore = defaults.string(forKey: Self.cachedVirtualBlueScoreKey)
             .flatMap(UInt64.init)
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -1597,6 +1601,7 @@ final class WalletSyncService: ObservableObject {
         engine: KasSignerEngine,
         preferences: AppPreferences,
         force: Bool = true,
+        retryInitialDiscoveryWhenOffline: Bool = false,
         minimumInterval: TimeInterval = 9,
         includeTransactionHistory: Bool = true,
         forceTransactionHistory: Bool = false,
@@ -1614,6 +1619,7 @@ final class WalletSyncService: ObservableObject {
             engine: engine,
             preferences: preferences,
             force: force,
+            retryInitialDiscoveryWhenOffline: retryInitialDiscoveryWhenOffline,
             minimumInterval: minimumInterval,
             includeTransactionHistory: includeTransactionHistory && profile.network == "mainnet",
             forceTransactionHistory: forceTransactionHistory && profile.network == "mainnet",
@@ -1625,7 +1631,7 @@ final class WalletSyncService: ObservableObject {
         if let run = refreshRun,
            run.profileID == profile.id,
            run.generation == generation {
-            if !force,
+            if !force, !retryInitialDiscoveryWhenOffline,
                (!includeTransactionHistory || run.includesHistory),
                (!forceTransactionHistory || run.forcesHistory),
                (!keepTransactionProgressThroughReconciliation || run.keepsHistoryProgress),
@@ -1664,6 +1670,7 @@ final class WalletSyncService: ObservableObject {
                     engine: current.engine,
                     preferences: current.preferences,
                     force: current.force,
+                    retryInitialDiscoveryWhenOffline: current.retryInitialDiscoveryWhenOffline,
                     minimumInterval: current.minimumInterval,
                     includeTransactionHistory: current.includeTransactionHistory,
                     forceTransactionHistory: current.forceTransactionHistory,
@@ -1728,6 +1735,7 @@ final class WalletSyncService: ObservableObject {
         engine: KasSignerEngine,
         preferences: AppPreferences,
         force: Bool,
+        retryInitialDiscoveryWhenOffline: Bool,
         minimumInterval: TimeInterval,
         includeTransactionHistory: Bool,
         forceTransactionHistory: Bool,
@@ -1735,7 +1743,11 @@ final class WalletSyncService: ObservableObject {
         addressDiscoveryPolicy: AddressDiscoveryPolicy,
         onWalletReady: (() -> Void)?
     ) async {
-        guard isNetworkAvailable else {
+        // NWPathMonitor can remain stale in Simulator. An explicit initial-import
+        // retry should exercise the real connection rather than repeat this gate.
+        let canAttemptConnection = (networkAvailability?() ?? isNetworkAvailable)
+            || (retryInitialDiscoveryWhenOffline && profile.requiresInitialDiscovery)
+        guard canAttemptConnection else {
             state = .failed("No internet connection.")
             if profile.requiresInitialDiscovery {
                 initialDiscoveryProgress = nil
@@ -1778,6 +1790,9 @@ final class WalletSyncService: ObservableObject {
         }
 
         lastRefreshAttempt = Date()
+        if profile.requiresInitialDiscovery {
+            initialDiscoveryError = nil
+        }
         state = .syncing
 
         do {
