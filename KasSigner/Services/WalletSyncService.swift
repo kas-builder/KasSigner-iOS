@@ -1259,6 +1259,7 @@ final class WalletSyncService: ObservableObject {
     private var initialDiscoveryStage = "Preparing wallet discovery"
     private var initialDiscoveryCheckpoint: InitialDiscoveryCheckpoint?
 
+    var snapshotProfileID: UUID? { snapshot == nil ? nil : activeProfileID }
     private var activeProfileID: UUID?
     private var activeProfileGeneration: UInt64 = 0
     private var lastRefreshAttempt: Date?

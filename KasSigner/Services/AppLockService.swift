@@ -30,7 +30,6 @@ final class AppLockService: ObservableObject {
     private enum Key {
         static let isEnabled = "kassigner.security.appLockEnabled"
         static let lockDelay = "kassigner.security.lockDelay"
-        static let hideAppSwitcherPreview = "kassigner.security.hideAppSwitcherPreview"
         static let privacyCoverEnabled = "kassigner.security.decoyLaunchScreenEnabled"
     }
 
@@ -47,10 +46,6 @@ final class AppLockService: ObservableObject {
         didSet { defaults.set(lockDelay.rawValue, forKey: Key.lockDelay) }
     }
 
-    @Published var hideAppSwitcherPreview: Bool {
-        didSet { defaults.set(hideAppSwitcherPreview, forKey: Key.hideAppSwitcherPreview) }
-    }
-
     private let defaults: UserDefaults
     private var backgroundedAt: Date?
 
@@ -58,7 +53,6 @@ final class AppLockService: ObservableObject {
         self.defaults = defaults
         isEnabled = defaults.bool(forKey: Key.isEnabled)
         lockDelay = LockDelay(rawValue: defaults.string(forKey: Key.lockDelay) ?? "") ?? .immediately
-        hideAppSwitcherPreview = defaults.object(forKey: Key.hideAppSwitcherPreview) as? Bool ?? true
         isLocked = isEnabled
         if !isEnabled {
             defaults.set(false, forKey: Key.privacyCoverEnabled)

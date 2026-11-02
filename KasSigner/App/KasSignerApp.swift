@@ -43,6 +43,14 @@ struct KasSignerApp: App {
             .environmentObject(copyFeedbackCenter)
             .environmentObject(protectedVaultStore)
             .modelContainer(for: [PortfolioAccount.self, PortfolioTransaction.self])
+            .alert("Wallet Settings", isPresented: Binding(
+                get: { preferences.persistenceAlert != nil },
+                set: { if !$0 { preferences.persistenceAlert = nil } }
+            )) {
+                Button("OK", role: .cancel) { preferences.persistenceAlert = nil }
+            } message: {
+                Text(preferences.persistenceAlert ?? "")
+            }
             .task {
                 _ = walletStore.resumePendingAccountDeletions { profileID in
                     WalletSnapshotCache.shared.remove(profileID: profileID)
@@ -62,6 +70,8 @@ struct KasSignerApp: App {
                 }
             }
             .onChange(of: walletStore.profiles) { _, profiles in
+                preferences.migrateExistingWallets(profiles)
+                preferences.activate(walletStore.selectedProfile)
                 for profile in profiles {
                     _ = protectedVaultStore.registerWallet(profile)
                 }
@@ -134,6 +144,7 @@ private struct HistoricalPricePreparationView: View {
 
 private struct AppSecurityContainer<Content: View>: View {
     @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var syncService: WalletSyncService
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
@@ -204,7 +215,7 @@ private struct AppSecurityContainer<Content: View>: View {
 
     private var shouldCoverContent: Bool {
         appLockService.isLocked ||
-            (appLockService.hideAppSwitcherPreview && scenePhase != .active)
+            (preferences.hideAppSwitcherPreview && scenePhase != .active)
     }
 
     private var lockedView: some View {

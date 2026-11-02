@@ -103,8 +103,7 @@ struct ReceiveView: View {
     @State private var addressChain: AddressChain = .receive
     @State private var showingChangeAddressWarning = false
     @State private var showingAddressPicker = false
-    @AppStorage("kassigner.receive.openToFreshAddress.v1")
-    private var opensToFreshAddress = true
+    private var opensToFreshAddress: Bool { preferences.opensToFreshAddress }
 
     private let context = CIContext()
     private let filter = CIFilter.qrCodeGenerator()
@@ -246,7 +245,7 @@ struct ReceiveView: View {
                     )
 
                     if addressChain == .receive {
-                        Toggle("Open to Fresh Address", isOn: $opensToFreshAddress)
+                        Toggle("Open to Fresh Address", isOn: $preferences.opensToFreshAddress)
                             .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
                             .padding(.horizontal, 16)
                     }

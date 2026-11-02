@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SecuritySettingsView: View {
     @EnvironmentObject private var appLockService: AppLockService
+    @EnvironmentObject private var preferences: AppPreferences
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var appLockToggle = false
 
@@ -63,7 +64,8 @@ struct SecuritySettingsView: View {
             }
 
             Section("Privacy") {
-                Toggle("Hide App Switcher Preview", isOn: $appLockService.hideAppSwitcherPreview)
+                Toggle("Hide App Switcher Preview", isOn: $preferences.hideAppSwitcherPreview)
+                    .disabled(preferences.activeWalletIdentity == nil)
                 NavigationLink("Decoy Launch") {
                     DecoyLaunchSettingsView()
                 }

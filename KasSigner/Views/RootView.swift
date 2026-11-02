@@ -507,7 +507,9 @@ struct RootView: View {
     var body: some View {
         presentedTabs
         .onAppear {
+            preferences.migrateExistingWallets(walletStore.profiles)
             walletStore.activateNetwork(preferences.network)
+            preferences.activate(walletStore.selectedProfile)
             syncService.preload(profile: walletStore.selectedProfile)
             coinControlStore.activate(profileID: walletStore.selectedProfileID)
             applyDefaultKYCStatuses()
@@ -516,6 +518,8 @@ struct RootView: View {
             }
         }
         .onChange(of: walletStore.selectedProfileID) { _, profileID in
+            syncService.preload(profile: walletStore.selectedProfile)
+            preferences.activate(walletStore.selectedProfile)
             coinControlStore.activate(profileID: profileID)
             applyDefaultKYCStatuses()
         }
@@ -663,7 +667,9 @@ struct RootView: View {
     }
 
     private func applyDefaultKYCStatuses() {
-        guard walletStore.selectedProfileID != nil,
+        guard let profile = walletStore.selectedProfile,
+              preferences.activeWalletIdentity == profile.stableIdentity,
+              syncService.snapshotProfileID == profile.id,
               let snapshot = syncService.snapshot else { return }
         coinControlStore.activate(profileID: walletStore.selectedProfileID)
         coinControlStore.applyDefaultKYCStatus(

@@ -172,8 +172,9 @@ struct SettingsView: View {
                 } header: {
                     Text("Preferences")
                 } footer: {
-                    Text("Checks each displayed receive address using the selected network's public API to determine whether it is fresh or has been used.")
+                    Text("These preferences apply to the selected wallet. Address status checks whether receive addresses are fresh or used using the selected network's public API.")
                 }
+                .disabled(walletStore.selectedProfile == nil)
 
                 Section {
                     Picker("Kaspa Network", selection: $preferences.network) {
@@ -259,6 +260,14 @@ struct SettingsView: View {
                     } footer: {
                         Text("Extends the watch-only receive and change address pools from the imported kpub. Private keys remain on the signing device.")
                     }
+                }
+
+                Section {
+                    NavigationLink("Saved Wallet Settings") {
+                        SavedWalletSettingsView()
+                    }
+                } footer: {
+                    Text("Preferences are saved automatically for each wallet and retained when an account is removed.")
                 }
 
                 Section("About") {
@@ -353,6 +362,7 @@ struct SettingsView: View {
                 Text(
                     "This removes “\(profile.name)” from this iPhone. "
                         + "It does not affect funds or the KasSigner device. "
+                        + "Wallet preferences are kept for future imports. Transaction labels, UTXO labels, and KYC badges are removed. "
                         + (protectedVaultStore.vaults(for: profile.id).isEmpty
                            ? ""
                            : "This account has saved vaults. Keep your recovery words and export their vault records before deleting it.")
@@ -867,5 +877,59 @@ private struct DonateView: View {
     private func copyDonationAddress() {
         UIPasteboard.general.string = donationAddress
         copyFeedbackCenter.showCopied(donationAddress)
+    }
+}
+
+private struct SavedWalletSettingsView: View {
+    @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var walletStore: WalletStore
+    @State private var pending: SavedWalletPreferences?
+
+    private var retainedSettings: [SavedWalletPreferences] {
+        let imported = Set(walletStore.profiles.map(\.stableIdentity))
+        return preferences.savedWallets.filter { !imported.contains($0.id) }
+    }
+
+    var body: some View {
+        List {
+            if retainedSettings.isEmpty {
+                Text("No settings for removed wallets.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Section {
+                    ForEach(retainedSettings) { record in
+                        Button(role: .destructive) {
+                            pending = record
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(record.name)
+                                Text(record.network == "testnet-10" ? "Testnet 10" : "Mainnet")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(String(record.id.prefix(12)))
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .accessibilityLabel("Forget saved settings for \(record.name)")
+                    }
+                } footer: {
+                    Text("Choose a removed wallet to forget its saved preferences. Its next import will use the default settings.")
+                }
+            }
+        }
+        .navigationTitle("Saved Wallet Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("Forget Saved Settings?", isPresented: Binding(
+            get: { pending != nil }, set: { if !$0 { pending = nil } }
+        ), titleVisibility: .visible, presenting: pending) { record in
+            Button("Forget Saved Settings", role: .destructive) {
+                _ = preferences.forgetSavedSettings(identity: record.id)
+                pending = nil
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        } message: { record in
+            Text("The next import of “\(record.name)” will use the default settings. This does not affect funds or vault records.")
+        }
     }
 }
