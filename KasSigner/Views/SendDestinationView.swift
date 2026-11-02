@@ -48,6 +48,9 @@ struct SendDestinationView: View {
     @State private var sendMax = false
     @State private var selectedFee: SendFeeChoice = .normal
     @State private var customFeeText = ""
+    @State private var draftLabel = ""
+    @State private var includesLabelInTransactionCard = false
+    @State private var includesLabelInUTXOCard = false
     @State private var addressScanRequest: SendAddressScanRequest?
     @State private var unsignedPSKB: String?
     @State private var showingBuildError = false
@@ -355,11 +358,13 @@ struct SendDestinationView: View {
                         }
                         changeAddressCard
                         feeCard
+                        labelCard
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                 }
                 .background(Color(.systemGroupedBackground))
+                .scrollDismissesKeyboard(.interactively)
                 .onChange(of: selectedFee) { _, choice in
                     guard choice == .custom else {
                         customFeeFieldFocused = false
@@ -1686,6 +1691,65 @@ struct SendDestinationView: View {
             }
         }
         .sendStyleCard()
+    }
+
+    private var labelCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Label")
+                .font(.headline)
+
+            TextField("Optional label", text: $draftLabel, axis: .vertical)
+                .font(.subheadline)
+                .lineLimit(1...3)
+                .padding(12)
+                .background(
+                    Color(.tertiarySystemGroupedBackground),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                }
+                .accessibilityLabel("Optional transaction label")
+
+            VStack(spacing: 0) {
+                labelCheckbox(
+                    "Include label in transaction card",
+                    isChecked: $includesLabelInTransactionCard
+                )
+                labelCheckbox(
+                    "Include label in UTXO card",
+                    isChecked: $includesLabelInUTXOCard
+                )
+            }
+        }
+        .sendStyleCard()
+    }
+
+    private func labelCheckbox(_ title: String, isChecked: Binding<Bool>) -> some View {
+        Button {
+            isChecked.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isChecked.wrappedValue ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 21, weight: .regular))
+                    .foregroundStyle(isChecked.wrappedValue ? accentColor : Color.secondary)
+                    .accessibilityHidden(true)
+
+                Text(title)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+
+                Spacer(minLength: 0)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue(isChecked.wrappedValue ? "Checked" : "Unchecked")
+        .accessibilityAddTraits(isChecked.wrappedValue ? .isSelected : [])
     }
 
     private func validateDestinationAddress(_ address: String) {
