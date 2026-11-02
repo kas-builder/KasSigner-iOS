@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1029,9 +1028,7 @@ final class ProtectedVaultStore: ObservableObject {
     }
 
     private static func fingerprint(for profile: WalletProfile) -> String {
-        let identity = "\(profile.network.lowercased()):\(profile.kpub)"
-        return SHA256.hash(data: Data(identity.utf8))
-            .map { String(format: "%02x", $0) }.joined()
+        profile.stableIdentity
     }
 
     @discardableResult

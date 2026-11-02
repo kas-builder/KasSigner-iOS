@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct WalletProfile: Identifiable, Codable, Equatable {
     let id: UUID
@@ -14,6 +15,15 @@ struct WalletProfile: Identifiable, Codable, Equatable {
     var lastHistoricalDiscoveryAt: Date?
     var requiresInitialDiscovery: Bool
     var requiresInitialHistorySync: Bool
+
+    /// Stable across imports and renames. Keep this encoding compatible with
+    /// existing protected-vault fingerprints; kpubs are case-sensitive.
+    /// This identifies an account, but does not authenticate ownership.
+    var stableIdentity: String {
+        let identity = "\(network.lowercased()):\(kpub)"
+        return SHA256.hash(data: Data(identity.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
 
     init(
         id: UUID = UUID(),
