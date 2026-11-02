@@ -440,7 +440,7 @@ struct RootView: View {
             Text(syncService.discoveryNotice ?? "")
         }
         .alert(
-            "UTXO badge storage",
+            "Label and UTXO badge storage",
             isPresented: Binding(
                 get: { coinControlStore.persistenceAlert != nil },
                 set: { if !$0 { coinControlStore.persistenceAlert = nil } }
@@ -511,7 +511,7 @@ struct RootView: View {
             walletStore.activateNetwork(preferences.network)
             preferences.activate(walletStore.selectedProfile)
             syncService.preload(profile: walletStore.selectedProfile)
-            coinControlStore.activate(profileID: walletStore.selectedProfileID)
+            coinControlStore.activate(profile: walletStore.selectedProfile)
             applyDefaultKYCStatuses()
             if isInitialDiscoveryBlocking {
                 discoveryPresentation.start()
@@ -520,7 +520,7 @@ struct RootView: View {
         .onChange(of: walletStore.selectedProfileID) { _, profileID in
             syncService.preload(profile: walletStore.selectedProfile)
             preferences.activate(walletStore.selectedProfile)
-            coinControlStore.activate(profileID: profileID)
+            coinControlStore.activate(profile: walletStore.selectedProfile)
             applyDefaultKYCStatuses()
         }
         .onChange(of: preferences.network) { _, network in
@@ -671,7 +671,7 @@ struct RootView: View {
               preferences.activeWalletIdentity == profile.stableIdentity,
               syncService.snapshotProfileID == profile.id,
               let snapshot = syncService.snapshot else { return }
-        coinControlStore.activate(profileID: walletStore.selectedProfileID)
+        coinControlStore.activate(profile: walletStore.selectedProfile)
         coinControlStore.applyDefaultKYCStatus(
             to: snapshot.utxos,
             defaultStatus: preferences.utxoCardDefault.badgeStatus
@@ -1328,7 +1328,7 @@ struct UTXOsView: View {
             }
             .navigationTitle("UTXOs")
             .onAppear {
-                coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
+                coinControlStore.activate(profile: walletStore.selectedProfile)
                 knownUTXOIDs = Set(utxos.map(\.id))
             }
             .onChange(of: utxos.map(\.id)) { _, ids in
@@ -1342,7 +1342,7 @@ struct UTXOsView: View {
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
-                coinControlStore.activate(profileID: newValue)
+                coinControlStore.activate(profile: walletStore.selectedProfile)
             }
             .overlay {
                 if isLabelEditorPresented,

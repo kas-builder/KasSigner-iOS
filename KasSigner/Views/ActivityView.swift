@@ -91,12 +91,12 @@ struct ActivityView: View {
                 await loadHistoricalUSDPrices()
             }
             .onAppear {
-                coinControlStore.activate(profileID: walletStore.selectedProfile?.id)
+                coinControlStore.activate(profile: walletStore.selectedProfile)
                 refreshCachedTransactions()
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
-                coinControlStore.activate(profileID: newValue)
+                coinControlStore.activate(profile: walletStore.selectedProfile)
                 refreshCachedTransactions()
             }
             .onChange(of: walletStore.transactionRevision) { _, _ in

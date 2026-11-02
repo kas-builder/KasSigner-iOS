@@ -319,7 +319,7 @@ final class WalletPreferencesPersistenceTests: XCTestCase {
         let storage = ProtectedWalletStorage(directoryURL: root)
         let output = WalletUTXO(txID: "saved", index: 2, amount: 1, scriptPublicKey: [], blockDAAScore: 1, covenantID: nil)
         let coins = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
-        coins.activate(profileID: profile.id)
+        coins.activate(profile: profile)
         coins.setLabel("UTXO label", for: output)
         coins.setLabel("Transaction label", forTransactionID: output.txID)
         coins.setKYCStatus(.nonKYC, for: output)
@@ -328,7 +328,7 @@ final class WalletPreferencesPersistenceTests: XCTestCase {
         preferences.activate(profile)
         preferences.utxoCardDefault = .kyc
         let restored = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
-        restored.activate(profileID: profile.id)
+        restored.activate(profile: profile)
         XCTAssertEqual(restored.label(for: output), "UTXO label")
         XCTAssertEqual(restored.label(forTransactionID: output.txID), "Transaction label")
         XCTAssertEqual(restored.kycStatus(for: output), .nonKYC)
@@ -343,7 +343,7 @@ final class WalletPreferencesPersistenceTests: XCTestCase {
         let existing = WalletUTXO(txID: "existing", index: 0, amount: 1, scriptPublicKey: [], blockDAAScore: 1, covenantID: nil)
         let incoming = WalletUTXO(txID: "incoming", index: 0, amount: 1, scriptPublicKey: [], blockDAAScore: 2, covenantID: nil)
         preferences.activate(main)
-        coins.activate(profileID: main.id)
+        coins.activate(profile: main)
         coins.applyDefaultKYCStatus(to: [], defaultStatus: preferences.utxoCardDefault.badgeStatus)
         coins.applyDefaultKYCStatus(to: [existing], defaultStatus: preferences.utxoCardDefault.badgeStatus)
         XCTAssertNil(coins.kycStatus(for: existing))
@@ -353,12 +353,12 @@ final class WalletPreferencesPersistenceTests: XCTestCase {
         XCTAssertEqual(coins.kycStatus(for: existing), .nonKYC)
         XCTAssertEqual(coins.kycStatus(for: incoming), .kyc)
         preferences.activate(test)
-        coins.activate(profileID: test.id)
+        coins.activate(profile: test)
         coins.applyDefaultKYCStatus(to: [], defaultStatus: preferences.utxoCardDefault.badgeStatus)
         coins.applyDefaultKYCStatus(to: [existing, incoming], defaultStatus: preferences.utxoCardDefault.badgeStatus)
         XCTAssertNil(coins.kycStatus(for: existing))
         XCTAssertNil(coins.kycStatus(for: incoming))
-        coins.activate(profileID: main.id)
+        coins.activate(profile: main)
         XCTAssertEqual(coins.kycStatus(for: existing), .nonKYC)
         XCTAssertEqual(coins.kycStatus(for: incoming), .kyc)
     }
@@ -441,5 +441,209 @@ final class InitialDiscoveryRetryTests: XCTestCase {
                            preferences: preferences, force: true, retryInitialDiscoveryWhenOffline: true,
                            includeTransactionHistory: false)
         XCTAssertEqual(sync.state, .failed("No internet connection."))
+    }
+}
+
+@MainActor
+final class WalletCardMetadataPersistenceTests: XCTestCase {
+    private var root: URL!
+    private var defaults: UserDefaults!
+    private var suite: String!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        root = FileManager.default.temporaryDirectory.appending(path: "CardMetadata-\(UUID().uuidString)")
+        suite = "CardMetadata.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suite)!
+    }
+
+    override func tearDown() async throws {
+        defaults.removePersistentDomain(forName: suite)
+        if FileManager.default.fileExists(atPath: root.path) { try FileManager.default.removeItem(at: root) }
+        try await super.tearDown()
+    }
+
+    private var storage: ProtectedWalletStorage { ProtectedWalletStorage(directoryURL: root) }
+    private func makeStore() -> UTXOCoinControlStore {
+        UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
+    }
+    private func utxo(_ id: String = "transaction", index: UInt32 = 0) -> WalletUTXO {
+        WalletUTXO(txID: id, index: index, amount: 100_000_000, scriptPublicKey: [], blockDAAScore: 1, covenantID: nil)
+    }
+    private func metadataFile(_ profile: WalletProfile) -> URL {
+        root.appending(path: "wallet-card-metadata-\(profile.stableIdentity).json")
+    }
+
+    func testLatestLabelsAndBadgesSurviveActualRemovalAndReimportOnBothNetworks() throws {
+        let coins = makeStore()
+        let wallet = WalletStore(protectedStorage: storage, defaults: defaults,
+                                 transactionCacheDirectoryURL: root.appending(path: "history"),
+                                 removeTestnetSeed: { _ in })
+        let output = utxo()
+        for network in ["mainnet", "testnet-10"] {
+            let profile = WalletProfile(name: "Original", kpub: "same-kpub", network: network)
+            XCTAssertTrue(wallet.add(profile))
+            coins.activate(profile: profile)
+            coins.setLabel("Old UTXO", for: output)
+            coins.setLabel("Latest UTXO", for: output)
+            coins.setLabel("Old transaction", forTransactionID: output.txID)
+            coins.setLabel("Latest transaction", forTransactionID: output.txID)
+            coins.setKYCStatus(.kyc, for: output)
+            coins.setKYCStatus(.nonKYC, for: output)
+            XCTAssertTrue(coins.toggle(output))
+            XCTAssertTrue(coins.prepareForRemoval(profile))
+            XCTAssertEqual(wallet.deleteAccount(profileID: profile.id) { id in
+                coins.removeProfileSession(profileID: id)
+            }, .deleted)
+            XCTAssertTrue(coins.selectedOutpoints.isEmpty)
+            XCTAssertNil(wallet.selectedProfile)
+            let reimport = WalletProfile(name: "Renamed", kpub: profile.kpub, network: network)
+            XCTAssertNotEqual(profile.id, reimport.id)
+            XCTAssertTrue(wallet.add(reimport))
+            let restarted = makeStore()
+            restarted.activate(profile: reimport)
+            XCTAssertEqual(restarted.label(for: output), "Latest UTXO")
+            XCTAssertEqual(restarted.label(forTransactionID: output.txID), "Latest transaction")
+            XCTAssertEqual(restarted.kycStatus(for: output), .nonKYC)
+            XCTAssertTrue(restarted.selectedOutpoints.isEmpty)
+            XCTAssertNil(restarted.persistenceAlert)
+            XCTAssertEqual(wallet.deleteAccount(profileID: reimport.id), .deleted)
+        }
+    }
+
+    func testDifferentWalletsNetworksAndOutputIndexesStaySeparate() {
+        let coins = makeStore()
+        let main = WalletProfile(name: "Same name", kpub: "same")
+        let test = WalletProfile(name: "Same name", kpub: "same", network: "testnet-10")
+        let other = WalletProfile(name: "Same name", kpub: "other")
+        let first = utxo(index: 0)
+        let second = utxo(index: 1)
+        coins.activate(profile: main)
+        coins.setLabel("First output", for: first)
+        coins.setLabel("Second output", for: second)
+        coins.setLabel("Transaction", forTransactionID: first.txID)
+        coins.setKYCStatus(.kyc, for: first)
+        coins.setKYCStatus(.nonKYC, for: second)
+        for profile in [test, other] {
+            coins.activate(profile: profile)
+            XCTAssertEqual(coins.label(for: first), "")
+            XCTAssertEqual(coins.label(forTransactionID: first.txID), "")
+            XCTAssertNil(coins.kycStatus(for: first))
+        }
+        coins.activate(profile: main)
+        XCTAssertEqual(coins.label(for: first), "First output")
+        XCTAssertEqual(coins.label(for: second), "Second output")
+        XCTAssertEqual(coins.kycStatus(for: second), .nonKYC)
+    }
+
+    func testProtectedLegacyMigrationAndClearsDoNotResurrectOlderValues() throws {
+        let profile = WalletProfile(name: "Legacy", kpub: "legacy")
+        let output = utxo("ABCD")
+        let suffix = profile.id.uuidString.lowercased()
+        XCTAssertTrue(storage.save(["ABCD:0": "Legacy UTXO", "transaction:abcd": "Legacy transaction"],
+                                   fileName: "utxo-labels-\(suffix).json"))
+        XCTAssertTrue(storage.save(["ABCD:0": UTXOKYCStatus.kyc], fileName: "utxo-kyc-statuses-\(suffix).json"))
+        XCTAssertTrue(storage.save(Set(["ABCD:0"]), fileName: "utxo-known-ids-\(suffix).json"))
+        let coins = makeStore()
+        coins.migrateExistingWallets([profile])
+        coins.activate(profile: profile)
+        XCTAssertEqual(coins.label(for: output), "Legacy UTXO")
+        XCTAssertEqual(coins.label(forTransactionID: " ABCD "), "Legacy transaction")
+        XCTAssertEqual(coins.kycStatus(for: output), .kyc)
+        coins.setLabel(" ", for: output)
+        coins.setLabel("", forTransactionID: output.txID)
+        coins.setKYCStatus(nil, for: output)
+        for restoredProfile in [profile, WalletProfile(name: "Reimport", kpub: profile.kpub)] {
+            let restored = makeStore()
+            restored.activate(profile: restoredProfile)
+            restored.applyDefaultKYCStatus(to: [output, utxo("new")], defaultStatus: .kyc)
+            XCTAssertEqual(restored.label(for: output), "")
+            XCTAssertEqual(restored.label(forTransactionID: output.txID), "")
+            XCTAssertNil(restored.kycStatus(for: output))
+            XCTAssertEqual(restored.kycStatus(for: utxo("new")), .kyc)
+            XCTAssertNil(restored.persistenceAlert)
+        }
+    }
+
+    func testUserDefaultsLegacyMigrationPreservesLabelsAndBadges() throws {
+        let profile = WalletProfile(name: "Legacy", kpub: "defaults", network: "testnet-10")
+        let output = utxo()
+        defaults.set(try JSONEncoder().encode([output.id: "UTXO", "transaction:transaction": "Transaction"]),
+                     forKey: "kassigner.utxoLabels.v1." + profile.id.uuidString)
+        defaults.set(try JSONEncoder().encode([output.id: UTXOKYCStatus.nonKYC]),
+                     forKey: "kassigner.utxoKYCStatuses.v1." + profile.id.uuidString)
+        defaults.set(try JSONEncoder().encode(Set([output.id])),
+                     forKey: "kassigner.knownUTXOs.v1." + profile.id.uuidString)
+        let coins = makeStore()
+        XCTAssertTrue(coins.prepareForRemoval(profile)) // Includes an unopened wallet.
+        XCTAssertNil(defaults.data(forKey: "kassigner.utxoLabels.v1." + profile.id.uuidString))
+        XCTAssertNil(defaults.data(forKey: "kassigner.utxoKYCStatuses.v1." + profile.id.uuidString))
+        XCTAssertNil(defaults.data(forKey: "kassigner.knownUTXOs.v1." + profile.id.uuidString))
+        coins.removeProfileSession(profileID: profile.id)
+        coins.activate(profile: WalletProfile(name: "New name", kpub: profile.kpub, network: profile.network))
+        XCTAssertEqual(coins.label(for: output), "UTXO")
+        XCTAssertEqual(coins.label(forTransactionID: output.txID), "Transaction")
+        XCTAssertEqual(coins.kycStatus(for: output), .nonKYC)
+    }
+
+    func testUnreadableStableMetadataBlocksEditsAndRemovalWithoutOverwriting() throws {
+        let profile = WalletProfile(name: "Broken", kpub: "broken")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let bytes = Data("invalid JSON".utf8)
+        try bytes.write(to: metadataFile(profile))
+        let coins = makeStore()
+        coins.activate(profile: profile)
+        coins.setLabel("Overwrite", for: utxo())
+        coins.setKYCStatus(.kyc, for: utxo())
+        XCTAssertFalse(coins.prepareForRemoval(profile))
+        XCTAssertEqual(coins.label(for: utxo()), "")
+        XCTAssertNil(coins.kycStatus(for: utxo()))
+        XCTAssertNotNil(coins.persistenceAlert)
+        XCTAssertEqual(try Data(contentsOf: metadataFile(profile)), bytes)
+    }
+
+    func testCorruptLegacyComponentDoesNotPartiallyMigrateOrEraseLabels() throws {
+        let profile = WalletProfile(name: "Broken", kpub: "legacy-broken")
+        let suffix = profile.id.uuidString.lowercased()
+        XCTAssertTrue(storage.save([utxo().id: "Keep me"], fileName: "utxo-labels-\(suffix).json"))
+        let badgeFile = root.appending(path: "utxo-kyc-statuses-\(suffix).json")
+        try Data("invalid".utf8).write(to: badgeFile)
+        let coins = makeStore()
+        XCTAssertFalse(coins.prepareForRemoval(profile))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: metadataFile(profile).path))
+        let original: [String: String]? = storage.load([String: String].self, fileName: "utxo-labels-\(suffix).json")
+        XCTAssertEqual(original?[utxo().id], "Keep me")
+    }
+
+    func testFailedSavesKeepPriorLabelsBadgesAndKnownOutputState() throws {
+        let profile = WalletProfile(name: "Wallet", kpub: "save-failure")
+        let coins = makeStore()
+        let output = utxo()
+        coins.activate(profile: profile)
+        coins.applyDefaultKYCStatus(to: [], defaultStatus: .kyc)
+        coins.setLabel("Original", for: output)
+        coins.setLabel("Original transaction", forTransactionID: output.txID)
+        coins.setKYCStatus(.nonKYC, for: output)
+        let file = metadataFile(profile)
+        let backup = root.appending(path: "backup.json")
+        try FileManager.default.moveItem(at: file, to: backup)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        coins.setLabel("New", for: output)
+        coins.setLabel("New transaction", forTransactionID: output.txID)
+        coins.setKYCStatus(.kyc, for: output)
+        coins.applyDefaultKYCStatus(to: [output, utxo("incoming")], defaultStatus: .kyc)
+        XCTAssertEqual(coins.label(for: output), "Original")
+        XCTAssertEqual(coins.label(forTransactionID: output.txID), "Original transaction")
+        XCTAssertEqual(coins.kycStatus(for: output), .nonKYC)
+        XCTAssertNil(coins.kycStatus(for: utxo("incoming")))
+        XCTAssertNotNil(coins.persistenceAlert)
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.moveItem(at: backup, to: file)
+        let restored = makeStore()
+        restored.activate(profile: WalletProfile(name: "Reimport", kpub: profile.kpub))
+        restored.applyDefaultKYCStatus(to: [output, utxo("incoming")], defaultStatus: .kyc)
+        XCTAssertEqual(restored.label(for: output), "Original")
+        XCTAssertEqual(restored.kycStatus(for: output), .nonKYC)
+        XCTAssertEqual(restored.kycStatus(for: utxo("incoming")), .kyc)
     }
 }

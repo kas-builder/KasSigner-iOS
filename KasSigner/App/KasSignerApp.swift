@@ -52,9 +52,10 @@ struct KasSignerApp: App {
                 Text(preferences.persistenceAlert ?? "")
             }
             .task {
+                coinControlStore.migrateExistingWallets(walletStore.profiles)
                 _ = walletStore.resumePendingAccountDeletions { profileID in
                     WalletSnapshotCache.shared.remove(profileID: profileID)
-                    coinControlStore.removeData(profileID: profileID)
+                    coinControlStore.removeProfileSession(profileID: profileID)
                 }
                 for profile in walletStore.profiles {
                     _ = protectedVaultStore.registerWallet(profile)
@@ -66,7 +67,7 @@ struct KasSignerApp: App {
                 guard phase == .active else { return }
                 _ = walletStore.resumePendingAccountDeletions { profileID in
                     WalletSnapshotCache.shared.remove(profileID: profileID)
-                    coinControlStore.removeData(profileID: profileID)
+                    coinControlStore.removeProfileSession(profileID: profileID)
                 }
             }
             .onChange(of: walletStore.profiles) { _, profiles in

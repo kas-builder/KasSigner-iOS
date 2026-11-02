@@ -1400,16 +1400,16 @@ final class UTXOBadgePersistenceTests: XCTestCase {
         let storage = ProtectedWalletStorage(directoryURL: FileManager.default.temporaryDirectory
             .appendingPathComponent("utxo-badges-\(UUID().uuidString)"))
         let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
-        let profileID = UUID()
+        let profile = WalletProfile(name: "Wallet", kpub: "badge-test")
         let output = utxo("existing")
         let first = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
-        first.activate(profileID: profileID)
+        first.activate(profile: profile)
         first.applyDefaultKYCStatus(to: [output], defaultStatus: .kyc)
         first.setKYCStatus(.nonKYC, for: output)
         XCTAssertNil(first.persistenceAlert)
 
         let reloaded = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
-        reloaded.activate(profileID: profileID)
+        reloaded.activate(profile: profile)
         reloaded.applyDefaultKYCStatus(to: [output, utxo("new")], defaultStatus: .kyc)
         XCTAssertEqual(reloaded.kycStatus(for: output), .nonKYC)
         XCTAssertEqual(reloaded.kycStatus(for: utxo("new")), .kyc)
@@ -1423,7 +1423,7 @@ final class UTXOBadgePersistenceTests: XCTestCase {
         let defaults = UserDefaults(suiteName: "utxo-badges-\(UUID().uuidString)")!
         let store = UTXOCoinControlStore(protectedStorage: storage, defaults: defaults)
         let output = utxo("manual")
-        store.activate(profileID: UUID())
+        store.activate(profile: WalletProfile(name: "Wallet", kpub: "badge-test"))
         store.setKYCStatus(.nonKYC, for: output)
         XCTAssertNil(store.kycStatus(for: output))
         XCTAssertNotNil(store.persistenceAlert)
@@ -1433,7 +1433,8 @@ final class UTXOBadgePersistenceTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("utxo-badges-corrupt-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let profileID = UUID()
+        let profile = WalletProfile(name: "Wallet", kpub: "badge-test")
+        let profileID = profile.id
         try Data("invalid".utf8).write(to: directory.appendingPathComponent(
             "utxo-kyc-statuses-\(profileID.uuidString.lowercased()).json"
         ))
@@ -1442,7 +1443,7 @@ final class UTXOBadgePersistenceTests: XCTestCase {
             protectedStorage: ProtectedWalletStorage(directoryURL: directory), defaults: defaults
         )
         let output = utxo("manual")
-        store.activate(profileID: profileID)
+        store.activate(profile: profile)
         store.setKYCStatus(.nonKYC, for: output)
         XCTAssertNil(store.kycStatus(for: output))
         XCTAssertNotNil(store.persistenceAlert)

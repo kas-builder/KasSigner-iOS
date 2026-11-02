@@ -6970,7 +6970,7 @@ private struct VaultFundingUTXOSelectionView: View {
             )
         }
         .onAppear {
-            coinControlStore.activate(profileID: profile.id)
+            coinControlStore.activate(profile: profile)
             guard selectionSession.begin(profileID: profile.id) else { return }
             coinControlStore.clearSelection()
         }
@@ -8156,7 +8156,7 @@ struct SendUTXOSelectionView: View {
             }
         }
         .onAppear {
-            coinControlStore.activate(profileID: profile.id)
+            coinControlStore.activate(profile: profile)
             if protectedVaultSelection != nil {
                 coinControlStore.clearSelection()
                 let selectedIDs = Set(initialProtectedVaultUTXOs.map(\.id))

@@ -360,7 +360,7 @@ struct SettingsView: View {
                 Text(
                     "This removes “\(profile.name)” from this iPhone. "
                         + "It does not affect funds or the KasSigner device. "
-                        + "Wallet preferences are kept for future imports. Transaction labels, UTXO labels, and KYC badges are removed. "
+                        + "Wallet preferences, transaction labels, UTXO labels, and KYC badges are kept for future imports. "
                         + (protectedVaultStore.vaults(for: profile.id).isEmpty
                            ? ""
                            : "This account has saved vaults. Keep your recovery words and export their vault records before deleting it.")
@@ -539,6 +539,11 @@ struct SettingsView: View {
             return
         }
 
+        guard coinControlStore.prepareForRemoval(profile) else {
+            profilePendingDeletion = nil
+            return
+        }
+
         guard protectedVaultStore.registerWallet(profile) else {
             seedRevealError = "Vault records could not be saved. Account deletion was canceled."
             profilePendingDeletion = nil
@@ -548,7 +553,7 @@ struct SettingsView: View {
         let wasSelected = walletStore.selectedProfile?.id == profile.id
         let result = walletStore.deleteAccount(profileID: profile.id) { removedProfileID in
             WalletSnapshotCache.shared.remove(profileID: removedProfileID)
-            coinControlStore.removeData(profileID: removedProfileID)
+            coinControlStore.removeProfileSession(profileID: removedProfileID)
         }
 
         if wasSelected && !walletStore.profiles.contains(where: { $0.id == profile.id }) {
