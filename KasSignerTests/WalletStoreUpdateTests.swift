@@ -1554,3 +1554,145 @@ final class TestnetFullHistoryTests: XCTestCase {
         XCTAssertEqual(reloaded.kycStatus(for: output), .nonKYC)
     }
 }
+
+final class TransactionAcceptanceTests: XCTestCase {
+    private func row(_ profileID: UUID, status: WalletTransactionStatus, score: UInt64? = nil,
+                     local: Bool = false) -> WalletTransaction {
+        WalletTransaction(profileID: profileID, transactionID: "acceptance-test", destination: "recipient",
+            amountSompi: 100, feeSompi: 1, broadcastAt: .distantPast, direction: .sent,
+            status: status, acceptingBlockBlueScore: score, isLocallyBroadcast: local)
+    }
+
+    func testBroadcastRemainsInternallyPendingWhileDisplayChecksConfirmations() throws {
+        let id = UUID()
+        XCTAssertEqual(row(id, status: .pending).confirmationPresentation(currentBlueScore: nil), .checking)
+        let local = row(id, status: .pending, local: true)
+        XCTAssertEqual(local.confirmationPresentation(currentBlueScore: nil), .checking)
+        let decoded = try JSONDecoder().decode(WalletTransaction.self, from: JSONEncoder().encode(local))
+        XCTAssertEqual(decoded.confirmationPresentation(currentBlueScore: nil), .checking)
+        XCTAssertEqual(decoded.status, .pending)
+        XCTAssertTrue(decoded.isLocallyBroadcast)
+        XCTAssertTrue(decoded.requiresAcceptanceResolution)
+        XCTAssertEqual(row(id, status: .pending, score: 100, local: true)
+            .confirmationPresentation(currentBlueScore: 102), .count(2))
+    }
+
+    func testWeakResponsesCannotEraseAcceptanceOrChangeIdentity() {
+        let id = UUID()
+        let accepted = row(id, status: .confirmed, score: 100, local: true)
+        let merged = row(id, status: .checking).preservingAcceptance(from: accepted)
+        XCTAssertEqual(merged.id, accepted.id)
+        XCTAssertEqual(merged.acceptingBlockBlueScore, 100)
+        XCTAssertEqual(merged.confirmationPresentation(currentBlueScore: 350), .confirmed)
+        let local = row(id, status: .pending, local: true)
+        XCTAssertEqual(row(id, status: .checking).preservingAcceptance(from: local)
+            .confirmationPresentation(currentBlueScore: nil), .checking)
+    }
+
+    @MainActor
+    func testCacheWriteFailureKeepsAcceptanceVisibleAndRetryPersistsIt() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let suite = "AcceptanceFailure.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let cache = root.appending(path: "history")
+        try Data("blocked cache directory".utf8).write(to: cache)
+        let storage = ProtectedWalletStorage(directoryURL: root.appending(path: "wallet"))
+        let store = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache,
+                                removeTestnetSeed: { _ in })
+        let profile = WalletProfile(name: "Test", kpub: "public")
+        XCTAssertTrue(store.add(profile))
+        store.mergeResolvedTransactions([row(profile.id, status: .confirmed, score: 100)], profileID: profile.id)
+        XCTAssertNotNil(store.transactionPersistenceErrors[profile.id])
+        store.reloadCachedTransactions(profileID: profile.id)
+        XCTAssertEqual(store.transactions.first?.acceptingBlockBlueScore, 100)
+        try FileManager.default.removeItem(at: cache)
+        store.mergeResolvedTransactions([row(profile.id, status: .checking)], profileID: profile.id)
+        XCTAssertNil(store.transactionPersistenceErrors[profile.id])
+        let relaunched = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache,
+                                     removeTestnetSeed: { _ in })
+        XCTAssertEqual(relaunched.transactions.first?.acceptingBlockBlueScore, 100)
+    }
+
+    @MainActor
+    func testStaleHistoryCacheAndRelaunchPreserveAcceptanceOnBothNetworks() throws {
+        for network in ["mainnet", "testnet-10"] {
+            let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            let suite = "Acceptance.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+            let storage = ProtectedWalletStorage(directoryURL: root.appending(path: "wallet"))
+            let cache = root.appending(path: "history")
+            let store = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache,
+                                    removeTestnetSeed: { _ in })
+            let profile = WalletProfile(name: "Test", kpub: "public", network: network)
+            XCTAssertTrue(store.add(profile))
+            let accepted = row(profile.id, status: .confirmed, score: 100)
+            store.mergeResolvedTransactions([accepted], profileID: profile.id)
+            XCTAssertTrue(store.mergeSyncedTransactions([row(profile.id, status: .checking)], profileID: profile.id))
+            XCTAssertEqual(store.transactions.first?.acceptingBlockBlueScore, 100)
+            let weak = row(profile.id, status: .checking)
+            try JSONEncoder().encode([weak]).write(to: cache.appending(path: profile.id.uuidString.lowercased() + ".json"))
+            store.reloadCachedTransactions(profileID: profile.id)
+            XCTAssertEqual(store.transactions.first?.acceptingBlockBlueScore, 100)
+            let relaunched = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache,
+                                         removeTestnetSeed: { _ in })
+            XCTAssertEqual(relaunched.transactions.first?.acceptingBlockBlueScore, 100)
+            XCTAssertTrue(relaunched.pendingTransactions.isEmpty)
+        }
+    }
+}
+
+final class ConfirmationResolutionTests: XCTestCase {
+    @MainActor
+    func testMissingFirstEightDoNotBlockLaterTransactionsOnEitherNetwork() async throws {
+        for network in [KaspaNetwork.mainnet, .testnet10] {
+            let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            let suite = "Resolution.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [TestnetActivityFixtureProtocol.self]
+            let session = URLSession(configuration: config)
+            defer {
+                session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil)
+                defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root)
+            }
+            let store = WalletStore(protectedStorage: ProtectedWalletStorage(directoryURL: root.appending(path: "wallet")),
+                defaults: defaults, transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+            let address = network.addressPrefix + "receive"
+            let profile = WalletProfile(name: "Test", kpub: "public", network: network.rawValue, receiveAddresses: [address])
+            XCTAssertTrue(store.add(profile))
+            store.activateNetwork(network)
+            let transactions = (0..<19).map { index in
+                WalletTransaction(profileID: profile.id, transactionID: String(format: "%02d", index),
+                    destination: "recipient", amountSompi: 100, feeSompi: 1, broadcastAt: .distantPast,
+                    direction: .received, status: .checking)
+            }
+            XCTAssertTrue(store.mergeSyncedTransactions(transactions, profileID: profile.id))
+            let host = network == .mainnet ? "api.kaspa.org" : "api-tn10.kaspa.org"
+            TestnetActivityFixtureProtocol.install { request in
+                XCTAssertEqual(request.url?.host, host)
+                let id = request.url!.lastPathComponent
+                if Int(id)! < 8 { return (404, Data("{}".utf8)) }
+                let json: [String: Any] = ["transaction_id": id, "is_accepted": true,
+                    "accepting_block_blue_score": 100, "block_time": 1000,
+                    "inputs": [], "outputs": [["amount": 100, "script_public_key_address": address]]]
+                return (200, try JSONSerialization.data(withJSONObject: json))
+            }
+            let service = WalletSyncService(defaults: defaults, networkAvailability: { true },
+                historyClient: TransactionHistoryClient(session: session, pause: { _ in }))
+            service.preload(profile: profile)
+            for _ in 0..<6 { await service.reconcilePendingTransactions(profile: profile, walletStore: store) }
+            XCTAssertEqual(store.transactions.filter { $0.acceptingBlockBlueScore == 100 }.count, 11)
+            XCTAssertEqual(store.pendingTransactions.count, 8)
+            XCTAssertTrue(store.pendingTransactions.allSatisfy { $0.confirmationPresentation(currentBlueScore: 350) == .checking })
+            let cancelled = Task { @MainActor in
+                withUnsafeCurrentTask { $0?.cancel() }
+                await service.reconcilePendingTransactions(profile: profile, walletStore: store)
+            }
+            await cancelled.value
+            XCTAssertEqual(store.transactions.filter { $0.acceptingBlockBlueScore == 100 }.count, 11)
+        }
+    }
+}

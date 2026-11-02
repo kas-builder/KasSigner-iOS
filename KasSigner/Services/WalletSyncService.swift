@@ -860,10 +860,9 @@ struct TransactionHistoryClient: Sendable {
                     : Date(),
                 direction: direction,
                 kind: kind,
-                status: transaction.isAccepted == true
-                    && transaction.acceptingBlockBlueScore != nil
+                status: transaction.isAccepted == true || transaction.acceptingBlockBlueScore != nil
                     ? .confirmed
-                    : .pending,
+                    : .checking,
                 acceptingBlockBlueScore: transaction.acceptingBlockBlueScore
             )
         }
@@ -2259,32 +2258,43 @@ final class WalletSyncService: ObservableObject {
         isRefreshingTransactionHistory = !transactionHistoryProfilesInFlight.isEmpty
     }
 
+    private var confirmationResolutionOffsets: [UUID: Int] = [:]
+    private var confirmationResolutionInFlight = Set<UUID>()
+
     func reconcilePendingTransactions(
         profile: WalletProfile,
         walletStore: WalletStore
     ) async {
+        guard !Task.isCancelled, walletStore.selectedProfileID == profile.id,
+              !confirmationResolutionInFlight.contains(profile.id) else { return }
         let pending = walletStore.pendingTransactions.filter {
-            $0.profileID == profile.id
-        }
+            $0.profileID == profile.id && $0.requiresAcceptanceResolution
+        }.sorted { $0.transactionID < $1.transactionID }
         guard !pending.isEmpty else { return }
-
+        confirmationResolutionInFlight.insert(profile.id)
+        defer { confirmationResolutionInFlight.remove(profile.id) }
+        let generation = activeProfileGeneration
+        let start = (confirmationResolutionOffsets[profile.id] ?? 0) % pending.count
+        let batch = (0..<min(8, pending.count)).map { pending[(start + $0) % pending.count] }
+        confirmationResolutionOffsets[profile.id] = (start + batch.count) % pending.count
         var resolved: [WalletTransaction] = []
-        for transaction in pending.prefix(8) {
+        for transaction in batch {
+            guard !Task.isCancelled, walletStore.selectedProfileID == profile.id,
+                  activeProfileGeneration == generation else { return }
             do {
-                if let indexed = try await transactionHistoryClient.transaction(
-                    id: transaction.transactionID,
-                    for: profile
-                ) {
-                    if indexed.acceptingBlockBlueScore != nil {
-                        resolved.append(indexed)
-                    }
+                if let indexed = try await transactionHistoryClient.transaction(id: transaction.transactionID, for: profile),
+                   indexed.status == .confirmed || indexed.acceptingBlockBlueScore != nil {
+                    resolved.append(indexed)
                 }
-            } catch {
-                // The node/indexer may not expose a just-broadcast transaction yet.
-                // Keep the local pending card and retry on the next wallet event.
+            } catch is CancellationError { return }
+            catch {
+                // Missing or delayed indexer data does not erase known state.
+                // Fair rotation lets later transactions resolve on the next pass.
             }
         }
-        guard !resolved.isEmpty else { return }
+        guard !Task.isCancelled, walletStore.selectedProfileID == profile.id,
+              activeProfileGeneration == generation,
+              walletStore.profiles.contains(where: { $0.id == profile.id }), !resolved.isEmpty else { return }
         walletStore.mergeResolvedTransactions(resolved, profileID: profile.id)
     }
 

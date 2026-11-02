@@ -354,7 +354,6 @@ struct RootView: View {
     @State private var showingAddWallet = false
     @State private var notificationRefreshTask: Task<Void, Never>?
     @State private var notificationRefreshRequested = false
-    @State private var confirmationResolutionTask: Task<Void, Never>?
     @State private var automaticallyRefreshedHistoryProfileID: UUID?
 
     private var tabs: some View {
@@ -568,6 +567,9 @@ struct RootView: View {
         .task(id: "testnet-balance-\(launchRefreshTaskID)") {
             await periodicallyRefreshTestnetBalance()
         }
+        .task(id: "confirmations-\(launchRefreshTaskID)") {
+            await periodicallyResolveConfirmations()
+        }
         .task(id: "coverage-\(launchRefreshTaskID)") {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5 * 60))
@@ -661,8 +663,6 @@ struct RootView: View {
         .onDisappear {
             notificationRefreshTask?.cancel()
             notificationRefreshTask = nil
-            confirmationResolutionTask?.cancel()
-            confirmationResolutionTask = nil
         }
     }
 
@@ -774,8 +774,6 @@ struct RootView: View {
         notificationRefreshTask?.cancel()
         notificationRefreshTask = nil
         notificationRefreshRequested = false
-        confirmationResolutionTask?.cancel()
-        confirmationResolutionTask = nil
         walletStore.selectedProfileID = profile.id
         walletStore.reloadCachedTransactions(profileID: profile.id)
         syncService.preload(profile: profile)
@@ -930,7 +928,6 @@ struct RootView: View {
                 engine: engine,
                 additionalAddresses: protectedVaultStore.watchedAddresses(for: currentProfile.id)
             )
-            scheduleConfirmationResolution(profileID: currentProfile.id)
         }
         completedReconciliation = !Task.isCancelled
             && walletStore.selectedProfileID == profile.id
@@ -1036,7 +1033,6 @@ struct RootView: View {
                 addedUTXOs: addedUTXOs
             )
         }
-        scheduleConfirmationResolution(profileID: profile.id)
         await syncService.reconcilePendingTransactions(
             profile: walletStore.profiles.first(where: { $0.id == profile.id }) ?? profile,
             walletStore: walletStore
@@ -1076,42 +1072,20 @@ struct RootView: View {
         walletStore.reloadCachedTransactions(profileID: profile.id)
     }
 
-    private func scheduleConfirmationResolution(profileID: UUID) {
-        guard confirmationResolutionTask == nil else { return }
-
-        confirmationResolutionTask = Task { @MainActor in
-            defer { confirmationResolutionTask = nil }
-
-            for _ in 0..<30 {
-                guard !Task.isCancelled,
-                      scenePhase == .active,
-                      walletStore.selectedProfileID == profileID,
-                      let profile = walletStore.selectedProfile
-                else {
-                    return
-                }
-
-                let hasUnresolved = walletStore.pendingTransactions.contains {
-                    $0.profileID == profileID
-                        && $0.acceptingBlockBlueScore == nil
-                }
-                guard hasUnresolved else { return }
-
-                await syncService.reconcilePendingTransactions(
-                    profile: profile,
-                    walletStore: walletStore
-                )
-
-                guard walletStore.pendingTransactions.contains(where: {
-                    $0.profileID == profileID
-                        && $0.acceptingBlockBlueScore == nil
-                }) else {
-                    await refreshConfirmationScoreIfNeeded(force: true)
-                    return
-                }
-
-                try? await Task.sleep(for: .seconds(1))
+    private func periodicallyResolveConfirmations() async {
+        guard scenePhase == .active, let profileID = walletStore.selectedProfileID else { return }
+        var pass = 0
+        while !Task.isCancelled {
+            guard scenePhase == .active, walletStore.selectedProfileID == profileID,
+                  let profile = walletStore.selectedProfile else { return }
+            if syncService.isNetworkAvailable && !profile.requiresInitialDiscovery && !profile.requiresInitialHistorySync {
+                await syncService.reconcilePendingTransactions(profile: profile, walletStore: walletStore)
+                guard !Task.isCancelled, walletStore.selectedProfileID == profileID else { return }
+                await refreshConfirmationScoreIfNeeded()
             }
+            pass += 1
+            do { try await Task.sleep(for: .seconds(pass < 10 ? 3 : 15)) }
+            catch { return }
         }
     }
 }

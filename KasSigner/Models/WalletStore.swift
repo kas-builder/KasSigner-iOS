@@ -141,12 +141,12 @@ enum WalletTransactionKind: String, Codable, Equatable {
 }
 
 enum WalletTransactionStatus: String, Codable, Equatable {
+    case checking
     case pending
     case confirmed
 }
 
 enum WalletConfirmationPresentation: Equatable {
-    case pending
     case checking
     case count(UInt64)
     case confirmed
@@ -165,6 +165,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     let direction: WalletTransactionDirection
     let kind: WalletTransactionKind
     let status: WalletTransactionStatus
+    let isLocallyBroadcast: Bool
     let acceptingBlockBlueScore: UInt64?
 
     init(
@@ -178,7 +179,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         direction: WalletTransactionDirection,
         kind: WalletTransactionKind? = nil,
         status: WalletTransactionStatus,
-        acceptingBlockBlueScore: UInt64? = nil
+        acceptingBlockBlueScore: UInt64? = nil,
+        isLocallyBroadcast: Bool = false
     ) {
         self.id = id
         self.profileID = profileID
@@ -190,6 +192,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         self.direction = direction
         self.kind = kind ?? (direction == .sent ? .sent : .received)
         self.status = status
+        self.isLocallyBroadcast = isLocallyBroadcast
         self.acceptingBlockBlueScore = acceptingBlockBlueScore
     }
 
@@ -205,6 +208,7 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         case kind
         case status
         case acceptingBlockBlueScore
+        case isLocallyBroadcast
     }
 
     init(from decoder: Decoder) throws {
@@ -224,10 +228,12 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             WalletTransactionKind.self,
             forKey: .kind
         ) ?? (direction == .sent ? .sent : .received)
-        status = try container.decodeIfPresent(
+        isLocallyBroadcast = try container.decodeIfPresent(Bool.self, forKey: .isLocallyBroadcast) ?? false
+        let decodedStatus = try container.decodeIfPresent(
             WalletTransactionStatus.self,
             forKey: .status
-        ) ?? .pending
+        ) ?? .checking
+        status = decodedStatus == .pending && !isLocallyBroadcast ? .checking : decodedStatus
         acceptingBlockBlueScore = try container.decodeIfPresent(
             UInt64.self,
             forKey: .acceptingBlockBlueScore
@@ -246,7 +252,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             direction: direction,
             kind: kind,
             status: status,
-            acceptingBlockBlueScore: acceptingBlockBlueScore
+            acceptingBlockBlueScore: acceptingBlockBlueScore,
+            isLocallyBroadcast: isLocallyBroadcast
         )
     }
 
@@ -272,8 +279,26 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             direction: .sent,
             kind: .internalTransfer,
             status: status,
-            acceptingBlockBlueScore: acceptingBlockBlueScore
+            acceptingBlockBlueScore: acceptingBlockBlueScore,
+            isLocallyBroadcast: isLocallyBroadcast
         )
+    }
+
+    var requiresAcceptanceResolution: Bool { acceptingBlockBlueScore == nil }
+
+    /// A delayed indexer response or disk cache must not erase known acceptance.
+    func preservingAcceptance(from existing: WalletTransaction) -> WalletTransaction {
+        let incoming = preservingLocallyBroadcastInternalTransfer(from: existing)
+        let score = incoming.acceptingBlockBlueScore ?? existing.acceptingBlockBlueScore
+        let accepted = score != nil || incoming.status == .confirmed || existing.status == .confirmed
+        let local = incoming.isLocallyBroadcast || existing.isLocallyBroadcast
+        let mergedStatus: WalletTransactionStatus = accepted ? .confirmed
+            : (local && (existing.status == .pending || incoming.status == .pending) ? .pending : .checking)
+        return WalletTransaction(id: existing.id, profileID: profileID, transactionID: transactionID,
+            destination: incoming.destination, amountSompi: incoming.amountSompi,
+            feeSompi: incoming.feeSompi, broadcastAt: incoming.broadcastAt,
+            direction: incoming.direction, kind: incoming.kind, status: mergedStatus,
+            acceptingBlockBlueScore: score, isLocallyBroadcast: local)
     }
 
     func confirmationCount(currentBlueScore: UInt64?) -> UInt64? {
@@ -286,10 +311,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     }
 
     func confirmationPresentation(
-        currentBlueScore: UInt64?,
-        presentsPending: Bool = false
+        currentBlueScore: UInt64?
     ) -> WalletConfirmationPresentation {
-        if presentsPending || status == .pending { return .pending }
         guard let count = confirmationCount(currentBlueScore: currentBlueScore) else {
             return .checking
         }
@@ -624,6 +647,7 @@ final class WalletStore: ObservableObject {
     @Published private(set) var transactions: [WalletTransaction] = []
     @Published private(set) var pendingTransactions: [WalletTransaction] = []
     @Published private(set) var sendSessions: [SendSession] = []
+    @Published private(set) var transactionPersistenceErrors: [UUID: String] = [:]
     @Published private(set) var transactionRevision: UInt64 = 0
     @Published var selectedProfileID: UUID? {
         didSet {
@@ -1041,9 +1065,13 @@ final class WalletStore: ObservableObject {
             broadcastAt: Date(),
             direction: .sent,
             kind: isInternalTransfer ? .internalTransfer : .sent,
-            status: .pending
+            status: .pending,
+            isLocallyBroadcast: true
         )
 
+        // Repeated broadcast callbacks cannot reset already accepted records.
+        if let existing = transactions.first(where: { $0.profileID == profileID && $0.transactionID.lowercased() == normalizedTransactionID }),
+           existing.acceptingBlockBlueScore != nil || existing.status == .confirmed { return true }
         var updatedPending = pendingTransactions
         if let existingIndex = updatedPending.firstIndex(where: {
             $0.profileID == profileID
@@ -1088,11 +1116,8 @@ final class WalletStore: ObservableObject {
                     feeSompi: 0,
                     broadcastAt: Date(),
                     direction: .received,
-                    // A UTXO notification proves the transaction is visible,
-                    // but it does not provide the accepting blue score needed
-                    // to calculate confirmations. Keep the card pending until
-                    // transaction reconciliation supplies that score.
-                    status: .pending
+                    // The UTXO proves network activity, not the accepting score.
+                    status: .checking
                 )
             )
         }
@@ -1119,31 +1144,26 @@ final class WalletStore: ObservableObject {
             guard let existing = existingByID[transaction.transactionID.lowercased()] else {
                 return transaction
             }
-            return transaction.preservingLocallyBroadcastInternalTransfer(from: existing)
+            return transaction.preservingAcceptance(from: existing)
         }
         let pending = pendingTransactions.filter {
             $0.profileID == profileID
                 && !syncedIDs.contains($0.transactionID.lowercased())
         }
-        pendingTransactions.removeAll {
-            $0.profileID == profileID
-                && syncedIDs.contains($0.transactionID.lowercased())
-        }
-        let retainedPending = existingForProfile.filter {
-            $0.status == .pending && !syncedIDs.contains($0.transactionID.lowercased())
+        pendingTransactions.removeAll { $0.profileID == profileID }
+        let retainedExisting = existingForProfile.filter {
+            !syncedIDs.contains($0.transactionID.lowercased())
         }
 
         transactions = transactions.filter { $0.profileID != profileID }
             + confirmed
             + pending
-            + retainedPending.filter { retained in
+            + retainedExisting.filter { retained in
                 !pending.contains { $0.transactionID.caseInsensitiveCompare(retained.transactionID) == .orderedSame }
             }
+        pendingTransactions += transactions.filter { $0.profileID == profileID && $0.requiresAcceptanceResolution }
         transactionRevision &+= 1
-        return transactionCache.save(
-            transactions.filter { $0.profileID == profileID },
-            profileID: profileID
-        )
+        return persistTransactionHistory(profileID: profileID)
     }
 
     @discardableResult
@@ -1171,28 +1191,32 @@ final class WalletStore: ObservableObject {
                 $0.profileID == profileID
                     && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
             }) {
-                updated[index] = transaction.preservingLocallyBroadcastInternalTransfer(from: updated[index])
+                updated[index] = transaction.preservingAcceptance(from: updated[index])
             } else {
                 updated.append(transaction)
             }
         }
 
-        let resolvedIDs = Set(resolvedTransactions.map { $0.transactionID.lowercased() })
-        pendingTransactions.removeAll {
-            $0.profileID == profileID
-                && resolvedIDs.contains($0.transactionID.lowercased())
-        }
+        pendingTransactions.removeAll { $0.profileID == profileID }
+        pendingTransactions += updated.filter { $0.profileID == profileID && $0.requiresAcceptanceResolution }
         transactions = updated
         transactionRevision &+= 1
-        save()
+        _ = persistTransactionHistory(profileID: profileID)
     }
 
     func reloadCachedTransactions(profileID: UUID) {
         guard let cached = transactionCache.load(profileID: profileID) else { return }
-        transactions = transactions.filter { $0.profileID != profileID } + cached
+        let current = transactions.filter { $0.profileID == profileID }
+        let byID = Dictionary(current.map { ($0.transactionID.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        let cachedIDs = Set(cached.map { $0.transactionID.lowercased() })
+        let merged = cached.map { row in
+            byID[row.transactionID.lowercased()].map { row.preservingAcceptance(from: $0) } ?? row
+        } + current.filter { !cachedIDs.contains($0.transactionID.lowercased()) }
+        transactions = transactions.filter { $0.profileID != profileID } + merged
         pendingTransactions = pendingTransactions.filter { $0.profileID != profileID }
-            + cached.filter { $0.status == .pending }
+            + merged.filter { $0.requiresAcceptanceResolution }
         transactionRevision &+= 1
+        if merged != cached { _ = persistTransactionHistory(profileID: profileID) }
     }
 
     @discardableResult
@@ -1446,7 +1470,7 @@ final class WalletStore: ObservableObject {
             }
             return legacyForProfile
         }
-        pendingTransactions = transactions.filter { $0.status == .pending }
+        pendingTransactions = transactions.filter { $0.requiresAcceptanceResolution }
 
         // Signing drafts are intentionally never restored. Existing persisted
         // drafts are purged during the upgrade to memory-only sessions.
@@ -1505,12 +1529,18 @@ final class WalletStore: ObservableObject {
     @discardableResult
     private func persistTransactionCache() -> Bool {
         guard !profiles.isEmpty || transactions.isEmpty else { return false }
-        return profiles.allSatisfy { profile in
-            transactionCache.save(
-                transactions.filter { $0.profileID == profile.id },
-                profileID: profile.id
-            )
+        var succeeded = true
+        for profile in profiles {
+            if !persistTransactionHistory(profileID: profile.id) { succeeded = false }
         }
+        return succeeded
+    }
+
+    private func persistTransactionHistory(profileID: UUID) -> Bool {
+        let saved = transactionCache.save(transactions.filter { $0.profileID == profileID }, profileID: profileID)
+        transactionPersistenceErrors[profileID] = saved ? nil
+            : "Updated transaction confirmations could not be saved on this device. Free up storage or unlock the device, then refresh to retry."
+        return saved
     }
 
     @discardableResult

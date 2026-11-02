@@ -28,7 +28,6 @@ struct ActivityView: View {
     @State private var csvExportFileName = "KasSigner-Wallet-Transactions"
     @State private var csvExportAlert: ExportAlert?
     @State private var isPreparingCSVExport = false
-    @State private var pendingInternalTransferPresentations = Set<String>()
     @State private var liveSinkBlueScore: UInt64?
     @State private var cachedTransactions: [WalletTransaction] = []
 
@@ -79,8 +78,7 @@ struct ActivityView: View {
                 guard let profileID = walletStore.selectedProfileID else { return }
                 walletStore.reloadCachedTransactions(profileID: profileID)
                 await syncService.refreshVirtualBlueScore(force: false)
-                if let profile = walletStore.selectedProfile,
-                   profile.network == KaspaNetwork.testnet10.rawValue {
+                if let profile = walletStore.selectedProfile {
                     await syncService.reconcilePendingTransactions(profile: profile, walletStore: walletStore)
                 }
             }
@@ -91,10 +89,12 @@ struct ActivityView: View {
                 await loadHistoricalUSDPrices()
             }
             .onAppear {
+                liveSinkBlueScore = nil
                 coinControlStore.activate(profile: walletStore.selectedProfile)
                 refreshCachedTransactions()
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
+                liveSinkBlueScore = nil
                 dismissLabelEditor()
                 coinControlStore.activate(profile: walletStore.selectedProfile)
                 refreshCachedTransactions()
@@ -160,7 +160,7 @@ struct ActivityView: View {
             VStack(spacing: 12) {
                 if isShowingTransactionSync {
                     transactionHistorySyncView
-                } else if let error = syncService.transactionHistoryError {
+                } else if let error = walletStore.selectedProfileID.flatMap({ walletStore.transactionPersistenceErrors[$0] }) ?? syncService.transactionHistoryError {
                     transactionHistoryErrorView(error)
                 }
 
@@ -516,12 +516,7 @@ struct ActivityView: View {
                 Spacer()
 
                 VStack(alignment: .trailing, spacing: 3) {
-                    statusLabel(
-                        transaction,
-                        presentsPending: pendingInternalTransferPresentations.contains(
-                            transaction.transactionID.lowercased()
-                        )
-                    )
+                    statusLabel(transaction)
 
                     Text(transaction.broadcastAt.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
@@ -636,9 +631,6 @@ struct ActivityView: View {
             Color(.secondarySystemGroupedBackground),
             in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
-        .onAppear {
-            presentPendingInternalTransferIfNeeded(transaction)
-        }
     }
 
     @ViewBuilder
@@ -675,8 +667,7 @@ struct ActivityView: View {
     }
 
     private func statusLabel(
-        _ transaction: WalletTransaction,
-        presentsPending: Bool
+        _ transaction: WalletTransaction
     ) -> some View {
         let currentBlueScore = [
             liveSinkBlueScore,
@@ -685,13 +676,11 @@ struct ActivityView: View {
             .compactMap { $0 }
             .max()
         let presentation = transaction.confirmationPresentation(
-            currentBlueScore: currentBlueScore,
-            presentsPending: presentsPending
+            currentBlueScore: currentBlueScore
         )
 
         let text: String
         switch presentation {
-        case .pending: text = "Pending"
         case .checking: text = "Checking confirmations…"
         case .count(let count): text = "\(count) confirmations"
         case .confirmed: text = "Confirmed"
@@ -699,38 +688,18 @@ struct ActivityView: View {
 
         return Text(text)
             .font(
-                presentation == .confirmed || presentation == .pending
+                presentation == .confirmed
                     ? .body.weight(.semibold)
                     : .subheadline.weight(.regular)
             )
             .monospacedDigit()
             .foregroundStyle(
-                presentation == .pending
-                    ? Color.yellow
-                    : presentation == .confirmed
+                presentation == .confirmed
                         ? Color(red: 0.18, green: 0.68, blue: 0.62)
                         : presentation == .checking
                             ? Color.secondary
                             : Color.primary
             )
-    }
-
-    private func presentPendingInternalTransferIfNeeded(
-        _ transaction: WalletTransaction
-    ) {
-        let transactionID = transaction.transactionID.lowercased()
-        guard transaction.kind == .internalTransfer,
-              Date().timeIntervalSince(transaction.broadcastAt) < 30,
-              !pendingInternalTransferPresentations.contains(transactionID)
-        else {
-            return
-        }
-
-        pendingInternalTransferPresentations.insert(transactionID)
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(1))
-            pendingInternalTransferPresentations.remove(transactionID)
-        }
     }
 
     private func beginEditingLabel(for transaction: WalletTransaction) {

@@ -2266,7 +2266,8 @@ final class PortfolioCalculationsTests: XCTestCase {
         }
         XCTAssertEqual(transaction?.amountSompi, 100_000_000)
         XCTAssertEqual(transaction?.direction, .received)
-        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertEqual(transaction?.status, .checking)
+        XCTAssertEqual(transaction?.confirmationPresentation(currentBlueScore: 1000), .checking)
         XCTAssertNil(transaction?.acceptingBlockBlueScore)
         XCTAssertEqual(store.pendingTransactions.map(\.transactionID), [transactionID])
     }
@@ -2785,7 +2786,7 @@ final class PortfolioCalculationsTests: XCTestCase {
         XCTAssertTrue(text.contains(",KAS,Internal Transfer,0.03,250,7.5,Moved to savings"))
     }
 
-    func testLegacyBroadcastTransactionDecodesAsPendingSentTransaction() throws {
+    func testLegacyTransactionWithoutAcceptanceEvidenceDecodesAsChecking() throws {
         struct LegacyTransaction: Encodable {
             let id: UUID
             let profileID: UUID
@@ -2812,7 +2813,7 @@ final class PortfolioCalculationsTests: XCTestCase {
 
         XCTAssertEqual(decoded.direction, .sent)
         XCTAssertEqual(decoded.kind, .sent)
-        XCTAssertEqual(decoded.status, .pending)
+        XCTAssertEqual(decoded.status, .checking)
         XCTAssertNil(decoded.acceptingBlockBlueScore)
     }
 
@@ -2848,10 +2849,9 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
         XCTAssertEqual(
             transaction.confirmationPresentation(
-                currentBlueScore: 1_250,
-                presentsPending: true
+                currentBlueScore: 1_250
             ),
-            .pending
+            .confirmed
         )
     }
 
@@ -3096,7 +3096,9 @@ final class PortfolioCalculationsTests: XCTestCase {
             changeAddresses: []
         ).first
 
-        XCTAssertEqual(transaction?.status, .pending)
+        XCTAssertEqual(transaction?.status, .confirmed)
+        XCTAssertEqual(transaction?.confirmationPresentation(currentBlueScore: 1000), .checking)
+        XCTAssertTrue(transaction?.requiresAcceptanceResolution ?? false)
         XCTAssertNil(transaction?.acceptingBlockBlueScore)
     }
 
