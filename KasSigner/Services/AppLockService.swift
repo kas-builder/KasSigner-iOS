@@ -48,9 +48,15 @@ final class AppLockService: ObservableObject {
 
     private let defaults: UserDefaults
     private var backgroundedAt: Date?
+    private let now: () -> Date
+    private let authenticationEvaluator: ((String) async -> Bool)?
+    private var authenticationGeneration: UInt64 = 0
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard, now: @escaping () -> Date = Date.init,
+         authenticationEvaluator: ((String) async -> Bool)? = nil) {
         self.defaults = defaults
+        self.now = now
+        self.authenticationEvaluator = authenticationEvaluator
         isEnabled = defaults.bool(forKey: Key.isEnabled)
         lockDelay = LockDelay(rawValue: defaults.string(forKey: Key.lockDelay) ?? "") ?? .immediately
         isLocked = isEnabled
@@ -92,7 +98,8 @@ final class AppLockService: ObservableObject {
 
     func unlock() async {
         guard isEnabled, isLocked else { return }
-        if await authenticate(reason: "Unlock KasSigner") {
+        let generation = authenticationGeneration
+        if await authenticate(reason: "Unlock KasSigner"), generation == authenticationGeneration, isEnabled {
             isLocked = false
         }
     }
@@ -100,7 +107,9 @@ final class AppLockService: ObservableObject {
     func unlockFromPrivacyCover() async -> Bool {
         guard isEnabled else { return false }
         guard isLocked else { return true }
+        let generation = authenticationGeneration
         let succeeded = await authenticate(reason: "Open protected content")
+        guard generation == authenticationGeneration, isEnabled else { return false }
         if succeeded {
             isLocked = false
         }
@@ -127,9 +136,22 @@ final class AppLockService: ObservableObject {
         isPrivacyCoverSuspendedForSession = true
     }
 
+    /// Also protects the first foreground frame after a delayed lock expires.
+    var requiresForegroundAuthentication: Bool {
+        guard isEnabled else { return false }
+        if isLocked { return true }
+        guard let backgroundedAt else { return false }
+        return now().timeIntervalSince(backgroundedAt) >= lockDelay.interval
+    }
+
+    static func shouldCoverContent(needsAuthentication: Bool, hidePreview: Bool, phase: ScenePhase) -> Bool {
+        (hidePreview && phase != .active) || (needsAuthentication && phase != .background)
+    }
+
     func sceneDidEnterBackground() {
+        authenticationGeneration &+= 1
         isPrivacyCoverSuspendedForSession = false
-        backgroundedAt = Date()
+        backgroundedAt = now()
         if isEnabled, lockDelay == .immediately {
             isLocked = true
         }
@@ -140,7 +162,7 @@ final class AppLockService: ObservableObject {
             backgroundedAt = nil
             return
         }
-        if Date().timeIntervalSince(backgroundedAt) >= lockDelay.interval {
+        if now().timeIntervalSince(backgroundedAt) >= lockDelay.interval {
             isLocked = true
         }
         self.backgroundedAt = nil
@@ -155,6 +177,7 @@ final class AppLockService: ObservableObject {
         authenticationError = nil
         defer { isAuthenticating = false }
 
+        if let authenticationEvaluator { return await authenticationEvaluator(reason) }
         let context = LAContext()
         context.localizedCancelTitle = "Cancel"
 

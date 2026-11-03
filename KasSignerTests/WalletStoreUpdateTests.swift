@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 import XCTest
 @testable import KasSigner
 
@@ -1694,5 +1695,73 @@ final class ConfirmationResolutionTests: XCTestCase {
             await cancelled.value
             XCTAssertEqual(store.transactions.filter { $0.acceptingBlockBlueScore == 100 }.count, 11)
         }
+    }
+}
+
+@MainActor
+final class AppSecurityPresentationTests: XCTestCase {
+    func testPreviewAndForegroundProtectionAreIndependent() {
+        for locked in [false, true] {
+            for hide in [false, true] {
+                for phase in [ScenePhase.active, .inactive, .background] {
+                    let covered = AppLockService.shouldCoverContent(needsAuthentication: locked, hidePreview: hide, phase: phase)
+                    switch phase {
+                    case .active: XCTAssertEqual(covered, locked)
+                    case .inactive: XCTAssertEqual(covered, locked || hide)
+                    case .background: XCTAssertEqual(covered, hide)
+                    @unknown default: XCTFail("Unexpected scene phase")
+                    }
+                }
+            }
+        }
+    }
+
+    func testEveryDelayProtectsReturnBeforeLifecycleCallbackAndRequiresSuccessfulAuthentication() async throws {
+        for delay in AppLockService.LockDelay.allCases {
+            let suite = "AppSecurity.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            defaults.set(true, forKey: "kassigner.security.appLockEnabled")
+            defaults.set(delay.rawValue, forKey: "kassigner.security.lockDelay")
+            var now = Date(timeIntervalSince1970: 1000)
+            var succeed = false
+            let service = AppLockService(defaults: defaults, now: { now }, authenticationEvaluator: { _ in succeed })
+            XCTAssertTrue(service.requiresForegroundAuthentication)
+            await service.unlock()
+            XCTAssertTrue(service.isLocked)
+            succeed = true
+            await service.unlock()
+            XCTAssertFalse(service.isLocked)
+            service.sceneDidEnterBackground()
+            if delay != .immediately {
+                now += delay.interval - 1
+                XCTAssertFalse(service.requiresForegroundAuthentication)
+                now += 1
+            }
+            XCTAssertTrue(service.requiresForegroundAuthentication)
+            service.sceneDidBecomeActive()
+            XCTAssertTrue(service.isLocked)
+            succeed = false
+            await service.unlock()
+            XCTAssertTrue(service.requiresForegroundAuthentication)
+            succeed = true
+            await service.unlock()
+            XCTAssertFalse(service.requiresForegroundAuthentication)
+        }
+    }
+
+    func testAuthenticationResultFromBeforeBackgroundCannotUnlockNewSession() async throws {
+        let suite = "AppSecurityGeneration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: "kassigner.security.appLockEnabled")
+        var service: AppLockService!
+        service = AppLockService(defaults: defaults, authenticationEvaluator: { _ in
+            service.sceneDidEnterBackground()
+            return true
+        })
+        await service.unlock()
+        XCTAssertTrue(service.isLocked)
+        XCTAssertTrue(service.requiresForegroundAuthentication)
     }
 }

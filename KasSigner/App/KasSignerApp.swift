@@ -151,6 +151,7 @@ private struct AppSecurityContainer<Content: View>: View {
     @AppStorage("kassigner.security.decoyLaunchScreenEnabled")
     private var decoyLaunchScreenEnabled = false
     @State private var privacyCoverUnlocked = false
+    @State private var didAttemptAutomaticUnlock = false
 
     let content: Content
 
@@ -172,16 +173,19 @@ private struct AppSecurityContainer<Content: View>: View {
                 .zIndex(2)
             } else {
                 content
+                    .allowsHitTesting(!appLockService.requiresForegroundAuthentication)
+                    .accessibilityHidden(appLockService.requiresForegroundAuthentication)
 
                 if shouldCoverContent {
                     Color(uiColor: .systemBackground)
                         .ignoresSafeArea()
                         .overlay {
-                            if scenePhase == .active, appLockService.isLocked {
-                                lockedView
+                            if scenePhase == .active, appLockService.isLocked,
+                               didAttemptAutomaticUnlock, !appLockService.isAuthenticating {
+                                unlockRetryButton
                             }
                         }
-                        .transition(.opacity)
+                        .transaction { $0.animation = nil }
                         .zIndex(1)
                 }
             }
@@ -191,19 +195,23 @@ private struct AppSecurityContainer<Content: View>: View {
             case .background:
                 syncService.persistObservedVirtualBlueScore()
                 privacyCoverUnlocked = false
+                didAttemptAutomaticUnlock = false
                 appLockService.sceneDidEnterBackground()
             case .active:
                 appLockService.sceneDidBecomeActive()
-                if appLockService.isLocked && !decoyLaunchScreenEnabled {
-                    Task { await appLockService.unlock() }
-                }
+                Task { await automaticallyUnlockIfNeeded() }
             default:
                 break
             }
         }
         .task {
-            if appLockService.isLocked && !decoyLaunchScreenEnabled {
-                await appLockService.unlock()
+            await automaticallyUnlockIfNeeded()
+        }
+        .onChange(of: appLockService.isAuthenticating) { _, authenticating in
+            if !authenticating {
+                // A backgrounded authentication may finish after reactivation.
+                // Start the new session's prompt without reopening protected content.
+                Task { await automaticallyUnlockIfNeeded() }
             }
         }
         .onChange(of: decoyLaunchScreenEnabled) { _, _ in
@@ -214,31 +222,31 @@ private struct AppSecurityContainer<Content: View>: View {
         }
     }
 
-    private var shouldCoverContent: Bool {
-        appLockService.isLocked ||
-            (preferences.hideAppSwitcherPreview && scenePhase != .active)
+    private func automaticallyUnlockIfNeeded() async {
+        guard scenePhase == .active, appLockService.isLocked,
+              !decoyLaunchScreenEnabled, !didAttemptAutomaticUnlock,
+              !appLockService.isAuthenticating else { return }
+        didAttemptAutomaticUnlock = true
+        await appLockService.unlock()
     }
 
-    private var lockedView: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(.tint)
+    private var shouldCoverContent: Bool {
+        AppLockService.shouldCoverContent(
+            needsAuthentication: appLockService.requiresForegroundAuthentication,
+            hidePreview: preferences.hideAppSwitcherPreview, phase: scenePhase)
+    }
 
-            Text("KasSigner Locked")
-                .font(.title2.weight(.semibold))
-
-            Button {
-                Task { await appLockService.unlock() }
-            } label: {
-                Text("Unlock KasSigner")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(appLockService.isAuthenticating)
-            .frame(maxWidth: 280)
+    private var unlockRetryButton: some View {
+        Button {
+            Task { await appLockService.unlock() }
+        } label: {
+            Text("Unlock KasSigner")
+                .frame(maxWidth: .infinity)
         }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(appLockService.isAuthenticating)
+        .frame(maxWidth: 280)
         .padding()
     }
 }
