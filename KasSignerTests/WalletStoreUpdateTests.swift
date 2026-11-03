@@ -1799,3 +1799,37 @@ final class AccountSwitchReadinessTests: XCTestCase {
         XCTAssertFalse(model.isVisible)
     }
 }
+
+@MainActor
+final class DiscoveryLoadingTimingTests: XCTestCase {
+    func testFastDiscoveryKeepsTwoSecondMinimumAndLastDetail() async throws {
+        let model = AccountDiscoveryPresentationModel()
+        model.start()
+        model.updateDetail("Checking historical activity…")
+        model.complete()
+        model.updateDetail("Account ready")
+        try await Task.sleep(for: .milliseconds(1500))
+        XCTAssertTrue(model.isVisible)
+        XCTAssertEqual(model.detail, "Checking historical activity…")
+        try await Task.sleep(for: .milliseconds(800))
+        XCTAssertFalse(model.isVisible)
+        XCTAssertEqual(model.progress, 1)
+        XCTAssertEqual(model.detail, "Checking historical activity…")
+    }
+
+    func testSlowDiscoveryWaitsForWorkWithoutExtraFinishingDelayAndCanCancel() async throws {
+        let model = AccountDiscoveryPresentationModel()
+        model.start()
+        try await Task.sleep(for: .milliseconds(2200))
+        XCTAssertTrue(model.isVisible)
+        XCTAssertLessThan(model.progress, 1)
+        model.updateDetail("Loading current UTXOs…")
+        model.complete()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(model.isVisible)
+        XCTAssertEqual(model.detail, "Loading current UTXOs…")
+        model.start()
+        model.cancel()
+        XCTAssertFalse(model.isVisible)
+    }
+}

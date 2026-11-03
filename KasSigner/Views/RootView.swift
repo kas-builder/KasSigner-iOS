@@ -72,6 +72,7 @@ struct AccountDiscoveryLoadingView: View {
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.68))
                     .multilineTextAlignment(.center)
+                    .lineLimit(3, reservesSpace: true)
                     .frame(maxWidth: 340)
             }
             .padding(28)
@@ -243,39 +244,11 @@ final class AccountDiscoveryPresentationModel: ObservableObject {
             while !Task.isCancelled,
                   let self,
                   let startedAt = self.startedAt {
-                let currentTime = Date()
-                let elapsed = currentTime.timeIntervalSince(startedAt)
-
-                if let completedAt = self.workCompletedAt {
-                    let readyStart = max(
-                        startedAt.addingTimeInterval(9.25),
-                        completedAt
-                    )
-                    if currentTime >= readyStart {
-                        let readyElapsed = currentTime.timeIntervalSince(readyStart)
-                        self.detail = "Account ready"
-                        self.progress = min(
-                            1,
-                            0.92 + (readyElapsed / 0.75) * 0.08
-                        )
-
-                        let minimumEnd = startedAt.addingTimeInterval(10)
-                        let completionEnd = readyStart.addingTimeInterval(0.75)
-                        if currentTime >= max(minimumEnd, completionEnd) {
-                            self.finish()
-                            return
-                        }
-                    } else {
-                        self.progress = min(
-                            0.92,
-                            0.04 + (elapsed / 9.25) * 0.88
-                        )
-                    }
-                } else {
-                    self.progress = min(
-                        0.92,
-                        0.04 + (elapsed / 10) * 0.88
-                    )
+                let elapsed = Date().timeIntervalSince(startedAt)
+                self.progress = min(0.92, 0.04 + (elapsed / 2) * 0.88)
+                if self.workCompletedAt != nil, elapsed >= 2 {
+                    self.finish()
+                    return
                 }
 
                 try? await Task.sleep(for: .milliseconds(50))
@@ -459,28 +432,20 @@ struct RootView: View {
             .allowsHitTesting(false)
         }
         .overlay {
+            // Present one loading screen at a time; discovery owns its bar
+            // through completion, including its minimum display interval.
             if isInitialDiscoveryBlocking || discoveryPresentation.isVisible {
                 initialDiscoveryOverlay
-            }
-        }
-        .overlay {
-            if accountSwitchPresentation.isVisible {
-                AccountSwitchLoadingView(
-                    progress: accountSwitchPresentation.progress,
-                    detail: accountSwitchPresentation.detail
-                )
-                .transition(.opacity)
-                .zIndex(10)
-            }
-        }
-        .overlay {
-            if networkSwitchPresentation.isVisible {
+            } else if networkSwitchPresentation.isVisible {
                 NetworkSwitchLoadingView(
                     progress: networkSwitchPresentation.progress,
                     title: networkSwitchPresentation.title
                 )
-                .transition(.opacity)
-                .zIndex(20)
+            } else if accountSwitchPresentation.isVisible {
+                AccountSwitchLoadingView(
+                    progress: accountSwitchPresentation.progress,
+                    detail: accountSwitchPresentation.detail
+                )
             }
         }
     }
