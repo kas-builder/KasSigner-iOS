@@ -24,7 +24,7 @@ struct KasSignerApp: App {
 
                 if priceService.isPreparingInitialHistory {
                     HistoricalPricePreparationView(
-                        progress: priceService.historicalPreparationProgress
+                        startedAt: priceService.historicalPreparationStartedAt ?? Date()
                     )
                     .transition(.opacity)
                     .zIndex(3)
@@ -90,55 +90,30 @@ struct KasSignerApp: App {
 }
 
 private struct HistoricalPricePreparationView: View {
-    let progress: Double
-
-    @State private var displayedProgress = 0.04
-    @State private var hasFinishedInitialRamp = false
-
+    let startedAt: Date
     private let teal = Color(red: 0.20, green: 0.62, blue: 0.57)
 
     var body: some View {
-        ZStack {
-            Color(uiColor: .systemBackground)
-                .ignoresSafeArea()
-
-            VStack(spacing: 18) {
-                Text("Preparing Price History")
-                    .font(.headline)
-
-                ProgressView(value: displayedProgress)
-                    .progressViewStyle(.linear)
-                    .tint(teal)
-                    .frame(maxWidth: 240)
-
-                Text("Building the local portfolio chart cache")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+        TimelineView(.animation(minimumInterval: 1.0 / 60)) { timeline in
+            let fraction = min(1, max(0, timeline.date.timeIntervalSince(startedAt) / 5))
+            ZStack {
+                Color(uiColor: .systemBackground).ignoresSafeArea()
+                VStack(spacing: 18) {
+                    Text("Preparing Price History")
+                        .font(.headline)
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .tint(teal)
+                        .frame(maxWidth: 240)
+                    Text("Building the local portfolio chart cache")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(28)
             }
-            .padding(28)
-        }
-        .task {
-            withAnimation(.linear(duration: 4.75)) {
-                displayedProgress = 0.95
-            }
-            try? await Task.sleep(for: .seconds(4.75))
-            hasFinishedInitialRamp = true
-            completeProgressIfReady()
-        }
-        .onChange(of: progress) { _, _ in
-            completeProgressIfReady()
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Preparing local portfolio price history")
-        .accessibilityValue(
-            displayedProgress.formatted(.percent.precision(.fractionLength(0)))
-        )
-    }
-
-    private func completeProgressIfReady() {
-        guard hasFinishedInitialRamp, progress >= 1 else { return }
-        withAnimation(.linear(duration: 0.25)) {
-            displayedProgress = 1
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Preparing local portfolio price history")
+            .accessibilityValue(fraction.formatted(.percent.precision(.fractionLength(0))))
         }
     }
 }

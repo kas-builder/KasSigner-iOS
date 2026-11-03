@@ -22,6 +22,7 @@ final class PriceService: ObservableObject {
     @Published private(set) var prices: [SecondaryCurrency: Double] = [:]
     @Published private(set) var activeProvider: PriceProviderChoice?
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var historicalPreparationStartedAt: Date?
     @Published private(set) var isPreparingInitialHistory = false
     @Published private(set) var historicalPreparationProgress = 0.0
     @Published private(set) var historyRevision = 0
@@ -77,6 +78,7 @@ final class PriceService: ObservableObject {
     private var lastHistoricalRefreshFailure: Date?
     private var historicalRefreshAttempts: [Int: Date] = [:]
     private var historicalRefreshTask: Task<Void, Never>?
+    private var historicalPreparationTask: Task<Void, Never>?
     private var isHistoricalPrepared = false
     private var historicalDiskCache: HistoricalPriceDiskCache?
     private let historicalCacheURL = HistoricalPriceCacheStore.defaultCacheURL()
@@ -163,12 +165,26 @@ final class PriceService: ObservableObject {
     func prepareHistoricalPrices() async {
         guard !isHistoricalPrepared else { return }
 
+        if let historicalPreparationTask {
+            await historicalPreparationTask.value
+            return
+        }
+        let task = Task { await self.performHistoricalPreparation() }
+        historicalPreparationTask = task
+        await task.value
+        historicalPreparationTask = nil
+    }
+
+    private func performHistoricalPreparation() async {
+        let startedAt = Date()
+        historicalPreparationStartedAt = startedAt
         isPreparingInitialHistory = true
         historicalPreparationProgress = 0.12
-        let startedAt = Date()
 
         do {
-            let bundledCandles = try HistoricalPriceCacheStore.bundledCandles()
+            let bundledCandles = try await Task.detached(priority: .userInitiated) {
+                try HistoricalPriceCacheStore.bundledCandles()
+            }.value
             historicalPreparationProgress = 0.65
 
             var dailyByTimestamp = Dictionary(
@@ -188,14 +204,19 @@ final class PriceService: ObservableObject {
                 hourlyPoints: historicalDiskCache?.hourlyPoints ?? [],
                 lastRefreshAttemptDayUTC: historicalDiskCache?.lastRefreshAttemptDayUTC
             )
+            guard let cacheURL = historicalCacheURL else {
+                throw HistoricalPriceCacheStore.CacheError.unavailableCacheDirectory
+            }
+            try await Task.detached(priority: .userInitiated) {
+                try HistoricalPriceCacheStore.save(cache, to: cacheURL)
+            }.value
             historicalDiskCache = cache
-            try saveHistoricalDiskCache()
             historicalPreparationProgress = 1
             isHistoricalPrepared = true
             historyRevision += 1
 
             let elapsed = Date().timeIntervalSince(startedAt)
-            let remainingPresentationTime = max(5 - elapsed, 0.25)
+            let remainingPresentationTime = max(5 - elapsed, 0)
             try? await Task.sleep(for: .seconds(remainingPresentationTime))
         } catch {
             isHistoricalPrepared = historicalDiskCache != nil
