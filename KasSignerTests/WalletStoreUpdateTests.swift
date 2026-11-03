@@ -1765,3 +1765,37 @@ final class AppSecurityPresentationTests: XCTestCase {
         XCTAssertTrue(service.requiresForegroundAuthentication)
     }
 }
+
+@MainActor
+final class AccountSwitchReadinessTests: XCTestCase {
+    func testFastSwitchWaitsOneSecondWithoutReadyText() async throws {
+        let model = AccountSwitchPresentationModel()
+        model.start()
+        model.complete()
+        XCTAssertEqual(model.detail, "Preparing address discovery…")
+        try await Task.sleep(for: .milliseconds(700))
+        XCTAssertTrue(model.isVisible)
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertFalse(model.isVisible)
+        XCTAssertEqual(model.progress, 1)
+        XCTAssertNotEqual(model.detail, "Account ready")
+    }
+
+    func testSlowSwitchWaitsForRealCompletionAndFailureCanFinish() async throws {
+        let model = AccountSwitchPresentationModel()
+        model.start()
+        model.update(WalletSyncService.DiscoveryProgress(title: "Synchronizing wallet", detail: "Checking UTXOs…", fraction: 0.68))
+        try await Task.sleep(for: .milliseconds(1200))
+        XCTAssertTrue(model.isVisible)
+        XCTAssertLessThan(model.progress, 1)
+        XCTAssertEqual(model.detail, "Checking UTXOs…")
+        model.complete()
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertFalse(model.isVisible)
+        XCTAssertEqual(model.detail, "Checking UTXOs…")
+        model.start()
+        model.fail("Connection failed")
+        try await Task.sleep(for: .milliseconds(1200))
+        XCTAssertFalse(model.isVisible)
+    }
+}

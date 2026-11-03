@@ -86,7 +86,6 @@ final class AccountSwitchPresentationModel: ObservableObject {
     @Published private(set) var progress = 0.0
     @Published private(set) var detail = "Preparing address discovery…"
 
-    private var startedAt: Date?
     private var workCompleted = false
     private var presentationTask: Task<Void, Never>?
 
@@ -95,26 +94,18 @@ final class AccountSwitchPresentationModel: ObservableObject {
         isVisible = true
         progress = 0
         detail = "Preparing address discovery…"
-        startedAt = Date()
         workCompleted = false
-
         presentationTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled,
-                  let self,
-                  let startedAt = self.startedAt {
+            let startedAt = Date()
+            while !Task.isCancelled, let self {
                 let elapsed = Date().timeIntervalSince(startedAt)
-                self.progress = min(0.9, (elapsed / 3) * 0.9)
-
-                if self.workCompleted, elapsed >= 3 {
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        self.progress = 1
-                    }
-                    try? await Task.sleep(for: .milliseconds(250))
-                    guard !Task.isCancelled else { return }
-                    self.finish()
+                self.progress = min(0.9, elapsed * 0.9)
+                if self.workCompleted, elapsed >= 1 {
+                    self.progress = 1
+                    self.isVisible = false
+                    self.presentationTask = nil
                     return
                 }
-
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
@@ -127,7 +118,6 @@ final class AccountSwitchPresentationModel: ObservableObject {
 
     func complete() {
         guard isVisible else { return }
-        detail = "Account ready"
         workCompleted = true
     }
 
@@ -135,14 +125,6 @@ final class AccountSwitchPresentationModel: ObservableObject {
         guard isVisible else { return }
         detail = message
         workCompleted = true
-    }
-
-    private func finish() {
-        isVisible = false
-        progress = 1
-        startedAt = nil
-        workCompleted = false
-        presentationTask = nil
     }
 }
 
@@ -191,7 +173,7 @@ final class NetworkSwitchPresentationModel: ObservableObject {
         isVisible = true
 
         presentationTask = Task { @MainActor [weak self] in
-            let duration: TimeInterval = 2
+            let duration: TimeInterval = 1
             let startedAt = Date()
 
             while !Task.isCancelled,
