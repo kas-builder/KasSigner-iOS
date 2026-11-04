@@ -46,6 +46,7 @@ struct SendDestinationView: View {
     @State private var additionalRecipients: [SendRecipientDraft] = []
     @State private var additionalRecipientValidity: [UUID: Bool] = [:]
     @State private var sendMax = false
+    @State private var amountBeforeSendMax: String?
     @State private var selectedFee: SendFeeChoice = .normal
     @State private var customFeeText = ""
     @State private var labelDraft = SendLabelDraft()
@@ -459,15 +460,21 @@ struct SendDestinationView: View {
             persistSendSession()
         }
         .onChange(of: sendMax) { _, enabled in
-            persistSendSession()
             if enabled {
+                // A restored Max session already holds its earlier manual amount.
+                if walletStore.sendSession(id: sessionID, profileID: profile.id)?.sendMax != true {
+                    amountBeforeSendMax = amountText
+                }
                 amountText = ""
                 usdAmountText = ""
-                Task {
-                    await refreshFeeEstimateForSendMax()
-                }
+            } else {
+                amountText = amountBeforeSendMax ?? ""
+                amountBeforeSendMax = nil
+                syncUSDAmountFromKASIfNeeded()
             }
+            persistSendSession()
             scheduleLivePlanResolution()
+            Task { await refreshFeeEstimateForSendMode() }
         }
         .onChange(of: changeOutputs) { _, _ in
             persistSendSession()
@@ -1142,6 +1149,7 @@ struct SendDestinationView: View {
             profileID: profile.id
         ) else { return }
         labelDraft = session.labelDraft
+        amountBeforeSendMax = session.amountBeforeSendMax
         destinationAddress = session.destination
         amountText = session.amountText
         if let primaryRecipient = session.recipients.first {
@@ -1167,6 +1175,7 @@ struct SendDestinationView: View {
             profileID: profile.id
         ) else { return }
         session.labelDraft = labelDraft
+        session.amountBeforeSendMax = amountBeforeSendMax
         session.destination = destinationAddress
         session.amountText = amountText
         if session.recipients.isEmpty {
@@ -1638,7 +1647,7 @@ struct SendDestinationView: View {
     }
 
     @MainActor
-    private func refreshFeeEstimateForSendMax() async {
+    private func refreshFeeEstimateForSendMode() async {
         guard !isRefreshingSendMaxFee else { return }
         guard let activeProfile = walletStore.profiles.first(
             where: { $0.id == profile.id }

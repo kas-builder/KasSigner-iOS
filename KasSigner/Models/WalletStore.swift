@@ -591,6 +591,7 @@ struct SendSession: Identifiable, Equatable {
     var sendMax: Bool
     var feeChoice: String
     var customFeeText: String
+    var amountBeforeSendMax: String? = nil
     var labelDraft = SendLabelDraft()
     var unsignedPSKB: String?
     var verifiedDigest: String?
