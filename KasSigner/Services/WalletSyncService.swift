@@ -539,14 +539,21 @@ struct TransactionHistoryClient: Sendable {
 
     func transaction(
         id: String,
-        for profile: WalletProfile
+        for profile: WalletProfile,
+        bypassCache: Bool = false
     ) async throws -> WalletTransaction? {
         guard let network = KaspaNetwork(rawValue: profile.network.lowercased()) else { return nil }
         let normalizedID = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalizedID.isEmpty else { return nil }
-        let request = KaspaIndexerAPI.transaction(id: normalizedID, network: network)
+        var request = KaspaIndexerAPI.transaction(id: normalizedID, network: network)
+        if bypassCache {
+            request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+            request.setValue("no-cache, no-store", forHTTPHeaderField: "Cache-Control")
+            request.setValue("no-cache", forHTTPHeaderField: "Pragma")
+        }
         let (data, _) = try await data(for: request)
         let indexed = try JSONDecoder().decode(IndexedTransaction.self, from: data)
+        guard indexed.transactionID?.lowercased() == normalizedID else { throw TransactionHistoryError.invalidResponse }
         return mapTransactions(
             [indexed],
             profileID: profile.id,
@@ -860,10 +867,11 @@ struct TransactionHistoryClient: Sendable {
                     : Date(),
                 direction: direction,
                 kind: kind,
-                status: transaction.isAccepted == true || transaction.acceptingBlockBlueScore != nil
+                status: transaction.isAccepted != false && (transaction.isAccepted == true || transaction.acceptingBlockBlueScore != nil)
                     ? .confirmed
                     : .checking,
-                acceptingBlockBlueScore: transaction.acceptingBlockBlueScore
+                acceptingBlockBlueScore: transaction.isAccepted == false ? nil : transaction.acceptingBlockBlueScore,
+                reportedAcceptance: transaction.isAccepted
             )
         }
 
@@ -2278,13 +2286,33 @@ final class WalletSyncService: ObservableObject {
         let batch = (0..<min(8, pending.count)).map { pending[(start + $0) % pending.count] }
         confirmationResolutionOffsets[profile.id] = (start + batch.count) % pending.count
         var resolved: [WalletTransaction] = []
+        var invalidationBaselines: [String: WalletTransaction] = [:]
         for transaction in batch {
             guard !Task.isCancelled, walletStore.selectedProfileID == profile.id,
                   activeProfileGeneration == generation else { return }
             do {
-                if let indexed = try await transactionHistoryClient.transaction(id: transaction.transactionID, for: profile),
-                   indexed.status == .confirmed || indexed.acceptingBlockBlueScore != nil {
-                    resolved.append(indexed)
+                if let indexed = try await transactionHistoryClient.transaction(id: transaction.transactionID, for: profile,
+                                                                               bypassCache: true) {
+                    let existing = walletStore.transactions.first {
+                        $0.profileID == profile.id && $0.transactionID.lowercased() == indexed.transactionID.lowercased()
+                    }
+                    if indexed.reportedAcceptance == false,
+                       (existing?.acceptingBlockBlueScore != nil || existing?.status == .confirmed) {
+                        // Corroborate an explicit negative with a second fresh
+                        // per-transaction read. Missing/error responses never revoke.
+                        if let verified = try await transactionHistoryClient.transaction(id: indexed.transactionID, for: profile,
+                                                                                         bypassCache: true),
+                           let accepted = verified.reportedAcceptance {
+                            if !accepted, let existing {
+                                invalidationBaselines[indexed.transactionID.lowercased()] = existing
+                            }
+                            resolved.append(verified.verifyingAcceptance(accepted))
+                        }
+                    } else if indexed.reportedAcceptance == true {
+                        resolved.append(indexed.verifyingAcceptance(true))
+                    } else {
+                        resolved.append(indexed)
+                    }
                 }
             } catch is CancellationError { return }
             catch {
@@ -2295,7 +2323,8 @@ final class WalletSyncService: ObservableObject {
         guard !Task.isCancelled, walletStore.selectedProfileID == profile.id,
               activeProfileGeneration == generation,
               walletStore.profiles.contains(where: { $0.id == profile.id }), !resolved.isEmpty else { return }
-        walletStore.mergeResolvedTransactions(resolved, profileID: profile.id)
+        walletStore.mergeResolvedTransactions(resolved, profileID: profile.id,
+                                             acceptanceInvalidationBaselines: invalidationBaselines)
     }
 
     func reconcileTransactionIDs(
@@ -2321,7 +2350,7 @@ final class WalletSyncService: ObservableObject {
                         id: transactionID,
                         for: profile
                     ) {
-                        if indexed.acceptingBlockBlueScore != nil {
+                        if indexed.reportedAcceptance == false || indexed.status == .confirmed || indexed.acceptingBlockBlueScore != nil {
                             resolved.append(indexed)
                         } else {
                             stillUnresolved.append(transactionID)

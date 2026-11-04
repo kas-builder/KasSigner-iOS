@@ -152,6 +152,11 @@ enum WalletConfirmationPresentation: Equatable {
     case confirmed
 }
 
+struct TransactionAcceptanceVerification: Codable, Equatable {
+    let accepted: Bool
+    let checkedAt: Date
+}
+
 struct WalletTransaction: Identifiable, Codable, Equatable {
     static let confirmationThreshold: UInt64 = 250
 
@@ -166,6 +171,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
     let kind: WalletTransactionKind
     let status: WalletTransactionStatus
     let isLocallyBroadcast: Bool
+    let reportedAcceptance: Bool?
+    let acceptanceVerification: TransactionAcceptanceVerification?
     let acceptingBlockBlueScore: UInt64?
 
     init(
@@ -180,7 +187,9 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         kind: WalletTransactionKind? = nil,
         status: WalletTransactionStatus,
         acceptingBlockBlueScore: UInt64? = nil,
-        isLocallyBroadcast: Bool = false
+        isLocallyBroadcast: Bool = false,
+        reportedAcceptance: Bool? = nil,
+        acceptanceVerification: TransactionAcceptanceVerification? = nil
     ) {
         self.id = id
         self.profileID = profileID
@@ -193,6 +202,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         self.kind = kind ?? (direction == .sent ? .sent : .received)
         self.status = status
         self.isLocallyBroadcast = isLocallyBroadcast
+        self.reportedAcceptance = reportedAcceptance
+        self.acceptanceVerification = acceptanceVerification
         self.acceptingBlockBlueScore = acceptingBlockBlueScore
     }
 
@@ -209,6 +220,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
         case status
         case acceptingBlockBlueScore
         case isLocallyBroadcast
+        case reportedAcceptance
+        case acceptanceVerification
     }
 
     init(from decoder: Decoder) throws {
@@ -228,6 +241,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             WalletTransactionKind.self,
             forKey: .kind
         ) ?? (direction == .sent ? .sent : .received)
+        reportedAcceptance = try container.decodeIfPresent(Bool.self, forKey: .reportedAcceptance)
+        acceptanceVerification = try container.decodeIfPresent(TransactionAcceptanceVerification.self, forKey: .acceptanceVerification)
         isLocallyBroadcast = try container.decodeIfPresent(Bool.self, forKey: .isLocallyBroadcast) ?? false
         let decodedStatus = try container.decodeIfPresent(
             WalletTransactionStatus.self,
@@ -253,7 +268,8 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             kind: kind,
             status: status,
             acceptingBlockBlueScore: acceptingBlockBlueScore,
-            isLocallyBroadcast: isLocallyBroadcast
+            isLocallyBroadcast: isLocallyBroadcast,
+            reportedAcceptance: reportedAcceptance, acceptanceVerification: acceptanceVerification
         )
     }
 
@@ -280,15 +296,42 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             kind: .internalTransfer,
             status: status,
             acceptingBlockBlueScore: acceptingBlockBlueScore,
-            isLocallyBroadcast: isLocallyBroadcast
+            isLocallyBroadcast: isLocallyBroadcast,
+            reportedAcceptance: reportedAcceptance, acceptanceVerification: acceptanceVerification
         )
     }
 
-    var requiresAcceptanceResolution: Bool { acceptingBlockBlueScore == nil }
+    var requiresAcceptanceResolution: Bool {
+        acceptingBlockBlueScore == nil || reportedAcceptance == false
+    }
 
-    /// A delayed indexer response or disk cache must not erase known acceptance.
+    func verifyingAcceptance(_ accepted: Bool, at date: Date = Date()) -> WalletTransaction {
+        WalletTransaction(id: id, profileID: profileID, transactionID: transactionID,
+            destination: destination, amountSompi: amountSompi, feeSompi: feeSompi,
+            broadcastAt: broadcastAt, direction: direction, kind: kind,
+            status: accepted ? .confirmed : .checking,
+            acceptingBlockBlueScore: accepted ? acceptingBlockBlueScore : nil,
+            isLocallyBroadcast: isLocallyBroadcast, reportedAcceptance: accepted,
+            acceptanceVerification: TransactionAcceptanceVerification(accepted: accepted, checkedAt: date))
+    }
+
+    /// Preserve known acceptance through incomplete responses. Only a fresh
+    /// verification may invalidate it, or restore it after invalidation.
     func preservingAcceptance(from existing: WalletTransaction) -> WalletTransaction {
         let incoming = preservingLocallyBroadcastInternalTransfer(from: existing)
+        if let previous = existing.acceptanceVerification {
+            if let next = incoming.acceptanceVerification, next.checkedAt < previous.checkedAt {
+                return existing
+            }
+            if !previous.accepted, incoming.acceptanceVerification == nil {
+                return existing
+            }
+        }
+        if let verification = incoming.acceptanceVerification, !verification.accepted {
+            // A negative response may have incomplete monetary details. Retain
+            // the last known record while invalidating only its acceptance.
+            return existing.verifyingAcceptance(false, at: verification.checkedAt)
+        }
         let score = incoming.acceptingBlockBlueScore ?? existing.acceptingBlockBlueScore
         let accepted = score != nil || incoming.status == .confirmed || existing.status == .confirmed
         let local = incoming.isLocallyBroadcast || existing.isLocallyBroadcast
@@ -298,7 +341,24 @@ struct WalletTransaction: Identifiable, Codable, Equatable {
             destination: incoming.destination, amountSompi: incoming.amountSompi,
             feeSompi: incoming.feeSompi, broadcastAt: incoming.broadcastAt,
             direction: incoming.direction, kind: incoming.kind, status: mergedStatus,
-            acceptingBlockBlueScore: score, isLocallyBroadcast: local)
+            acceptingBlockBlueScore: score, isLocallyBroadcast: local,
+            reportedAcceptance: incoming.reportedAcceptance ?? existing.reportedAcceptance,
+            acceptanceVerification: incoming.acceptanceVerification ?? existing.acceptanceVerification)
+    }
+
+    /// Disk reload restores absent records and fills missing acceptance, but
+    /// never replaces newer live amounts, recipients, fees, or timestamps.
+    func mergingCachedRecord(_ cached: WalletTransaction) -> WalletTransaction {
+        guard acceptanceVerification == nil, acceptingBlockBlueScore == nil,
+              cached.acceptanceVerification?.accepted != false,
+              cached.acceptingBlockBlueScore != nil || cached.status == .confirmed else { return self }
+        return WalletTransaction(id: id, profileID: profileID, transactionID: transactionID,
+            destination: destination, amountSompi: amountSompi, feeSompi: feeSompi,
+            broadcastAt: broadcastAt, direction: direction, kind: kind, status: .confirmed,
+            acceptingBlockBlueScore: cached.acceptingBlockBlueScore,
+            isLocallyBroadcast: isLocallyBroadcast || cached.isLocallyBroadcast,
+            reportedAcceptance: reportedAcceptance ?? cached.reportedAcceptance,
+            acceptanceVerification: cached.acceptanceVerification)
     }
 
     func confirmationCount(currentBlueScore: UInt64?) -> UInt64? {
@@ -1181,12 +1241,19 @@ final class WalletStore: ObservableObject {
 
     func mergeResolvedTransactions(
         _ resolvedTransactions: [WalletTransaction],
-        profileID: UUID
+        profileID: UUID,
+        acceptanceInvalidationBaselines: [String: WalletTransaction] = [:]
     ) {
         guard !resolvedTransactions.isEmpty else { return }
         var updated = transactions
 
         for transaction in resolvedTransactions where transaction.profileID == profileID {
+            if transaction.acceptanceVerification?.accepted == false,
+               let baseline = acceptanceInvalidationBaselines[transaction.transactionID.lowercased()] {
+                // Acceptance may have changed while verification was awaiting
+                // the network. Never revoke a newer live record using that result.
+                guard updated.first(where: { $0.profileID == profileID && $0.transactionID.lowercased() == transaction.transactionID.lowercased() }) == baseline else { continue }
+            }
             if let index = updated.firstIndex(where: {
                 $0.profileID == profileID
                     && $0.transactionID.caseInsensitiveCompare(transaction.transactionID) == .orderedSame
@@ -1205,12 +1272,15 @@ final class WalletStore: ObservableObject {
     }
 
     func reloadCachedTransactions(profileID: UUID) {
-        guard let cached = transactionCache.load(profileID: profileID) else { return }
+        guard let cached = transactionCache.load(profileID: profileID) else {
+            if transactionPersistenceErrors[profileID] != nil { _ = persistTransactionHistory(profileID: profileID) }
+            return
+        }
         let current = transactions.filter { $0.profileID == profileID }
         let byID = Dictionary(current.map { ($0.transactionID.lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
         let cachedIDs = Set(cached.map { $0.transactionID.lowercased() })
         let merged = cached.map { row in
-            byID[row.transactionID.lowercased()].map { row.preservingAcceptance(from: $0) } ?? row
+            byID[row.transactionID.lowercased()].map { $0.mergingCachedRecord(row) } ?? row
         } + current.filter { !cachedIDs.contains($0.transactionID.lowercased()) }
         transactions = transactions.filter { $0.profileID != profileID } + merged
         pendingTransactions = pendingTransactions.filter { $0.profileID != profileID }

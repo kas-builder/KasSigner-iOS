@@ -1833,3 +1833,166 @@ final class DiscoveryLoadingTimingTests: XCTestCase {
         XCTAssertFalse(model.isVisible)
     }
 }
+
+@MainActor
+final class FinalCompatibilityFixTests: XCTestCase {
+    private func row(_ profile: UUID, amount: UInt64 = 900, score: UInt64? = 100,
+                     accepted: Bool? = true, destination: String = "new recipient") -> WalletTransaction {
+        WalletTransaction(profileID: profile, transactionID: "compatibility", destination: destination,
+            amountSompi: amount, feeSompi: amount / 10, broadcastAt: Date(timeIntervalSince1970: Double(amount)),
+            direction: .sent, status: accepted == true ? .confirmed : .checking,
+            acceptingBlockBlueScore: score, isLocallyBroadcast: true, reportedAcceptance: accepted)
+    }
+
+    func testStaleCacheCannotReplaceAnyLiveDetailsButCanFillMissingAcceptance() {
+        let profile = UUID()
+        let live = row(profile, score: 200)
+        let stale = row(profile, amount: 100, score: 100, destination: "old recipient")
+        XCTAssertEqual(live.mergingCachedRecord(stale), live)
+        let unresolved = row(profile, score: nil, accepted: nil)
+        let filled = unresolved.mergingCachedRecord(stale)
+        XCTAssertEqual(filled.amountSompi, unresolved.amountSompi)
+        XCTAssertEqual(filled.destination, unresolved.destination)
+        XCTAssertEqual(filled.feeSompi, unresolved.feeSompi)
+        XCTAssertEqual(filled.broadcastAt, unresolved.broadcastAt)
+        XCTAssertEqual(filled.acceptingBlockBlueScore, 100)
+    }
+
+    func testFailureThenStaleCacheReloadAndRelaunchKeepAllLiveFieldsOnBothNetworks() throws {
+        for network in [KaspaNetwork.mainnet, .testnet10] {
+            let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            let suite = "CompatibilityCache.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let cache = root.appending(path: "history")
+            try Data("blocked".utf8).write(to: cache)
+            let storage = ProtectedWalletStorage(directoryURL: root.appending(path: "wallet"))
+            let store = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache, removeTestnetSeed: { _ in })
+            let profile = WalletProfile(name: "Test", kpub: "public", network: network.rawValue)
+            XCTAssertTrue(store.add(profile))
+            store.activateNetwork(network)
+            let live = row(profile.id, score: 200)
+            store.mergeResolvedTransactions([live], profileID: profile.id)
+            XCTAssertNotNil(store.transactionPersistenceErrors[profile.id])
+            try FileManager.default.removeItem(at: cache)
+            try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+            let stale = row(profile.id, amount: 100, destination: "old recipient")
+            try JSONEncoder().encode([stale]).write(to: cache.appending(path: profile.id.uuidString.lowercased() + ".json"))
+            store.reloadCachedTransactions(profileID: profile.id)
+            XCTAssertEqual(store.transactions.first, live)
+            XCTAssertNil(store.transactionPersistenceErrors[profile.id])
+            let restarted = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache, removeTestnetSeed: { _ in })
+            XCTAssertEqual(restarted.transactions.first, live)
+            let other = WalletProfile(name: "Other", kpub: "different", network: network.rawValue)
+            XCTAssertTrue(restarted.add(other))
+            restarted.selectedProfileID = profile.id
+            restarted.reloadCachedTransactions(profileID: profile.id)
+            XCTAssertEqual(restarted.transactions.first, live)
+        }
+    }
+
+    func testDelayedInvalidationCannotReplaceNewAcceptanceArrivingDuringVerification() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        let suite = "CompatibilityRace.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root) }
+        let store = WalletStore(protectedStorage: ProtectedWalletStorage(directoryURL: root), defaults: defaults,
+                                transactionCacheDirectoryURL: root.appending(path: "history"), removeTestnetSeed: { _ in })
+        let profile = WalletProfile(name: "Test", kpub: "public")
+        XCTAssertTrue(store.add(profile))
+        let baseline = row(profile.id)
+        store.mergeResolvedTransactions([baseline], profileID: profile.id)
+        let newer = row(profile.id, amount: 1000, score: 200)
+        store.mergeResolvedTransactions([newer], profileID: profile.id)
+        let invalidated = baseline.verifyingAcceptance(false)
+        store.mergeResolvedTransactions([invalidated], profileID: profile.id,
+                                        acceptanceInvalidationBaselines: ["compatibility": baseline])
+        XCTAssertEqual(store.transactions.first?.acceptingBlockBlueScore, 200)
+        XCTAssertEqual(store.transactions.first?.amountSompi, 1000)
+    }
+
+    func testNegativeReportNeedsVerificationAndInvalidationSurvivesStaleRecordsAndCoding() throws {
+        let profile = UUID()
+        let previous = row(profile)
+        let negative = row(profile, score: nil, accepted: false)
+        let unresolved = negative.preservingAcceptance(from: previous)
+        XCTAssertEqual(unresolved.acceptingBlockBlueScore, 100)
+        XCTAssertTrue(unresolved.requiresAcceptanceResolution)
+        let invalidated = negative.verifyingAcceptance(false).preservingAcceptance(from: unresolved)
+        XCTAssertNil(invalidated.acceptingBlockBlueScore)
+        XCTAssertEqual(invalidated.confirmationPresentation(currentBlueScore: 1000), .checking)
+        XCTAssertEqual(previous.preservingAcceptance(from: invalidated), invalidated)
+        XCTAssertEqual(invalidated.mergingCachedRecord(previous), invalidated)
+        let decoded = try JSONDecoder().decode(WalletTransaction.self, from: JSONEncoder().encode(invalidated))
+        XCTAssertEqual(decoded, invalidated)
+        let acceptedAgain = row(profile, score: 200).verifyingAcceptance(true, at: Date().addingTimeInterval(1))
+            .preservingAcceptance(from: invalidated)
+        XCTAssertEqual(acceptedAgain.confirmationPresentation(currentBlueScore: 210), .count(10))
+    }
+
+    func testFreshVerificationHandlesStaleNegativeRealNegativeErrorsAndReacceptanceOnBothNetworks() async throws {
+        for network in [KaspaNetwork.mainnet, .testnet10] {
+            for mode in ["stale-negative", "verified-negative", "missing", "error", "not-found", "wrong-id"] {
+                let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+                let suite = "CompatibilityVerification.\(UUID().uuidString)"
+                let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+                let config = URLSessionConfiguration.ephemeral
+                config.protocolClasses = [TestnetActivityFixtureProtocol.self]
+                let session = URLSession(configuration: config)
+                defer {
+                    session.invalidateAndCancel(); TestnetActivityFixtureProtocol.install(nil)
+                    defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: root)
+                }
+                let storage = ProtectedWalletStorage(directoryURL: root.appending(path: "wallet"))
+                let cache = root.appending(path: "history")
+                let store = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache, removeTestnetSeed: { _ in })
+                let address = network.addressPrefix + "receive"
+                let profile = WalletProfile(name: "Test", kpub: "public", network: network.rawValue, receiveAddresses: [address])
+                XCTAssertTrue(store.add(profile)); store.activateNetwork(network)
+                store.mergeResolvedTransactions([row(profile.id)], profileID: profile.id)
+                XCTAssertTrue(store.mergeSyncedTransactions([row(profile.id, score: nil, accepted: false)], profileID: profile.id))
+                let counter = HistoryRequestCounter()
+                let host = network == .mainnet ? "api.kaspa.org" : "api-tn10.kaspa.org"
+                TestnetActivityFixtureProtocol.install { request in
+                    XCTAssertEqual(request.url?.host, host)
+                    XCTAssertEqual(request.value(forHTTPHeaderField: "Cache-Control"), "no-cache, no-store")
+                    let attempt = counter.increment(mode)
+                    if attempt > 1 && mode == "error" { return (503, Data("{}".utf8)) }
+                    if attempt > 1 && mode == "not-found" { return (404, Data("{}".utf8)) }
+                    let accepted: Bool? = attempt == 1 || mode == "verified-negative" ? false
+                        : (mode == "missing" ? nil : true)
+                    var json: [String: Any] = ["transaction_id": "compatibility", "inputs": [],
+                        "outputs": [["amount": 900, "script_public_key_address": address]]]
+                    if attempt > 1 && mode == "wrong-id" { json["transaction_id"] = "different-transaction" }
+                    if let accepted { json["is_accepted"] = accepted }
+                    if accepted == true { json["accepting_block_blue_score"] = 100 }
+                    return (200, try JSONSerialization.data(withJSONObject: json))
+                }
+                let service = WalletSyncService(defaults: defaults, networkAvailability: { true },
+                    historyClient: TransactionHistoryClient(session: session, pause: { _ in }))
+                service.preload(profile: profile)
+                await service.reconcilePendingTransactions(profile: profile, walletStore: store)
+                let result = try XCTUnwrap(store.transactions.first)
+                if mode == "verified-negative" {
+                    XCTAssertNil(result.acceptingBlockBlueScore)
+                    XCTAssertEqual(result.acceptanceVerification?.accepted, false)
+                    let restarted = WalletStore(protectedStorage: storage, defaults: defaults, transactionCacheDirectoryURL: cache, removeTestnetSeed: { _ in })
+                    restarted.activateNetwork(network)
+                    XCTAssertNil(restarted.transactions.first?.acceptingBlockBlueScore)
+                    TestnetActivityFixtureProtocol.install { _ in
+                        let json: [String: Any] = ["transaction_id": "compatibility", "is_accepted": true,
+                            "accepting_block_blue_score": 200, "inputs": [],
+                            "outputs": [["amount": 900, "script_public_key_address": address]]]
+                        return (200, try JSONSerialization.data(withJSONObject: json))
+                    }
+                    await service.reconcilePendingTransactions(profile: profile, walletStore: restarted)
+                    XCTAssertEqual(restarted.transactions.first?.acceptingBlockBlueScore, 200)
+                } else {
+                    XCTAssertEqual(result.acceptingBlockBlueScore, 100)
+                    XCTAssertEqual(result.confirmationPresentation(currentBlueScore: 1000), .confirmed)
+                }
+            }
+        }
+    }
+}
