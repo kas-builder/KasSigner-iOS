@@ -1702,6 +1702,20 @@ struct SendDestinationView: View {
         .sendStyleCard()
     }
 
+    private var canChooseChangeLabel: Bool {
+        guard !sendMax, livePlanError == nil else { return false }
+        if addressValidation != nil, !isValidatingAddress, !destinationLooksValid { return false }
+        if selectedFee == .custom,
+           !customFeeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !feeLooksValid { return false }
+        if let selectedTotalSompi, let totalRecipientSompi, let requestedFeeSompi {
+            let required = totalRecipientSompi.addingReportingOverflow(requestedFeeSompi)
+            if required.overflow || required.partialValue > selectedTotalSompi { return false }
+        }
+        // Missing inputs and an unfinished change plan are normal while editing.
+        return true
+    }
+
     private var labelChangeOutputCount: Int {
         guard !sendMax else { return 0 }
         if requiresLiveChangePlan {
@@ -1741,10 +1755,10 @@ struct SendDestinationView: View {
                         ? "Include label in change UTXO cards"
                         : "Include label in change UTXO card",
                     isChecked: Binding(
-                        get: { labelChangeOutputCount > 0 && labelDraft.includeInChangeUTXOCards },
+                        get: { canChooseChangeLabel && labelDraft.includeInChangeUTXOCards },
                         set: { labelDraft.includeInChangeUTXOCards = $0 }
                     ),
-                    isEnabled: labelChangeOutputCount > 0
+                    isEnabled: canChooseChangeLabel
                 )
             }
         }
