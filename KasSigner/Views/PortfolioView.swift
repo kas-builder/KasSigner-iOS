@@ -1868,18 +1868,16 @@ struct KaspaPriceDetail: View {
                         y: .disabled
                     )
                 ) {
-                    if selectedRange != .day {
-                        Text(selectedDate(selectedPoint.timestamp))
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                            .overlay {
-                                Capsule()
-                                    .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
-                            }
-                    }
+                    Text(selectedDate(selectedPoint.timestamp))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 5)
+                        .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                        .overlay {
+                            Capsule()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                        }
                 }
             }
         }
@@ -2047,7 +2045,10 @@ struct KaspaPriceDetail: View {
     }
 
     private func selectedDate(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .omitted)
+        if selectedRange == .day {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .omitted)
     }
 }
 
