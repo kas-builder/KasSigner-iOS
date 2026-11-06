@@ -86,6 +86,8 @@ struct PortfolioView: View {
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
+    @State private var chartCoverageComplete = false
+    @State private var chartCoverageMessage: String?
     @State private var loadedChartPrices: [HistoricalPricePoint] = []
     @State private var loadedChartRequestID: ChartRequestID?
     @State private var chartPoints: [PortfolioChartPoint] = []
@@ -492,6 +494,12 @@ struct PortfolioView: View {
                 } else {
                     portfolioChart
                 }
+            }
+            if let chartCoverageMessage {
+                Text(chartCoverageMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
             ChartFreshnessNote(priceService: priceService)
         }
@@ -929,7 +937,8 @@ struct PortfolioView: View {
     }
 
     private var portfolioChange: Double? {
-        guard let firstValue = selectionChartPoints.first?.valueUSD,
+        guard chartCoverageComplete,
+              let firstValue = selectionChartPoints.first?.valueUSD,
               let lastValue = selectionChartPoints.last?.valueUSD,
               firstValue.isFinite,
               lastValue.isFinite,
@@ -988,12 +997,14 @@ struct PortfolioView: View {
     ) async {
         isLoadingChart = true
         loadedChartRequestID = nil
+        chartCoverageComplete = false
+        chartCoverageMessage = nil
         chartLoadFailed = false
         selectedChartPoint = nil
 
         do {
             let days = selectedRange.days ?? allHistoryDays(for: visibleTransactions)
-            let prices = try await priceService.cachedHistoricalUSDPrices(days: days, includeCurrentPrice: false)
+            let prices = try await priceService.cachedHistoricalUSDPrices(days: days, includeCurrentPrice: false, includeBoundaryPoint: true)
             guard !Task.isCancelled else { return }
             let applicableTransactions = visibleTransactions.sorted(
                 by: PortfolioTransactionOrder.ascending
@@ -1026,7 +1037,18 @@ struct PortfolioView: View {
         let prices = ChartLivePriceSeries.points(
             history: loadedChartPrices, quote: priceService.price(for: .usd), quoteTimestamp: priceService.lastUpdated
         )
-        let fullResolutionPoints = PortfolioChartBuilder.points(transactions: transactions, prices: prices)
+        let now = Date()
+        let firstTransaction = transactions.map(\.timestamp).min()
+        let rangeStart = selectedRange.days.flatMap(Double.init).map { now.addingTimeInterval(-$0 * 86_400) }
+        let start = [rangeStart, firstTransaction].compactMap { $0 }.max()
+        let window = ChartHistoryWindow.prepare(
+            prices: prices, start: start, now: now,
+            maximumGap: selectedRange == .day ? 2 * 60 * 60 : 36 * 60 * 60
+        )
+        chartCoverageComplete = window.isComplete
+        chartCoverageMessage = transactions.isEmpty || window.isComplete ? nil
+            : "Price history is incomplete for this period. Change unavailable."
+        let fullResolutionPoints = PortfolioChartBuilder.points(transactions: transactions, prices: window.points)
         selectionChartPoints = fullResolutionPoints
         chartPoints = PortfolioChartBuilder.downsampled(fullResolutionPoints, maximumCount: 90)
         chartValueDomain = chartYDomain(for: fullResolutionPoints)
@@ -1359,6 +1381,7 @@ struct KaspaPriceDetail: View {
     var onConverterModeChange: ((Bool) -> Void)?
 
     @State private var selectedRange: TimeRange = .day
+    @State private var priceCoverageMessage: String?
     @State private var loadedPriceHistory: [HistoricalPricePoint] = []
     @State private var loadedPriceRange: TimeRange?
     @State private var points: [HistoricalPricePoint] = []
@@ -1466,6 +1489,12 @@ struct KaspaPriceDetail: View {
                     }
 
                     chartContent
+                    if let priceCoverageMessage {
+                        Text(priceCoverageMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                     ChartFreshnessNote(priceService: priceService)
                 }
                 .padding()
@@ -2008,11 +2037,13 @@ struct KaspaPriceDetail: View {
 
     private func loadHistory() async {
         loadedPriceRange = nil
+        priceCoverageMessage = nil
+        rangeChange = nil
         isLoading = true
         loadFailed = false
         selectedPoint = nil
         do {
-            let loaded = try await priceService.cachedHistoricalUSDPrices(days: selectedRange.days, includeCurrentPrice: false)
+            let loaded = try await priceService.cachedHistoricalUSDPrices(days: selectedRange.days, includeCurrentPrice: false, includeBoundaryPoint: true)
             guard !Task.isCancelled else { return }
             loadedPriceHistory = loaded
             loadedPriceRange = selectedRange
@@ -2030,12 +2061,22 @@ struct KaspaPriceDetail: View {
 
     private func updatePriceChart() {
         let previousEndpoint = points.last
-        let loaded = ChartLivePriceSeries.points(
+        let available = ChartLivePriceSeries.points(
             history: loadedPriceHistory, quote: priceService.price(for: .usd), quoteTimestamp: priceService.lastUpdated
         )
+        let now = Date()
+        let start = selectedRange == .all ? nil
+            : Double(selectedRange.days).map { now.addingTimeInterval(-$0 * 86_400) }
+        let window = ChartHistoryWindow.prepare(
+            prices: available, start: start, now: now,
+            maximumGap: selectedRange == .day ? 2 * 60 * 60 : 36 * 60 * 60
+        )
+        let loaded = window.points
+        priceCoverageMessage = window.isComplete ? nil
+            : "Price history is incomplete for this period. Change unavailable."
         points = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
         chartPriceDomain = calculatedPriceDomain(for: loaded)
-        if let first = loaded.first?.priceUSD, let last = loaded.last?.priceUSD, first > 0 {
+        if window.isComplete, let first = loaded.first?.priceUSD, let last = loaded.last?.priceUSD, first > 0 {
             rangeChange = ((last - first) / first) * 100
         } else {
             rangeChange = nil

@@ -3857,3 +3857,70 @@ extension PortfolioCalculationsTests {
         XCTAssertEqual(sameTime.last?.priceUSD, 0.05)
     }
 }
+
+extension PortfolioCalculationsTests {
+    func testChartWindowInterpolatesOnlySupportedStartingBoundary() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [
+            HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(120), priceUSD: 0.04)
+        ]
+        let result = ChartHistoryWindow.prepare(prices: prices,
+            start: start.addingTimeInterval(60), now: start.addingTimeInterval(120), maximumGap: 180)
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.points.first?.timestamp, start.addingTimeInterval(60))
+        XCTAssertEqual(result.points.first!.priceUSD, 0.03, accuracy: 0.000001)
+        XCTAssertEqual(result.points.last, prices.last)
+    }
+
+    func testChartWindowDoesNotExtrapolateMissingBeginning() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(60), priceUSD: 0.03)]
+        let result = ChartHistoryWindow.prepare(prices: prices,
+            start: start.addingTimeInterval(-60), now: start.addingTimeInterval(60), maximumGap: 120)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.points, prices)
+    }
+
+    func testChartWindowDetectsInteriorGapsEvenWithRecentQuote() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(86_400), priceUSD: 0.03)]
+        let result = ChartHistoryWindow.prepare(prices: prices, start: start,
+            now: start.addingTimeInterval(86_400), maximumGap: 2 * 60 * 60)
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.points, prices)
+    }
+
+    func testChartWindowRejectsStaleEndAndSinglePointCoverage() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(60), priceUSD: 0.03)]
+        XCTAssertFalse(ChartHistoryWindow.prepare(prices: prices, start: start,
+            now: start.addingTimeInterval(8 * 60 * 60), maximumGap: 36 * 60 * 60).isComplete)
+        XCTAssertFalse(ChartHistoryWindow.prepare(prices: [prices[0]], start: start,
+            now: start, maximumGap: 36 * 60 * 60).isComplete)
+    }
+
+    func testRecentPortfolioBoundaryDoesNotRequireHistoryBeforeFirstTransaction() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(120), priceUSD: 0.04)]
+        let firstTransactionDate = start.addingTimeInterval(60)
+        let result = ChartHistoryWindow.prepare(prices: prices, start: firstTransactionDate,
+            now: start.addingTimeInterval(120), maximumGap: 36 * 60 * 60)
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.points.first?.timestamp, firstTransactionDate)
+    }
+
+    func testAllChartWindowStartsAtAvailableHistoryAndRetainsDailySamples() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let prices = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(86_400), priceUSD: 0.03)]
+        let result = ChartHistoryWindow.prepare(prices: prices, start: nil,
+            now: start.addingTimeInterval(86_400), maximumGap: 36 * 60 * 60)
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.points, prices)
+    }
+}

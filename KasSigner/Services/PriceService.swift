@@ -126,10 +126,10 @@ final class PriceService: ObservableObject {
         return try historicalUSDPricesFromCache(requestedDays: requestedDays)
     }
 
-    func cachedHistoricalUSDPrices(days: String, includeCurrentPrice: Bool = true) async throws -> [HistoricalPricePoint] {
+    func cachedHistoricalUSDPrices(days: String, includeCurrentPrice: Bool = true, includeBoundaryPoint: Bool = false) async throws -> [HistoricalPricePoint] {
         await prepareHistoricalPrices()
         let requestedDays = max(1, Int(days) ?? 1)
-        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays, includeCurrentPrice: includeCurrentPrice)
+        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays, includeCurrentPrice: includeCurrentPrice, includeBoundaryPoint: includeBoundaryPoint)
 
         Task { @MainActor [weak self] in
             await self?.refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
@@ -139,17 +139,14 @@ final class PriceService: ObservableObject {
 
     private func historicalUSDPricesFromCache(
         requestedDays: Int,
-        includeCurrentPrice: Bool = true
+        includeCurrentPrice: Bool = true,
+        includeBoundaryPoint: Bool = false
     ) throws -> [HistoricalPricePoint] {
         guard let historicalDiskCache else {
             throw PriceError.invalidResponse
         }
 
-        let cutoff = Calendar(identifier: .gregorian).date(
-            byAdding: .day,
-            value: -requestedDays,
-            to: Date()
-        ) ?? .distantPast
+        let cutoff = Date().addingTimeInterval(-Double(requestedDays) * 86_400)
 
         let dailyPoints = historicalDiskCache.dailyCandles
             .lazy
@@ -174,6 +171,15 @@ final class PriceService: ObservableObject {
             }
         }
 
+        if includeBoundaryPoint {
+            let precedingDaily = historicalDiskCache.dailyCandles.last { $0.timestamp < cutoff }
+                .map { HistoricalPricePoint(timestamp: $0.timestamp, priceUSD: $0.closeUSD) }
+            let precedingHourly = historicalDiskCache.hourlyPoints.last { $0.timestamp < cutoff }
+            if let preceding = [precedingDaily, precedingHourly].compactMap({ $0 })
+                .max(by: { $0.timestamp < $1.timestamp }) {
+                points.append(preceding)
+            }
+        }
         points = normalizedHistoricalPoints(points)
         if includeCurrentPrice {
             points = ChartLivePriceSeries.points(history: points, quote: prices[.usd], quoteTimestamp: lastUpdated)

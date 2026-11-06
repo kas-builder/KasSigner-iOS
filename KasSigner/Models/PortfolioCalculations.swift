@@ -317,3 +317,42 @@ enum ChartLivePriceSeries {
         return result
     }
 }
+
+
+/// Validate the selected window without extrapolating across missing history.
+enum ChartHistoryWindow {
+    struct Result {
+        let points: [HistoricalPricePoint]
+        let isComplete: Bool
+    }
+
+    static func prepare(
+        prices: [HistoricalPricePoint], start: Date?, now: Date,
+        maximumGap: TimeInterval
+    ) -> Result {
+        let ordered = prices.filter {
+            $0.priceUSD.isFinite && $0.priceUSD > 0 && $0.timestamp <= now
+        }.sorted { $0.timestamp < $1.timestamp }
+        guard let first = ordered.first else { return Result(points: [], isComplete: false) }
+        let boundary = start ?? first.timestamp
+        var window = ordered.filter { $0.timestamp >= boundary }
+        var hasBoundary = window.first?.timestamp == boundary
+        if !hasBoundary,
+           let previous = ordered.last(where: { $0.timestamp < boundary }),
+           let next = window.first,
+           next.timestamp.timeIntervalSince(previous.timestamp) <= maximumGap {
+            let interval = next.timestamp.timeIntervalSince(previous.timestamp)
+            let fraction = boundary.timeIntervalSince(previous.timestamp) / interval
+            let price = previous.priceUSD + (next.priceUSD - previous.priceUSD) * fraction
+            window.insert(HistoricalPricePoint(timestamp: boundary, priceUSD: price), at: 0)
+            hasBoundary = true
+        }
+        let hasGaps = zip(window, window.dropFirst()).contains {
+            $1.timestamp.timeIntervalSince($0.timestamp) > maximumGap
+        }
+        let recentEnd = window.last.map {
+            now.timeIntervalSince($0.timestamp) <= min(maximumGap, 6 * 60 * 60)
+        } ?? false
+        return Result(points: window, isComplete: hasBoundary && window.count >= 2 && !hasGaps && recentEnd)
+    }
+}
