@@ -302,3 +302,15 @@ private extension Array {
         return lowerBound
     }
 }
+
+
+/// Rebuild the live endpoint from an unchanged history snapshot, so quote
+/// refreshes neither accumulate synthetic history nor require a history fetch.
+enum ChartLivePriceSeries {
+    static func points(history: [HistoricalPricePoint], quote: Double?, now: Date) -> [HistoricalPricePoint] {
+        guard let quote, quote.isFinite, quote > 0 else { return history }
+        var result = history.filter { $0.timestamp < now }
+        result.append(HistoricalPricePoint(timestamp: now, priceUSD: quote))
+        return result
+    }
+}

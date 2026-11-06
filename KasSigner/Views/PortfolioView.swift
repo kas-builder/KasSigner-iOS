@@ -86,6 +86,8 @@ struct PortfolioView: View {
     @State private var selectedTransaction: PortfolioTransaction?
     @State private var transactionBeingEdited: PortfolioTransaction?
     @State private var openEditorAfterDetailDismisses = false
+    @State private var loadedChartPrices: [HistoricalPricePoint] = []
+    @State private var loadedChartRequestID: ChartRequestID?
     @State private var chartPoints: [PortfolioChartPoint] = []
     @State private var selectionChartPoints: [PortfolioChartPoint] = []
     @State private var chartValueDomain: ClosedRange<Double> = 0...1
@@ -270,6 +272,10 @@ struct PortfolioView: View {
         }
         .task(id: chartRequestID(for: snapshot.transactions)) {
             await loadChartHistory(transactions: snapshot.transactions)
+        }
+        .onChange(of: priceService.prices[.usd]) { _, _ in
+            guard loadedChartRequestID == chartRequestID(for: snapshot.transactions) else { return }
+            updatePortfolioChart(transactions: snapshot.transactions)
         }
     }
 
@@ -978,12 +984,13 @@ struct PortfolioView: View {
         transactions visibleTransactions: [PortfolioTransaction]
     ) async {
         isLoadingChart = true
+        loadedChartRequestID = nil
         chartLoadFailed = false
         selectedChartPoint = nil
 
         do {
             let days = selectedRange.days ?? allHistoryDays(for: visibleTransactions)
-            let prices = try await priceService.cachedHistoricalUSDPrices(days: days)
+            let prices = try await priceService.cachedHistoricalUSDPrices(days: days, includeCurrentPrice: false)
             guard !Task.isCancelled else { return }
             let applicableTransactions = visibleTransactions.sorted(
                 by: PortfolioTransactionOrder.ascending
@@ -997,16 +1004,9 @@ struct PortfolioView: View {
                 return
             }
 
-            let fullResolutionPoints = PortfolioChartBuilder.points(
-                transactions: applicableTransactions,
-                prices: prices
-            )
-            selectionChartPoints = fullResolutionPoints
-            chartPoints = PortfolioChartBuilder.downsampled(
-                fullResolutionPoints,
-                maximumCount: 90
-            )
-            chartValueDomain = chartYDomain(for: fullResolutionPoints)
+            loadedChartPrices = prices
+            loadedChartRequestID = chartRequestID(for: visibleTransactions)
+            updatePortfolioChart(transactions: applicableTransactions)
             chartLoadFailed = false
         } catch {
             guard !Task.isCancelled else { return }
@@ -1016,6 +1016,20 @@ struct PortfolioView: View {
             chartLoadFailed = true
         }
         isLoadingChart = false
+    }
+
+    private func updatePortfolioChart(transactions: [PortfolioTransaction]) {
+        let previousEndpoint = selectionChartPoints.last
+        let prices = ChartLivePriceSeries.points(
+            history: loadedChartPrices, quote: priceService.price(for: .usd), now: Date()
+        )
+        let fullResolutionPoints = PortfolioChartBuilder.points(transactions: transactions, prices: prices)
+        selectionChartPoints = fullResolutionPoints
+        chartPoints = PortfolioChartBuilder.downsampled(fullResolutionPoints, maximumCount: 90)
+        chartValueDomain = chartYDomain(for: fullResolutionPoints)
+        if let selectedChartPoint, selectedChartPoint == previousEndpoint {
+            self.selectedChartPoint = fullResolutionPoints.last
+        }
     }
 
     private func allHistoryDays(
@@ -1342,6 +1356,8 @@ struct KaspaPriceDetail: View {
     var onConverterModeChange: ((Bool) -> Void)?
 
     @State private var selectedRange: TimeRange = .day
+    @State private var loadedPriceHistory: [HistoricalPricePoint] = []
+    @State private var loadedPriceRange: TimeRange?
     @State private var points: [HistoricalPricePoint] = []
     @State private var selectedPoint: HistoricalPricePoint?
     @State private var isLoading = false
@@ -1480,6 +1496,10 @@ struct KaspaPriceDetail: View {
         }
         .task(id: "\(selectedRange.rawValue):\(priceService.historyRevision)") {
             await loadHistory()
+        }
+        .onChange(of: priceService.prices[.usd]) { _, _ in
+            guard loadedPriceRange == selectedRange else { return }
+            updatePriceChart()
         }
     }
 
@@ -1983,22 +2003,16 @@ struct KaspaPriceDetail: View {
     }
 
     private func loadHistory() async {
+        loadedPriceRange = nil
         isLoading = true
         loadFailed = false
         selectedPoint = nil
         do {
-            let loaded = try await priceService.cachedHistoricalUSDPrices(days: selectedRange.days)
+            let loaded = try await priceService.cachedHistoricalUSDPrices(days: selectedRange.days, includeCurrentPrice: false)
             guard !Task.isCancelled else { return }
-            let sampled = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
-            points = sampled
-            chartPriceDomain = calculatedPriceDomain(for: loaded)
-            if let first = loaded.first?.priceUSD,
-               let last = loaded.last?.priceUSD,
-               first > 0 {
-                rangeChange = ((last - first) / first) * 100
-            } else {
-                rangeChange = nil
-            }
+            loadedPriceHistory = loaded
+            loadedPriceRange = selectedRange
+            updatePriceChart()
             loadFailed = false
         } catch {
             guard !Task.isCancelled else { return }
@@ -2008,6 +2022,23 @@ struct KaspaPriceDetail: View {
             loadFailed = true
         }
         isLoading = false
+    }
+
+    private func updatePriceChart() {
+        let previousEndpoint = points.last
+        let loaded = ChartLivePriceSeries.points(
+            history: loadedPriceHistory, quote: priceService.price(for: .usd), now: Date()
+        )
+        points = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
+        chartPriceDomain = calculatedPriceDomain(for: loaded)
+        if let first = loaded.first?.priceUSD, let last = loaded.last?.priceUSD, first > 0 {
+            rangeChange = ((last - first) / first) * 100
+        } else {
+            rangeChange = nil
+        }
+        if let selectedPoint, selectedPoint == previousEndpoint {
+            self.selectedPoint = points.last
+        }
     }
 
     private func nearestPoint(to date: Date) -> HistoricalPricePoint? {

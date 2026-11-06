@@ -3793,3 +3793,42 @@ final class PortfolioCalculationsTests: XCTestCase {
         )
     }
 }
+
+
+extension PortfolioCalculationsTests {
+    func testLiveChartQuoteRefreshPreservesHistoryWithoutAccumulatingEndpoints() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let history = [
+            HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
+            HistoricalPricePoint(timestamp: start.addingTimeInterval(60), priceUSD: 0.03)
+        ]
+        let first = ChartLivePriceSeries.points(history: history, quote: 0.04, now: start.addingTimeInterval(120))
+        let refreshed = ChartLivePriceSeries.points(history: history, quote: 0.05, now: start.addingTimeInterval(180))
+        XCTAssertEqual(Array(first.dropLast()), history)
+        XCTAssertEqual(Array(refreshed.dropLast()), history)
+        XCTAssertEqual(refreshed.count, 3)
+        XCTAssertEqual(refreshed.last?.priceUSD, 0.05)
+        XCTAssertEqual((refreshed.last!.priceUSD / refreshed.first!.priceUSD - 1) * 100, 150, accuracy: 0.000001)
+    }
+
+    func testLiveChartQuoteUpdatesPortfolioValueUsingCurrentHoldings() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let buy = PortfolioTransaction(portfolioID: UUID(), type: "Buy", kasAmount: 100,
+            kasPriceUSD: 0.02, timestamp: start.addingTimeInterval(-60), notes: "")
+        let history = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02)]
+        let prices = ChartLivePriceSeries.points(history: history, quote: 0.04, now: start.addingTimeInterval(60))
+        let values = PortfolioChartBuilder.points(transactions: [buy], prices: prices)
+        XCTAssertEqual(values.first?.valueUSD, 2)
+        XCTAssertEqual(values.last?.valueUSD, 4)
+    }
+
+    func testInvalidLiveChartQuotesDoNotReplaceValidHistory() {
+        let now = Date()
+        let history = [HistoricalPricePoint(timestamp: now.addingTimeInterval(-60), priceUSD: 0.02)]
+        let quotes: [Double?] = [nil, 0, -1, .nan, .infinity]
+        for quote in quotes {
+            XCTAssertEqual(ChartLivePriceSeries.points(history: history, quote: quote, now: now), history)
+        }
+        XCTAssertEqual(ChartLivePriceSeries.points(history: [], quote: 0.03, now: now).count, 1)
+    }
+}

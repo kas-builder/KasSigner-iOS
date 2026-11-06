@@ -104,10 +104,10 @@ final class PriceService: ObservableObject {
         return try historicalUSDPricesFromCache(requestedDays: requestedDays)
     }
 
-    func cachedHistoricalUSDPrices(days: String) async throws -> [HistoricalPricePoint] {
+    func cachedHistoricalUSDPrices(days: String, includeCurrentPrice: Bool = true) async throws -> [HistoricalPricePoint] {
         await prepareHistoricalPrices()
         let requestedDays = max(1, Int(days) ?? 1)
-        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays)
+        let points = try historicalUSDPricesFromCache(requestedDays: requestedDays, includeCurrentPrice: includeCurrentPrice)
 
         Task { @MainActor [weak self] in
             await self?.refreshHistoricalPricesIfNeeded(requestedDays: requestedDays)
@@ -116,7 +116,8 @@ final class PriceService: ObservableObject {
     }
 
     private func historicalUSDPricesFromCache(
-        requestedDays: Int
+        requestedDays: Int,
+        includeCurrentPrice: Bool = true
     ) throws -> [HistoricalPricePoint] {
         guard let historicalDiskCache else {
             throw PriceError.invalidResponse
@@ -151,12 +152,13 @@ final class PriceService: ObservableObject {
             }
         }
 
-        if let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
+        if includeCurrentPrice, let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
             points.append(HistoricalPricePoint(timestamp: Date(), priceUSD: currentUSD))
         }
         points = normalizedHistoricalPoints(points)
 
-        guard !points.isEmpty else {
+        let hasCurrentPrice = prices[.usd].map { $0.isFinite && $0 > 0 } ?? false
+        guard !points.isEmpty || (!includeCurrentPrice && hasCurrentPrice) else {
             throw PriceError.invalidResponse
         }
         return points
