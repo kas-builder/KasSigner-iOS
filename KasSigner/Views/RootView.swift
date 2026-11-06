@@ -1229,6 +1229,7 @@ struct UTXOsView: View {
     @EnvironmentObject private var priceService: PriceService
     @Environment(\.openURL) private var openURL
 
+    @State private var portfolioQuickAdd: UTXOPortfolioQuickAddRequest?
     @State private var editingLabelUTXOID: String?
     @State private var draftLabel = ""
     @State private var isLabelEditorPresented = false
@@ -1291,7 +1292,11 @@ struct UTXOsView: View {
             }
             .onChange(of: walletStore.selectedProfileID) { _, newValue in
                 dismissLabelEditor()
+                portfolioQuickAdd = nil
                 coinControlStore.activate(profile: walletStore.selectedProfile)
+            }
+            .sheet(item: $portfolioQuickAdd) { request in
+                UTXOPortfolioQuickAddView(request: request)
             }
             .overlay {
                 if isLabelEditorPresented,
@@ -1354,7 +1359,28 @@ struct UTXOsView: View {
                         Spacer()
 
                         VStack(alignment: .trailing, spacing: 3) {
-                            kycStatusMenu(for: utxo, status: kycStatus)
+                            HStack(spacing: 8) {
+                                Button {
+                                    guard let profile = walletStore.selectedProfile else { return }
+                                    portfolioQuickAdd = UTXOPortfolioQuickAddRequest(
+                                        utxo: utxo, profile: profile,
+                                        notes: coinControlStore.label(for: utxo),
+                                        date: walletStore.transactions.first {
+                                            $0.profileID == profile.id && $0.transactionID.lowercased() == utxo.txID.lowercased()
+                                        }?.broadcastAt
+                                    )
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.body.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                        .scaleEffect(0.9)
+                                        .frame(minWidth: 32, minHeight: 32)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(SubtlePressButtonStyle())
+                                .accessibilityLabel("Add UTXO to portfolio")
+                                kycStatusMenu(for: utxo, status: kycStatus)
+                            }
 
                             Text(utxoTypeLabel(for: utxo))
                                 .font(.subheadline.monospacedDigit())

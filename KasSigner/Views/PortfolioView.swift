@@ -2272,8 +2272,12 @@ private struct PortfolioTransactionEditor: View {
     let transaction: PortfolioTransaction?
     let availableHoldingsByPortfolio: [UUID: Double]
     let accentColor: Color
-    let onSave: (PortfolioTransactionDraft) -> Void
+    let onSave: (PortfolioTransactionDraft) throws -> Void
+    let quickAdd: UTXOPortfolioQuickAddRequest?
 
+    @State private var dateConfirmed = false
+    @State private var saveError: String?
+    @State private var priceLookupFinished = false
     @State private var portfolioID: UUID?
     @State private var transactionType: PortfolioTransactionType = .buy
     @State private var kasAmount: Double?
@@ -2289,7 +2293,8 @@ private struct PortfolioTransactionEditor: View {
         transaction: PortfolioTransaction? = nil,
         availableHoldingsByPortfolio: [UUID: Double],
         accentColor: Color,
-        onSave: @escaping (PortfolioTransactionDraft) -> Void
+        quickAdd: UTXOPortfolioQuickAddRequest? = nil,
+        onSave: @escaping (PortfolioTransactionDraft) throws -> Void
     ) {
         self.accounts = accounts
         self.initialPortfolioID = initialPortfolioID
@@ -2297,15 +2302,17 @@ private struct PortfolioTransactionEditor: View {
         self.availableHoldingsByPortfolio = availableHoldingsByPortfolio
         self.accentColor = accentColor
         self.onSave = onSave
+        self.quickAdd = quickAdd
+        _dateConfirmed = State(initialValue: quickAdd == nil || quickAdd?.date != nil)
         _portfolioID = State(initialValue: transaction?.portfolioID ?? initialPortfolioID ?? accounts.first?.id)
         _transactionType = State(
             initialValue: transaction.flatMap { PortfolioTransactionType(rawValue: $0.type) } ?? .buy
         )
-        _kasAmount = State(initialValue: transaction?.kasAmount)
+        _kasAmount = State(initialValue: transaction?.kasAmount ?? quickAdd?.utxo.amountKas)
         _kasPriceUSD = State(initialValue: transaction?.kasPriceUSD)
         _feeUSD = State(initialValue: transaction?.feeUSD ?? 0)
-        _timestamp = State(initialValue: transaction?.timestamp ?? Date())
-        _notes = State(initialValue: transaction?.notes ?? "")
+        _timestamp = State(initialValue: transaction?.timestamp ?? quickAdd?.date ?? Date())
+        _notes = State(initialValue: transaction?.notes ?? quickAdd?.notes ?? "")
         _hasEditedPrice = State(initialValue: transaction != nil)
     }
 
@@ -2363,6 +2370,16 @@ private struct PortfolioTransactionEditor: View {
                         .keyboardType(.decimalPad)
                     }
 
+                    if quickAdd != nil, priceLookupFinished,
+                       transactionType == .buy || transactionType == .sell,
+                       (kasPriceUSD ?? 0) <= 0 {
+                        Text("Price unavailable. Enter the KAS price manually.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    if let saveError {
+                        Text(saveError).font(.footnote).foregroundStyle(.red)
+                    }
                     LabeledContent("Total Value", value: totalValueText)
 
                     if exceedsAvailableHoldings {
@@ -2373,6 +2390,12 @@ private struct PortfolioTransactionEditor: View {
                 }
 
                 Section("Date & Time") {
+                    if quickAdd != nil, quickAdd?.date == nil {
+                        Text("Transaction date unavailable. Choose the date and time, then confirm below.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Toggle("Use selected date and time", isOn: $dateConfirmed)
+                    }
                     DatePicker(
                         "Date",
                         selection: $timestamp,
@@ -2403,18 +2426,22 @@ private struct PortfolioTransactionEditor: View {
                     Button("Save") {
                         guard let portfolioID, let kasAmount else { return }
                         let savedPrice = kasPriceUSD ?? 0
-                        onSave(
-                            PortfolioTransactionDraft(
-                                portfolioID: portfolioID,
-                                type: transactionType,
-                                kasAmount: kasAmount,
-                                kasPriceUSD: savedPrice,
-                                feeUSD: max(0, feeUSD),
-                                timestamp: timestamp,
-                                notes: notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                        do {
+                            try onSave(
+                                PortfolioTransactionDraft(
+                                    portfolioID: portfolioID,
+                                    type: transactionType,
+                                    kasAmount: kasAmount,
+                                    kasPriceUSD: savedPrice,
+                                    feeUSD: max(0, feeUSD),
+                                    timestamp: timestamp,
+                                    notes: notes.trimmingCharacters(in: .whitespacesAndNewlines)
+                                )
                             )
-                        )
-                        dismiss()
+                            dismiss()
+                        } catch {
+                            saveError = "Could not save the transaction. Please try again."
+                        }
                     }
                     .disabled(!canSave)
                 }
@@ -2443,7 +2470,7 @@ private struct PortfolioTransactionEditor: View {
     }
 
     private var canSave: Bool {
-        guard portfolioID != nil, let kasAmount else { return false }
+        guard dateConfirmed, portfolioID != nil, let kasAmount else { return false }
         let hasValidPrice = transactionType == .transferIn || transactionType == .transferOut ||
             (kasPriceUSD ?? 0) > 0
         return kasAmount > 0 && hasValidPrice && !exceedsAvailableHoldings
@@ -2491,6 +2518,8 @@ private struct PortfolioTransactionEditor: View {
     }
 
     private func populateAutomaticPriceIfNeeded() async {
+        priceLookupFinished = false
+        defer { priceLookupFinished = true }
         guard !hasEditedPrice else { return }
 
         let requestedTimestamp = timestamp
@@ -2617,6 +2646,125 @@ private struct PortfolioAccountEditor: View {
         case "orange": .orange
         case "red", "purple": .red
         default: Color(red: 0.20, green: 0.62, blue: 0.57)
+        }
+    }
+}
+
+
+struct UTXOPortfolioQuickAddRequest: Identifiable {
+    let id = UUID()
+    let utxo: WalletUTXO
+    let profile: WalletProfile
+    let notes: String
+    var date: Date?
+}
+
+struct UTXOPortfolioQuickAddView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @Query(sort: \PortfolioAccount.createdAt) private var accounts: [PortfolioAccount]
+    @Query private var transactions: [PortfolioTransaction]
+    let request: UTXOPortfolioQuickAddRequest
+    @State private var prepared: UTXOPortfolioQuickAddRequest?
+    @State private var selectedID: UUID?
+    @State private var loading = true
+
+    private var teal: Color { Color(red: 0.18, green: 0.68, blue: 0.62) }
+
+    var body: some View {
+        Group {
+            if let prepared, let selectedID,
+               let account = accounts.first(where: { $0.id == selectedID }) {
+                PortfolioTransactionEditor(
+                    accounts: accounts, initialPortfolioID: selectedID,
+                    availableHoldingsByPortfolio: Dictionary(uniqueKeysWithValues: accounts.map { account in
+                        (account.id, PortfolioHoldingSummary(transactions: transactions.filter {
+                            $0.portfolioID == account.id
+                        }).holdings)
+                    }),
+                    accentColor: color(for: account), quickAdd: prepared
+                ) { draft in
+                    guard accounts.contains(where: { $0.id == draft.portfolioID }) else {
+                        throw CocoaError(.validationMissingMandatoryProperty)
+                    }
+                    let entry = PortfolioTransaction(
+                        portfolioID: draft.portfolioID, type: draft.type.rawValue,
+                        kasAmount: draft.kasAmount, kasPriceUSD: draft.kasPriceUSD,
+                        timestamp: draft.timestamp, notes: draft.notes, feeUSD: draft.feeUSD
+                    )
+                    modelContext.insert(entry)
+                    do { try modelContext.save() }
+                    catch { modelContext.delete(entry); throw error }
+                }
+            } else {
+                NavigationStack {
+                    List {
+                        if accounts.isEmpty {
+                            Text("No portfolios available. Create a portfolio in the Portfolio tab first.")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            ForEach(accounts) { account in
+                                Button {
+                                    selectedID = account.id
+                                } label: {
+                                    Label(account.name, systemImage: account.iconName)
+                                        .foregroundStyle(color(for: account))
+                                }
+                                .disabled(loading)
+                            }
+                        }
+                        if loading, !accounts.isEmpty {
+                            ProgressView("Looking up transaction date…")
+                        }
+                    }
+                    .navigationTitle("Select Portfolio")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { dismiss() }
+                        }
+                    }
+                }
+                .tint(teal)
+            }
+        }
+        .presentationDetents(
+            prepared != nil && accounts.contains(where: { $0.id == selectedID })
+                ? [.large] : [.fraction(0.4)]
+        )
+        .task {
+            var result = request
+            if result.date == nil, !accounts.isEmpty,
+               let network = KaspaNetwork(rawValue: request.profile.network.lowercased()) {
+                do {
+                    let (data, response) = try await URLSession.shared.data(for:
+                        KaspaIndexerAPI.transaction(id: request.utxo.txID, network: network))
+                    guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                        throw URLError(.badServerResponse)
+                    }
+                    let transaction = try JSONDecoder().decode(IndexedTransaction.self, from: data)
+                    guard transaction.transactionID?.lowercased() == request.utxo.txID.lowercased(),
+                          let milliseconds = transaction.acceptingBlockTime ?? transaction.blockTime,
+                          milliseconds > 0 else { throw URLError(.cannotParseResponse) }
+                    result.date = Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+                } catch {
+                    // The shared editor requires explicit date confirmation when lookup fails.
+                    result.date = nil
+                }
+            }
+            guard !Task.isCancelled else { return }
+            prepared = result
+            loading = false
+        }
+    }
+
+    private func color(for account: PortfolioAccount) -> Color {
+        switch account.accentName {
+        case "blue": .blue
+        case "indigo": .indigo
+        case "orange": .orange
+        case "red", "purple": .red
+        default: teal
         }
     }
 }
