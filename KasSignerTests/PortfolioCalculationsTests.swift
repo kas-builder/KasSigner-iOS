@@ -3802,8 +3802,8 @@ extension PortfolioCalculationsTests {
             HistoricalPricePoint(timestamp: start, priceUSD: 0.02),
             HistoricalPricePoint(timestamp: start.addingTimeInterval(60), priceUSD: 0.03)
         ]
-        let first = ChartLivePriceSeries.points(history: history, quote: 0.04, now: start.addingTimeInterval(120))
-        let refreshed = ChartLivePriceSeries.points(history: history, quote: 0.05, now: start.addingTimeInterval(180))
+        let first = ChartLivePriceSeries.points(history: history, quote: 0.04, quoteTimestamp: start.addingTimeInterval(120))
+        let refreshed = ChartLivePriceSeries.points(history: history, quote: 0.05, quoteTimestamp: start.addingTimeInterval(180))
         XCTAssertEqual(Array(first.dropLast()), history)
         XCTAssertEqual(Array(refreshed.dropLast()), history)
         XCTAssertEqual(refreshed.count, 3)
@@ -3816,7 +3816,7 @@ extension PortfolioCalculationsTests {
         let buy = PortfolioTransaction(portfolioID: UUID(), type: "Buy", kasAmount: 100,
             kasPriceUSD: 0.02, timestamp: start.addingTimeInterval(-60), notes: "")
         let history = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02)]
-        let prices = ChartLivePriceSeries.points(history: history, quote: 0.04, now: start.addingTimeInterval(60))
+        let prices = ChartLivePriceSeries.points(history: history, quote: 0.04, quoteTimestamp: start.addingTimeInterval(60))
         let values = PortfolioChartBuilder.points(transactions: [buy], prices: prices)
         XCTAssertEqual(values.first?.valueUSD, 2)
         XCTAssertEqual(values.last?.valueUSD, 4)
@@ -3827,8 +3827,33 @@ extension PortfolioCalculationsTests {
         let history = [HistoricalPricePoint(timestamp: now.addingTimeInterval(-60), priceUSD: 0.02)]
         let quotes: [Double?] = [nil, 0, -1, .nan, .infinity]
         for quote in quotes {
-            XCTAssertEqual(ChartLivePriceSeries.points(history: history, quote: quote, now: now), history)
+            XCTAssertEqual(ChartLivePriceSeries.points(history: history, quote: quote, quoteTimestamp: now), history)
         }
-        XCTAssertEqual(ChartLivePriceSeries.points(history: [], quote: 0.03, now: now).count, 1)
+        XCTAssertEqual(ChartLivePriceSeries.points(history: [], quote: 0.03, quoteTimestamp: now).count, 1)
+    }
+}
+
+
+extension PortfolioCalculationsTests {
+    func testSavedChartQuoteKeepsItsActualTimestamp() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let history = [HistoricalPricePoint(timestamp: start, priceUSD: 0.02)]
+        let savedAt = start.addingTimeInterval(60)
+        let first = ChartLivePriceSeries.points(history: history, quote: 0.03, quoteTimestamp: savedAt)
+        let reopened = ChartLivePriceSeries.points(history: history, quote: 0.03, quoteTimestamp: savedAt)
+        XCTAssertEqual(first, reopened)
+        XCTAssertEqual(reopened.last?.timestamp, savedAt)
+    }
+
+    func testSavedQuoteCannotReplaceNewerHistoryOrInventUnknownTimestamp() {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let history = [HistoricalPricePoint(timestamp: start, priceUSD: 0.04)]
+        XCTAssertEqual(ChartLivePriceSeries.points(history: history, quote: 0.03,
+            quoteTimestamp: start.addingTimeInterval(-60)), history)
+        XCTAssertEqual(ChartLivePriceSeries.points(history: history, quote: 0.03,
+            quoteTimestamp: nil), history)
+        let sameTime = ChartLivePriceSeries.points(history: history, quote: 0.05, quoteTimestamp: start)
+        XCTAssertEqual(sameTime.count, 1)
+        XCTAssertEqual(sameTime.last?.priceUSD, 0.05)
     }
 }

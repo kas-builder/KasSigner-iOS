@@ -307,10 +307,13 @@ private extension Array {
 /// Rebuild the live endpoint from an unchanged history snapshot, so quote
 /// refreshes neither accumulate synthetic history nor require a history fetch.
 enum ChartLivePriceSeries {
-    static func points(history: [HistoricalPricePoint], quote: Double?, now: Date) -> [HistoricalPricePoint] {
-        guard let quote, quote.isFinite, quote > 0 else { return history }
-        var result = history.filter { $0.timestamp < now }
-        result.append(HistoricalPricePoint(timestamp: now, priceUSD: quote))
+    static func points(history: [HistoricalPricePoint], quote: Double?, quoteTimestamp: Date?) -> [HistoricalPricePoint] {
+        guard let quote, quote.isFinite, quote > 0,
+              let quoteTimestamp, quoteTimestamp.timeIntervalSince1970.isFinite else { return history }
+        // A saved spot quote must not replace more recent historical data.
+        guard history.last.map({ quoteTimestamp >= $0.timestamp }) ?? true else { return history }
+        var result = history.filter { $0.timestamp < quoteTimestamp }
+        result.append(HistoricalPricePoint(timestamp: quoteTimestamp, priceUSD: quote))
         return result
     }
 }

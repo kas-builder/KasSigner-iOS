@@ -28,6 +28,28 @@ final class PriceService: ObservableObject {
     @Published private(set) var historyRevision = 0
     @Published private(set) var historicalRefreshWarning: String?
 
+    static let historyFallbackNotice = "CoinGecko is unavailable. Showing CoinPaprika price history."
+
+    var chartFreshnessMessage: String? {
+        chartFreshnessMessage(includingFallbackNotice: true)
+    }
+
+    func chartFreshnessMessage(includingFallbackNotice: Bool) -> String? {
+        var messages: [String] = []
+        if case .failed = state, let usd = prices[.usd], usd.isFinite, usd > 0 {
+            if let lastUpdated {
+                messages.append("Showing saved price. Updated \(lastUpdated.formatted(date: .abbreviated, time: .shortened)).")
+            } else {
+                messages.append("Showing saved price. Last update time unavailable.")
+            }
+        }
+        if let historicalRefreshWarning,
+           includingFallbackNotice || historicalRefreshWarning != Self.historyFallbackNotice {
+            messages.append(historicalRefreshWarning)
+        }
+        return messages.isEmpty ? nil : messages.joined(separator: "\n")
+    }
+
     private struct CachedPrices: Codable {
         let values: [String: Double]
         let provider: String
@@ -152,12 +174,12 @@ final class PriceService: ObservableObject {
             }
         }
 
-        if includeCurrentPrice, let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
-            points.append(HistoricalPricePoint(timestamp: Date(), priceUSD: currentUSD))
-        }
         points = normalizedHistoricalPoints(points)
+        if includeCurrentPrice {
+            points = ChartLivePriceSeries.points(history: points, quote: prices[.usd], quoteTimestamp: lastUpdated)
+        }
 
-        let hasCurrentPrice = prices[.usd].map { $0.isFinite && $0 > 0 } ?? false
+        let hasCurrentPrice = lastUpdated != nil && (prices[.usd].map { $0.isFinite && $0 > 0 } ?? false)
         guard !points.isEmpty || (!includeCurrentPrice && hasCurrentPrice) else {
             throw PriceError.invalidResponse
         }
@@ -304,7 +326,7 @@ final class PriceService: ObservableObject {
             ? nil
             : Date()
         historicalRefreshWarning = usedFallbackProvider
-            ? "CoinGecko is unavailable. Showing CoinPaprika price history."
+            ? Self.historyFallbackNotice
             : nil
         historyRevision += 1
     }
@@ -418,9 +440,9 @@ final class PriceService: ObservableObject {
             return HistoricalPricePoint(timestamp: timestamp, priceUSD: entry.price)
         }
 
-        if let currentUSD = prices[.usd], currentUSD.isFinite, currentUSD > 0 {
-            points.append(HistoricalPricePoint(timestamp: Date(), priceUSD: currentUSD))
-        }
+        points = ChartLivePriceSeries.points(
+            history: normalizedHistoricalPoints(points), quote: prices[.usd], quoteTimestamp: lastUpdated
+        )
 
         guard !points.isEmpty else {
             throw PriceError.invalidResponse

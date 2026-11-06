@@ -273,7 +273,7 @@ struct PortfolioView: View {
         .task(id: chartRequestID(for: snapshot.transactions)) {
             await loadChartHistory(transactions: snapshot.transactions)
         }
-        .onChange(of: priceService.prices[.usd]) { _, _ in
+        .onChange(of: priceService.lastUpdated) { _, _ in
             guard loadedChartRequestID == chartRequestID(for: snapshot.transactions) else { return }
             updatePortfolioChart(transactions: snapshot.transactions)
         }
@@ -493,6 +493,7 @@ struct PortfolioView: View {
                     portfolioChart
                 }
             }
+            ChartFreshnessNote(priceService: priceService)
         }
         .padding()
         .background(
@@ -818,10 +819,12 @@ struct PortfolioView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
-        .padding(.vertical, 8)
     }
 
     private func themedIcon(_ systemImage: String) -> some View {
@@ -1021,7 +1024,7 @@ struct PortfolioView: View {
     private func updatePortfolioChart(transactions: [PortfolioTransaction]) {
         let previousEndpoint = selectionChartPoints.last
         let prices = ChartLivePriceSeries.points(
-            history: loadedChartPrices, quote: priceService.price(for: .usd), now: Date()
+            history: loadedChartPrices, quote: priceService.price(for: .usd), quoteTimestamp: priceService.lastUpdated
         )
         let fullResolutionPoints = PortfolioChartBuilder.points(transactions: transactions, prices: prices)
         selectionChartPoints = fullResolutionPoints
@@ -1463,6 +1466,7 @@ struct KaspaPriceDetail: View {
                     }
 
                     chartContent
+                    ChartFreshnessNote(priceService: priceService)
                 }
                 .padding()
                 .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1497,7 +1501,7 @@ struct KaspaPriceDetail: View {
         .task(id: "\(selectedRange.rawValue):\(priceService.historyRevision)") {
             await loadHistory()
         }
-        .onChange(of: priceService.prices[.usd]) { _, _ in
+        .onChange(of: priceService.lastUpdated) { _, _ in
             guard loadedPriceRange == selectedRange else { return }
             updatePriceChart()
         }
@@ -2027,7 +2031,7 @@ struct KaspaPriceDetail: View {
     private func updatePriceChart() {
         let previousEndpoint = points.last
         let loaded = ChartLivePriceSeries.points(
-            history: loadedPriceHistory, quote: priceService.price(for: .usd), now: Date()
+            history: loadedPriceHistory, quote: priceService.price(for: .usd), quoteTimestamp: priceService.lastUpdated
         )
         points = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
         chartPriceDomain = calculatedPriceDomain(for: loaded)
@@ -2797,6 +2801,35 @@ struct UTXOPortfolioQuickAddView: View {
         case "orange": .orange
         case "red", "purple": .red
         default: teal
+        }
+    }
+}
+
+
+private struct ChartFreshnessNote: View {
+    @ObservedObject var priceService: PriceService
+    @State private var fallbackNoticeExpired = false
+
+    var body: some View {
+        Group {
+            if let message = priceService.chartFreshnessMessage(includingFallbackNotice: !fallbackNoticeExpired) {
+                Text(message)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .task(id: priceService.historicalRefreshWarning) {
+            fallbackNoticeExpired = false
+            guard priceService.historicalRefreshWarning == PriceService.historyFallbackNotice else { return }
+            do {
+                try await Task.sleep(for: .seconds(4))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            fallbackNoticeExpired = true
         }
     }
 }
