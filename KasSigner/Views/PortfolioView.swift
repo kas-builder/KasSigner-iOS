@@ -1052,8 +1052,10 @@ struct PortfolioView: View {
         selectionChartPoints = fullResolutionPoints
         chartPoints = PortfolioChartBuilder.downsampled(fullResolutionPoints, maximumCount: 90)
         chartValueDomain = chartYDomain(for: fullResolutionPoints)
-        if let selectedChartPoint, selectedChartPoint == previousEndpoint {
-            self.selectedChartPoint = fullResolutionPoints.last
+        if let selectedChartPoint {
+            self.selectedChartPoint = selectedChartPoint == previousEndpoint
+                ? fullResolutionPoints.last
+                : PortfolioChartBuilder.selectedPoint(at: selectedChartPoint.timestamp, in: chartPoints)
         }
     }
 
@@ -1066,28 +1068,7 @@ struct PortfolioView: View {
     }
 
     private func nearestChartPoint(to date: Date) -> PortfolioChartPoint? {
-        guard !selectionChartPoints.isEmpty else { return nil }
-
-        var lowerBound = 0
-        var upperBound = selectionChartPoints.count
-        while lowerBound < upperBound {
-            let middle = (lowerBound + upperBound) / 2
-            if selectionChartPoints[middle].timestamp < date {
-                lowerBound = middle + 1
-            } else {
-                upperBound = middle
-            }
-        }
-
-        if lowerBound == 0 { return selectionChartPoints[0] }
-        if lowerBound == selectionChartPoints.count { return selectionChartPoints.last }
-
-        let previous = selectionChartPoints[lowerBound - 1]
-        let next = selectionChartPoints[lowerBound]
-        if abs(previous.timestamp.timeIntervalSince(date)) <= abs(next.timestamp.timeIntervalSince(date)) {
-            return previous
-        }
-        return next
+        PortfolioChartBuilder.selectedPoint(at: date, in: chartPoints)
     }
 
     private func chartSelectionTime(_ date: Date) -> String {
@@ -1383,6 +1364,7 @@ struct KaspaPriceDetail: View {
     @State private var selectedRange: TimeRange = .day
     @State private var priceCoverageMessage: String?
     @State private var loadedPriceHistory: [HistoricalPricePoint] = []
+    @State private var selectionPricePoints: [HistoricalPricePoint] = []
     @State private var loadedPriceRange: TimeRange?
     @State private var points: [HistoricalPricePoint] = []
     @State private var selectedPoint: HistoricalPricePoint?
@@ -1871,7 +1853,7 @@ struct KaspaPriceDetail: View {
 
     private var priceChart: some View {
         Chart {
-            ForEach(points) { point in
+            ForEach(PriceChartSelection.renderedPoints(sampled: points, selected: selectedPoint)) { point in
                 AreaMark(
                     x: .value("Time", point.timestamp),
                     yStart: .value("Baseline", priceDomain.lowerBound),
@@ -2052,6 +2034,7 @@ struct KaspaPriceDetail: View {
         } catch {
             guard !Task.isCancelled else { return }
             points = []
+            selectionPricePoints = []
             chartPriceDomain = 0...1
             rangeChange = nil
             loadFailed = true
@@ -2072,6 +2055,7 @@ struct KaspaPriceDetail: View {
             maximumGap: selectedRange == .day ? 2 * 60 * 60 : 36 * 60 * 60
         )
         let loaded = window.points
+        selectionPricePoints = loaded
         priceCoverageMessage = window.isComplete ? nil
             : "Price history is incomplete for this period. Change unavailable."
         points = PortfolioChartBuilder.downsampledPrices(loaded, maximumCount: 160)
@@ -2081,32 +2065,14 @@ struct KaspaPriceDetail: View {
         } else {
             rangeChange = nil
         }
-        if let selectedPoint, selectedPoint == previousEndpoint {
-            self.selectedPoint = points.last
+        if let selectedPoint {
+            self.selectedPoint = selectedPoint == previousEndpoint ? selectionPricePoints.last
+                : PriceChartSelection.nearestPoint(to: selectedPoint.timestamp, in: selectionPricePoints)
         }
     }
 
     private func nearestPoint(to date: Date) -> HistoricalPricePoint? {
-        guard !points.isEmpty else { return nil }
-
-        var lowerBound = 0
-        var upperBound = points.count
-        while lowerBound < upperBound {
-            let middle = (lowerBound + upperBound) / 2
-            if points[middle].timestamp < date {
-                lowerBound = middle + 1
-            } else {
-                upperBound = middle
-            }
-        }
-
-        if lowerBound == 0 { return points[0] }
-        if lowerBound == points.count { return points.last }
-
-        let previous = points[lowerBound - 1]
-        let next = points[lowerBound]
-        return abs(previous.timestamp.timeIntervalSince(date))
-            <= abs(next.timestamp.timeIntervalSince(date)) ? previous : next
+        PriceChartSelection.nearestPoint(to: date, in: selectionPricePoints)
     }
 
     private func axisDate(_ date: Date) -> String {
@@ -2865,7 +2831,7 @@ private struct ChartFreshnessNote: View {
             fallbackNoticeExpired = false
             guard priceService.historicalRefreshWarning == PriceService.historyFallbackNotice else { return }
             do {
-                try await Task.sleep(for: .seconds(4))
+                try await Task.sleep(for: .seconds(2))
             } catch {
                 return
             }

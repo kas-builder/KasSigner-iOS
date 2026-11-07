@@ -2428,7 +2428,14 @@ final class PortfolioCalculationsTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(points.map(\.valueUSD), [2, 3, 2.4])
+        XCTAssertEqual(points.count, 5)
+        for (actual, expected) in zip(points.map(\.valueUSD), [2, 3, 3.5, 2.1, 2.4]) {
+            XCTAssertEqual(actual, expected, accuracy: 0.000001)
+        }
+        XCTAssertEqual(points[2].timestamp, baseDate.addingTimeInterval(150))
+        XCTAssertEqual(points[3].timestamp, baseDate.addingTimeInterval(150))
+        XCTAssertEqual(points[2].phase, .beforeTransaction)
+        XCTAssertEqual(points[3].phase, .afterTransaction)
     }
 
     func testChartValueDomainFollowsRealSpreadInsteadOfPortfolioMagnitude() {
@@ -3922,5 +3929,100 @@ extension PortfolioCalculationsTests {
             now: start.addingTimeInterval(86_400), maximumGap: 36 * 60 * 60)
         XCTAssertTrue(result.isComplete)
         XCTAssertEqual(result.points, prices)
+    }
+}
+
+extension PortfolioCalculationsTests {
+    func testPortfolioChartShowsEachTransactionTypeAtItsExactTime() {
+        for type in [PortfolioTransactionType.buy, .sell, .transferIn, .transferOut] {
+            let points = PortfolioChartBuilder.points(transactions: [
+                transaction(.buy, amount: 100, price: 0.01, offset: -10),
+                transaction(type, amount: 20, price: 0.01, offset: 50)
+            ], prices: [price(0.01, offset: 0), price(0.01, offset: 100)])
+            let expectedHoldings = type == .buy || type == .transferIn ? 120.0 : 80.0
+            XCTAssertEqual(points.count, 4)
+            XCTAssertEqual(Set(points.map(\.id)).count, points.count)
+            XCTAssertEqual(points[1].timestamp, baseDate.addingTimeInterval(50))
+            XCTAssertEqual(points[2].timestamp, baseDate.addingTimeInterval(50))
+            XCTAssertEqual(points[1].valueUSD, 1, accuracy: 0.000001)
+            XCTAssertEqual(points[2].valueUSD, expectedHoldings * 0.01, accuracy: 0.000001)
+            XCTAssertEqual(PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(49),
+                in: points)!.valueUSD, 1, accuracy: 0.000001)
+            XCTAssertEqual(PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(50),
+                in: points)!.valueUSD, expectedHoldings * 0.01, accuracy: 0.000001)
+        }
+    }
+
+    func testPortfolioChartGroupsSimultaneousTransactionsWithoutDuplicateIDs() {
+        let transactions = [
+            transaction(.buy, amount: 100, price: 0.01, offset: -10),
+            transaction(.buy, amount: 30, price: 0.01, offset: 50),
+            transaction(.sell, amount: 20, price: 0.01, offset: 50),
+            transaction(.transferIn, amount: 10, price: 0.01, offset: 50),
+            transaction(.transferOut, amount: 5, price: 0.01, offset: 50)
+        ]
+        let points = PortfolioChartBuilder.points(transactions: transactions,
+            prices: [price(0.01, offset: 0), price(0.01, offset: 50), price(0.01, offset: 100)])
+        XCTAssertEqual(points.count, 4)
+        XCTAssertEqual(Set(points.map(\.id)).count, points.count)
+        XCTAssertEqual(points[2].valueUSD, PortfolioHoldingSummary(transactions: transactions).holdings * 0.01,
+            accuracy: 0.000001)
+        XCTAssertEqual(points[1].phase, .beforeTransaction)
+        XCTAssertEqual(points[2].phase, .afterTransaction)
+    }
+
+    func testPortfolioDownsamplingPreservesEveryTransactionJumpAndSelection() {
+        let transactions = [transaction(.buy, amount: 100, price: 0.01, offset: -10)]
+            + (1...20).map { transaction(.buy, amount: 1, price: 0.01, offset: Double($0 * 10 + 5)) }
+        let prices = (0...250).map { price(0.01, offset: Double($0)) }
+        let full = PortfolioChartBuilder.points(transactions: transactions, prices: prices)
+        let sampled = PortfolioChartBuilder.downsampled(full, maximumCount: 10)
+        XCTAssertEqual(sampled.filter { $0.phase != .sample }, full.filter { $0.phase != .sample })
+        let before = PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(14.9), in: sampled)!
+        let after = PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(15), in: sampled)!
+        XCTAssertEqual(before.valueUSD, 1, accuracy: 0.000001)
+        XCTAssertEqual(after.valueUSD, 1.01, accuracy: 0.000001)
+    }
+
+    func testPortfolioSelectionFollowsPriceMovementBetweenTransactions() {
+        let points = PortfolioChartBuilder.points(transactions: [
+            transaction(.buy, amount: 100, price: 0.01, offset: -10),
+            transaction(.sell, amount: 100, price: 0.03, offset: 100)
+        ], prices: [price(0.01, offset: 0), price(0.03, offset: 100), price(0.04, offset: 200)])
+        XCTAssertEqual(PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(50),
+            in: points)!.valueUSD, 2, accuracy: 0.000001)
+        XCTAssertEqual(PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(100),
+            in: points)!.valueUSD, 0, accuracy: 0.000001)
+        XCTAssertEqual(PortfolioChartBuilder.selectedPoint(at: baseDate.addingTimeInterval(150),
+            in: points)!.valueUSD, 0, accuracy: 0.000001)
+    }
+}
+
+extension PortfolioCalculationsTests {
+    func testKASChartCanSelectHistorySampleOmittedFromReducedLine() {
+        let history = (0...500).map { price(0.01 + Double($0 % 17) / 10_000, offset: Double($0)) }
+        let sampled = PortfolioChartBuilder.downsampledPrices(history, maximumCount: 160)
+        let sampledIDs = Set(sampled.map(\.id))
+        let omitted = history.first { !sampledIDs.contains($0.id) }!
+        let selected = PriceChartSelection.nearestPoint(to: omitted.timestamp, in: history)
+        XCTAssertEqual(selected, omitted)
+        let rendered = PriceChartSelection.renderedPoints(sampled: sampled, selected: selected)
+        XCTAssertTrue(rendered.contains(omitted))
+        XCTAssertEqual(rendered.count, sampled.count + 1)
+        XCTAssertEqual(rendered.first, sampled.first)
+        XCTAssertEqual(rendered.last, sampled.last)
+        XCTAssertEqual(rendered.map(\.timestamp), rendered.map(\.timestamp).sorted())
+        XCTAssertEqual(PriceChartSelection.renderedPoints(sampled: sampled, selected: nil), sampled)
+    }
+
+    func testKASChartSelectionClampsEdgesAndResolvesTiesWithoutInventingPrices() {
+        let history = [price(0.01, offset: 0), price(0.03, offset: 100)]
+        XCTAssertNil(PriceChartSelection.nearestPoint(to: baseDate, in: []))
+        XCTAssertEqual(PriceChartSelection.nearestPoint(to: baseDate.addingTimeInterval(-10), in: history), history[0])
+        XCTAssertEqual(PriceChartSelection.nearestPoint(to: baseDate.addingTimeInterval(110), in: history), history[1])
+        XCTAssertEqual(PriceChartSelection.nearestPoint(to: baseDate.addingTimeInterval(50), in: history), history[0])
+        XCTAssertEqual(PriceChartSelection.nearestPoint(to: baseDate.addingTimeInterval(51), in: history), history[1])
+        XCTAssertEqual(PriceChartSelection.renderedPoints(sampled: history, selected: history[1]), history)
+        XCTAssertEqual(PriceChartSelection.renderedPoints(sampled: history, selected: price(0.05, offset: 200)), history)
     }
 }

@@ -83,10 +83,17 @@ struct PortfolioHoldingSummary {
 }
 
 struct PortfolioChartPoint: Identifiable, Equatable {
+    enum Phase: Hashable { case sample, beforeTransaction, afterTransaction }
+    struct ID: Hashable {
+        let timestamp: Date
+        let phase: Phase
+    }
+
     let timestamp: Date
     let valueUSD: Double
+    var phase: Phase = .sample
 
-    var id: Date { timestamp }
+    var id: ID { ID(timestamp: timestamp, phase: phase) }
 }
 
 enum PortfolioTransactionPriceResolver {
@@ -133,50 +140,62 @@ enum PortfolioChartBuilder {
         let orderedPrices = prices.sorted { $0.timestamp < $1.timestamp }
         guard !orderedPrices.isEmpty else { return [] }
 
+        let start = max(firstTransactionDate, orderedPrices[0].timestamp)
+        guard let end = orderedPrices.last?.timestamp, start <= end else { return [] }
+        let eventTimes = orderedTransactions.lazy.map(\.timestamp).filter { $0 >= start && $0 <= end }
+        let sampleTimes = orderedPrices.lazy.map(\.timestamp).filter { $0 >= start && $0 <= end }
+        let timeline = Set(Array(eventTimes) + Array(sampleTimes) + [start]).sorted()
         var transactionIndex = 0
         var holdings = 0.0
         var result: [PortfolioChartPoint] = []
 
-        func applyTransactions(through timestamp: Date) {
+        for timestamp in timeline {
+            guard let price = interpolatedPrice(at: timestamp, in: orderedPrices) else { continue }
+            // Seed the chart with all prior holdings before processing the
+            // transactions at this exact time in the existing accounting order.
             while transactionIndex < orderedTransactions.count,
-                  orderedTransactions[transactionIndex].timestamp <= timestamp {
-                holdings = holdingsAfterApplying(
-                    orderedTransactions[transactionIndex],
-                    to: holdings
-                )
+                  orderedTransactions[transactionIndex].timestamp < timestamp {
+                holdings = holdingsAfterApplying(orderedTransactions[transactionIndex], to: holdings)
                 transactionIndex += 1
             }
-        }
-
-        var firstPriceIndex = 0
-        if firstTransactionDate > orderedPrices[0].timestamp {
-            applyTransactions(through: firstTransactionDate)
-            if let startingPrice = interpolatedPrice(at: firstTransactionDate, in: orderedPrices) {
-                result.append(PortfolioChartPoint(
-                    timestamp: firstTransactionDate,
-                    valueUSD: holdings * startingPrice
-                ))
+            let previousHoldings = holdings
+            while transactionIndex < orderedTransactions.count,
+                  orderedTransactions[transactionIndex].timestamp == timestamp {
+                holdings = holdingsAfterApplying(orderedTransactions[transactionIndex], to: holdings)
+                transactionIndex += 1
             }
-            firstPriceIndex = orderedPrices.partitioningIndex {
-                $0.timestamp >= firstTransactionDate
-            }
-        }
-
-        for pricePoint in orderedPrices[firstPriceIndex...] {
-            applyTransactions(through: pricePoint.timestamp)
-            if result.last?.timestamp == pricePoint.timestamp {
-                result[result.count - 1] = PortfolioChartPoint(
-                    timestamp: pricePoint.timestamp,
-                    valueUSD: holdings * pricePoint.priceUSD
-                )
+            if timestamp > start && holdings != previousHoldings {
+                result.append(PortfolioChartPoint(timestamp: timestamp,
+                    valueUSD: previousHoldings * price, phase: .beforeTransaction))
+                result.append(PortfolioChartPoint(timestamp: timestamp,
+                    valueUSD: holdings * price, phase: .afterTransaction))
             } else {
-                result.append(PortfolioChartPoint(
-                    timestamp: pricePoint.timestamp,
-                    valueUSD: holdings * pricePoint.priceUSD
-                ))
+                result.append(PortfolioChartPoint(timestamp: timestamp, valueUSD: holdings * price))
             }
         }
         return result
+    }
+
+    /// Interpolate the rendered line while keeping transaction jumps discrete.
+    /// At a transaction's exact timestamp, use the holdings after the group.
+    static func selectedPoint(at date: Date, in points: [PortfolioChartPoint]) -> PortfolioChartPoint? {
+        guard let first = points.first, let last = points.last else { return nil }
+        if date < first.timestamp { return first }
+        if date >= last.timestamp { return last }
+        var low = 0
+        var high = points.count
+        while low < high {
+            let middle = (low + high) / 2
+            if points[middle].timestamp <= date { low = middle + 1 }
+            else { high = middle }
+        }
+        let previous = points[low - 1]
+        if previous.timestamp == date { return previous }
+        let next = points[low]
+        let fraction = date.timeIntervalSince(previous.timestamp)
+            / next.timestamp.timeIntervalSince(previous.timestamp)
+        return PortfolioChartPoint(timestamp: date,
+            valueUSD: previous.valueUSD + (next.valueUSD - previous.valueUSD) * fraction)
     }
 
     private static func holdingsAfterApplying(
@@ -251,7 +270,10 @@ enum PortfolioChartBuilder {
         }
 
         result.append(points[points.count - 1])
-        return result
+        let sampledIDs = Set(result.map(\.id))
+        // Preserve both sides of every holdings jump, even when this exceeds
+        // the ordinary sample budget. Reordering equal timestamps breaks steps.
+        return points.filter { sampledIDs.contains($0.id) || $0.phase != .sample }
     }
 
     static func downsampledPrices(
@@ -354,5 +376,46 @@ enum ChartHistoryWindow {
             now.timeIntervalSince($0.timestamp) <= min(maximumGap, 6 * 60 * 60)
         } ?? false
         return Result(points: window, isComplete: hasBoundary && window.count >= 2 && !hasGaps && recentEnd)
+    }
+}
+
+
+/// Select real samples from full history while rendering a bounded price series.
+enum PriceChartSelection {
+    static func nearestPoint(to date: Date, in points: [HistoricalPricePoint]) -> HistoricalPricePoint? {
+        guard !points.isEmpty else { return nil }
+        let index = insertionIndex(for: date, in: points)
+        if index == 0 { return points[0] }
+        if index == points.count { return points.last }
+        let previous = points[index - 1]
+        let next = points[index]
+        return abs(previous.timestamp.timeIntervalSince(date)) <= abs(next.timestamp.timeIntervalSince(date))
+            ? previous : next
+    }
+
+    static func renderedPoints(sampled: [HistoricalPricePoint], selected: HistoricalPricePoint?) -> [HistoricalPricePoint] {
+        guard let selected, let first = sampled.first, let last = sampled.last,
+              selected.timestamp >= first.timestamp, selected.timestamp <= last.timestamp else { return sampled }
+        var result = sampled
+        let index = insertionIndex(for: selected.timestamp, in: result)
+        if index < result.count, result[index].timestamp == selected.timestamp {
+            result[index] = selected
+        } else {
+            // Include the selected real sample in the line and fill, so the
+            // marker shows its true price without floating off the reduced line.
+            result.insert(selected, at: index)
+        }
+        return result
+    }
+
+    private static func insertionIndex(for date: Date, in points: [HistoricalPricePoint]) -> Int {
+        var low = 0
+        var high = points.count
+        while low < high {
+            let middle = (low + high) / 2
+            if points[middle].timestamp < date { low = middle + 1 }
+            else { high = middle }
+        }
+        return low
     }
 }
