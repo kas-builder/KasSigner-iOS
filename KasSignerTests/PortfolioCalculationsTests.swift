@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
 import XCTest
+import SwiftUI
+import UIKit
 @testable import KasSigner
 
 final class StandardSendFeeTests: XCTestCase {
@@ -4024,5 +4026,69 @@ extension PortfolioCalculationsTests {
         XCTAssertEqual(PriceChartSelection.nearestPoint(to: baseDate.addingTimeInterval(51), in: history), history[1])
         XCTAssertEqual(PriceChartSelection.renderedPoints(sampled: history, selected: history[1]), history)
         XCTAssertEqual(PriceChartSelection.renderedPoints(sampled: history, selected: price(0.05, offset: 200)), history)
+    }
+}
+
+extension PortfolioCalculationsTests {
+    func testHistoricalAutofillRejectsDatesOutsideAvailablePrices() {
+        let now = baseDate.addingTimeInterval(30 * 86_400)
+        let history = [price(0.01, offset: 0), price(0.03, offset: 60)]
+        for offset in [-1.0, 61] {
+            XCTAssertNil(PortfolioTransactionPriceResolver.automaticPrice(
+                at: baseDate.addingTimeInterval(offset), now: now,
+                livePrice: 9.99, historicalPrices: history, calendar: utcCalendar))
+        }
+        XCTAssertNil(PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate, now: now, livePrice: 9.99, historicalPrices: [], calendar: utcCalendar))
+    }
+
+    func testHistoricalAutofillAcceptsExactSamplesButNotLargeGaps() {
+        let now = baseDate.addingTimeInterval(30 * 86_400)
+        let history = [price(0.01, offset: 0), price(0.03, offset: 3 * 86_400)]
+        XCTAssertEqual(PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate, now: now, livePrice: 9.99,
+            historicalPrices: history, calendar: utcCalendar), 0.01)
+        XCTAssertEqual(PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate.addingTimeInterval(3 * 86_400), now: now, livePrice: 9.99,
+            historicalPrices: history, calendar: utcCalendar), 0.03)
+        XCTAssertNil(PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate.addingTimeInterval(86_400), now: now, livePrice: 9.99,
+            historicalPrices: history, calendar: utcCalendar))
+    }
+
+    func testHistoricalAutofillSupportsDailyInterpolationAndRejectsInvalidSamples() {
+        let now = baseDate.addingTimeInterval(30 * 86_400)
+        let resolved = PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate.addingTimeInterval(12 * 60 * 60), now: now, livePrice: 9.99,
+            historicalPrices: [price(0.03, offset: 86_400), price(.nan, offset: 10), price(0.01, offset: 0)],
+            calendar: utcCalendar)
+        XCTAssertEqual(resolved!, 0.02, accuracy: 0.000001)
+        XCTAssertNil(PortfolioTransactionPriceResolver.automaticPrice(
+            at: baseDate, now: now, livePrice: 9.99,
+            historicalPrices: [price(.infinity, offset: 0)], calendar: utcCalendar))
+    }
+}
+
+
+extension PortfolioCalculationsTests {
+    @MainActor
+    func testPortfolioValueRowHeightRemainsStableWhileScrubbingDifferentAmounts() {
+        let widths: [CGFloat] = [320, 390, 430]
+        for width in widths {
+            for dynamicSize in [DynamicTypeSize.large, .xxxLarge, .accessibility2] {
+                var heights: [CGFloat] = []
+                for value in ["$0.00", "$123.45", "$1,234,567,890.00"] {
+                    let view = PortfolioValueRow(valueText: value, changeText: "+123.45%", changeColor: .green)
+                        .environment(\.dynamicTypeSize, dynamicSize)
+                    let host = UIHostingController(rootView: view)
+                    heights.append(host.sizeThatFits(in: CGSize(width: width, height: 1_000)).height)
+                }
+                XCTAssertGreaterThan(heights[0], 0)
+                for height in heights {
+                    XCTAssertEqual(height, heights[0], accuracy: 0.5,
+                        "Changing selected value must not move the surrounding cards.")
+                }
+            }
+        }
     }
 }

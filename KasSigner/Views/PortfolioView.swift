@@ -386,20 +386,11 @@ struct PortfolioView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                HStack(alignment: .center, spacing: 10) {
-                    Text(displayedPortfolioValueText(summary: summary))
-                        .font(.system(.largeTitle, design: .rounded, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-
-                    Spacer(minLength: 4)
-
-                    Text(portfolioChangeText)
-                        .font(.title.weight(.semibold))
-                        .foregroundStyle(portfolioChangeColor)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                }
+                PortfolioValueRow(
+                    valueText: displayedPortfolioValueText(summary: summary),
+                    changeText: portfolioChangeText,
+                    changeColor: portfolioChangeColor
+                )
             }
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -545,25 +536,7 @@ struct PortfolioView: View {
                 )
                 .foregroundStyle(activePortfolioColor)
                 .symbolSize(55)
-                .annotation(
-                    position: .top,
-                    spacing: 10,
-                    overflowResolution: AnnotationOverflowResolution(
-                        x: .fit(to: .chart),
-                        y: .disabled
-                    )
-                ) {
-                    Text(chartSelectionTime(selectedChartPoint.timestamp))
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
-                        .overlay {
-                            Capsule()
-                                .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
-                        }
-                }
+
             }
         }
         .chartYScale(domain: chartValueDomain)
@@ -591,29 +564,52 @@ struct PortfolioView: View {
         }
         .chartOverlay { proxy in
             GeometryReader { geometry in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { gesture in
-                                guard let plotFrameAnchor = proxy.plotFrame else { return }
-                                let plotFrame = geometry[plotFrameAnchor]
-                                let xPosition = gesture.location.x - plotFrame.origin.x
-                                guard xPosition >= 0,
-                                      xPosition <= plotFrame.width,
-                                      let date: Date = proxy.value(atX: xPosition) else {
-                                    return
+                ZStack(alignment: .topLeading) {
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { gesture in
+                                    guard let plotFrameAnchor = proxy.plotFrame else { return }
+                                    let plotFrame = geometry[plotFrameAnchor]
+                                    let xPosition = gesture.location.x - plotFrame.origin.x
+                                    guard xPosition >= 0,
+                                          xPosition <= plotFrame.width,
+                                          let date: Date = proxy.value(atX: xPosition) else {
+                                        return
+                                    }
+                                    let nearestPoint = nearestChartPoint(to: date)
+                                    if nearestPoint != selectedChartPoint {
+                                        selectedChartPoint = nearestPoint
+                                    }
                                 }
-                                let nearestPoint = nearestChartPoint(to: date)
-                                if nearestPoint != selectedChartPoint {
-                                    selectedChartPoint = nearestPoint
+                                .onEnded { _ in
+                                    selectedChartPoint = nil
                                 }
-                            }
-                            .onEnded { _ in
-                                selectedChartPoint = nil
-                            }
-                    )
+                        )
+
+                    if let selectedChartPoint, let plotFrameAnchor = proxy.plotFrame,
+                       let x = proxy.position(forX: selectedChartPoint.timestamp),
+                       let y = proxy.position(forY: selectedChartPoint.valueUSD) {
+                        let plotFrame = geometry[plotFrameAnchor]
+                        ChartSelectionBubbleLayout(anchor: CGPoint(x: plotFrame.minX + x, y: plotFrame.minY + y)) {
+                            Text(chartSelectionTime(selectedChartPoint.timestamp))
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.8)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Color(uiColor: .secondarySystemBackground), in: Capsule())
+                                .overlay {
+                                    Capsule().stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                                }
+                        }
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .allowsHitTesting(false)
+                    }
+                }
             }
         }
         .frame(height: 250)
@@ -2413,10 +2409,10 @@ private struct PortfolioTransactionEditor: View {
                         .keyboardType(.decimalPad)
                     }
 
-                    if quickAdd != nil, priceLookupFinished,
+                    if priceLookupFinished,
                        transactionType == .buy || transactionType == .sell,
                        (kasPriceUSD ?? 0) <= 0 {
-                        Text("Price unavailable. Enter the KAS price manually.")
+                        Text("Price unavailable for this date. Enter the KAS price manually.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -2499,6 +2495,7 @@ private struct PortfolioTransactionEditor: View {
             .onChange(of: timestamp) { oldValue, newValue in
                 if oldValue != newValue {
                     hasEditedPrice = false
+                    kasPriceUSD = nil
                 }
             }
             .onChange(of: transactionType) { oldValue, newValue in
@@ -2564,6 +2561,9 @@ private struct PortfolioTransactionEditor: View {
         priceLookupFinished = false
         defer { priceLookupFinished = true }
         guard !hasEditedPrice else { return }
+        // Never retain a different date's automatic price while looking up a
+        // new one. Manual entries remain protected by hasEditedPrice.
+        kasPriceUSD = transactionType == .buy || transactionType == .sell ? nil : 0
 
         let requestedTimestamp = timestamp
         let now = Date()
@@ -2838,5 +2838,49 @@ private struct ChartFreshnessNote: View {
             guard !Task.isCancelled else { return }
             fallbackNoticeExpired = true
         }
+    }
+}
+
+
+/// Keep the headline's footprint stable as selected values change digit count.
+struct PortfolioValueRow: View {
+    let valueText: String
+    let changeText: String
+    let changeColor: Color
+    @ScaledMetric(relativeTo: .largeTitle) private var rowHeight: CGFloat = 41
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Text(valueText)
+                .font(.system(.largeTitle, design: .rounded, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+            Spacer(minLength: 4)
+            Text(changeText)
+                .font(.title.weight(.semibold))
+                .foregroundStyle(changeColor)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(height: rowHeight)
+    }
+}
+
+/// Position the selection bubble without contributing to Chart's plot layout.
+private struct ChartSelectionBubbleLayout: Layout {
+    let anchor: CGPoint
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let bubble = subviews.first else { return }
+        let size = bubble.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil))
+        let x = min(max(bounds.minX + anchor.x, bounds.minX + size.width / 2), bounds.maxX - size.width / 2)
+        let y = min(max(bounds.minY + anchor.y - 10 - size.height / 2,
+                        bounds.minY + size.height / 2), bounds.maxY - size.height / 2)
+        bubble.place(at: CGPoint(x: x, y: y), anchor: .center,
+                     proposal: ProposedViewSize(width: size.width, height: size.height))
     }
 }

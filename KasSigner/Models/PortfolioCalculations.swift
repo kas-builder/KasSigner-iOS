@@ -107,7 +107,23 @@ enum PortfolioTransactionPriceResolver {
         if calendar.isDate(timestamp, inSameDayAs: now) {
             return livePrice
         }
-        return PortfolioChartBuilder.interpolatedPrice(at: timestamp, in: historicalPrices)
+        let ordered = historicalPrices.filter { $0.priceUSD.isFinite && $0.priceUSD > 0 }
+            .sorted { $0.timestamp < $1.timestamp }
+        guard let first = ordered.first, let last = ordered.last,
+              timestamp >= first.timestamp, timestamp <= last.timestamp else { return nil }
+        var low = 0
+        var high = ordered.count
+        while low < high {
+            let middle = (low + high) / 2
+            if ordered[middle].timestamp < timestamp { low = middle + 1 }
+            else { high = middle }
+        }
+        if low < ordered.count, ordered[low].timestamp == timestamp { return ordered[low].priceUSD }
+        guard low > 0, low < ordered.count,
+              ordered[low].timestamp.timeIntervalSince(ordered[low - 1].timestamp) <= 36 * 60 * 60 else {
+            return nil
+        }
+        return PortfolioChartBuilder.interpolatedPrice(at: timestamp, in: ordered)
     }
 }
 
