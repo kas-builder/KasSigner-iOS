@@ -1221,6 +1221,19 @@ private struct WalletTabContextMenu: UIViewControllerRepresentable {
 }
 
 struct UTXOsView: View {
+    private enum SortOrder: String, CaseIterable, Identifiable {
+        case newest, amountHighest, amountLowest
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .newest: "Newest"
+            case .amountHighest: "Amount: Highest First"
+            case .amountLowest: "Amount: Lowest First"
+            }
+        }
+    }
+
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
@@ -1235,6 +1248,7 @@ struct UTXOsView: View {
     @State private var isLabelEditorPresented = false
     @State private var knownUTXOIDs: Set<String> = []
     @State private var newlyArrivedUTXOIDs: Set<String> = []
+    @AppStorage("kassigner.utxoDisplaySortByWallet.v1") private var savedSortOrdersJSON = "{}"
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -1261,7 +1275,7 @@ struct UTXOsView: View {
                     VStack(spacing: 0) {
                         ScrollView {
                             LazyVStack(spacing: 10) {
-                                ForEach(utxos) { utxo in
+                                ForEach(displayedUTXOs) { utxo in
                                     utxoCard(utxo, isNew: newlyArrivedUTXOIDs.contains(utxo.id))
                                 }
                             }
@@ -1277,6 +1291,23 @@ struct UTXOsView: View {
                 }
             }
             .navigationTitle("UTXOs")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Picker("Sort UTXOs", selection: Binding(get: { sortOrder }, set: saveSortOrder)) {
+                            ForEach(SortOrder.allCases) { order in
+                                Text(order.title).tag(order)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "line.3.horizontal.decrease")
+                    }
+                    .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
+                    .accessibilityLabel("Sort UTXOs")
+                    .accessibilityValue(sortOrder.title)
+                    .disabled(walletStore.selectedProfile == nil)
+                }
+            }
             .onAppear {
                 coinControlStore.activate(profile: walletStore.selectedProfile)
                 knownUTXOIDs = Set(utxos.map(\.id))
@@ -1332,6 +1363,41 @@ struct UTXOsView: View {
 
             return $0.index < $1.index
         }
+    }
+
+    private var savedSortOrders: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(savedSortOrdersJSON.utf8))) ?? [:]
+    }
+
+    private var sortOrder: SortOrder {
+        guard let profile = walletStore.selectedProfile,
+              let value = savedSortOrders[profile.stableIdentity],
+              let order = SortOrder(rawValue: value) else { return .newest }
+        return order
+    }
+
+    private func saveSortOrder(_ order: SortOrder) {
+        guard let profile = walletStore.selectedProfile else { return }
+        var choices = savedSortOrders
+        choices[profile.stableIdentity] = order.rawValue
+        guard let data = try? JSONEncoder().encode(choices),
+              let json = String(data: data, encoding: .utf8) else { return }
+        savedSortOrdersJSON = json
+    }
+
+    private var displayedUTXOs: [WalletUTXO] {
+        let order = sortOrder
+        guard order != .newest else { return utxos }
+        // Preserve the existing newest order for equal amounts. The original
+        // `utxos` array remains the source for change detection and card logic.
+        return utxos.enumerated().sorted {
+            if $0.element.amount != $1.element.amount {
+                return order == .amountHighest
+                    ? $0.element.amount > $1.element.amount
+                    : $0.element.amount < $1.element.amount
+            }
+            return $0.offset < $1.offset
+        }.map { $0.element }
     }
 
     private func utxoCard(_ utxo: WalletUTXO, isNew: Bool) -> some View {
