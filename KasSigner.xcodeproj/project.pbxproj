@@ -344,7 +344,7 @@
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
+				INFOPLIST_KEY_CFBundleDisplayName = "KasSigner-iOS";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner-iOS uses the camera to scan watch-only wallet data and signed transaction QR codes from M5Stack Cores3.";
@@ -416,7 +416,7 @@
 				DEVELOPMENT_TEAM = XGKP3E53F2;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CADisableMinimumFrameDurationOnPhone = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = KasSigner;
+				INFOPLIST_KEY_CFBundleDisplayName = "KasSigner-iOS";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSCameraUsageDescription = "KasSigner-iOS uses the camera to scan watch-only wallet data and signed transaction QR codes from M5Stack Cores3.";
