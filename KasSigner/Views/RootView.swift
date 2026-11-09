@@ -1234,6 +1234,20 @@ struct UTXOsView: View {
         }
     }
 
+    private enum StatusFilter: String, CaseIterable, Identifiable {
+        case all, kyc, nonKYC, unassigned
+
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .all: "All"
+            case .kyc: "KYC"
+            case .nonKYC: "Non-KYC"
+            case .unassigned: "Unassigned"
+            }
+        }
+    }
+
     @EnvironmentObject private var walletStore: WalletStore
     @EnvironmentObject private var engine: KasSignerEngine
     @EnvironmentObject private var syncService: WalletSyncService
@@ -1249,6 +1263,7 @@ struct UTXOsView: View {
     @State private var knownUTXOIDs: Set<String> = []
     @State private var newlyArrivedUTXOIDs: Set<String> = []
     @AppStorage("kassigner.utxoDisplaySortByWallet.v1") private var savedSortOrdersJSON = "{}"
+    @AppStorage("kassigner.utxoDisplayStatusByWallet.v1") private var savedStatusFiltersJSON = "{}"
 
     @FocusState private var labelEditorFocused: Bool
 
@@ -1274,13 +1289,21 @@ struct UTXOsView: View {
                 } else {
                     VStack(spacing: 0) {
                         ScrollView {
-                            LazyVStack(spacing: 10) {
-                                ForEach(displayedUTXOs) { utxo in
-                                    utxoCard(utxo, isNew: newlyArrivedUTXOIDs.contains(utxo.id))
+                            if displayedUTXOs.isEmpty {
+                                ContentUnavailableView(
+                                    "No Matching UTXOs",
+                                    systemImage: "line.3.horizontal.decrease",
+                                    description: Text("No UTXOs match the selected status.")
+                                )
+                            } else {
+                                LazyVStack(spacing: 10) {
+                                    ForEach(displayedUTXOs) { utxo in
+                                        utxoCard(utxo, isNew: newlyArrivedUTXOIDs.contains(utxo.id))
+                                    }
                                 }
+                                .padding(.horizontal, 14)
+                                .padding(.bottom, 20)
                             }
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 20)
                         }
                         .refreshable {
                             await refreshUTXOs()
@@ -1294,17 +1317,26 @@ struct UTXOsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        Picker("Sort UTXOs", selection: Binding(get: { sortOrder }, set: saveSortOrder)) {
-                            ForEach(SortOrder.allCases) { order in
-                                Text(order.title).tag(order)
+                        Section("Sort") {
+                            Picker("Sort UTXOs", selection: Binding(get: { sortOrder }, set: saveSortOrder)) {
+                                ForEach(SortOrder.allCases) { order in
+                                    Text(order.title).tag(order)
+                                }
+                            }
+                        }
+                        Section("Status") {
+                            Picker("Filter by Status", selection: Binding(get: { statusFilter }, set: saveStatusFilter)) {
+                                ForEach(StatusFilter.allCases) { filter in
+                                    Text(filter.title).tag(filter)
+                                }
                             }
                         }
                     } label: {
                         Image(systemName: "line.3.horizontal.decrease")
                     }
                     .tint(Color(red: 0.20, green: 0.62, blue: 0.57))
-                    .accessibilityLabel("Sort UTXOs")
-                    .accessibilityValue(sortOrder.title)
+                    .accessibilityLabel("Filter and Sort UTXOs")
+                    .accessibilityValue("\(sortOrder.title), \(statusFilter.title)")
                     .disabled(walletStore.selectedProfile == nil)
                 }
             }
@@ -1387,10 +1419,20 @@ struct UTXOsView: View {
 
     private var displayedUTXOs: [WalletUTXO] {
         let order = sortOrder
-        guard order != .newest else { return utxos }
+        let filter = statusFilter
+        let matching = utxos.filter {
+            let status = coinControlStore.kycStatus(for: $0)
+            switch filter {
+            case .all: return true
+            case .kyc: return status == .kyc
+            case .nonKYC: return status == .nonKYC
+            case .unassigned: return status == nil
+            }
+        }
+        guard order != .newest else { return matching }
         // Preserve the existing newest order for equal amounts. The original
         // `utxos` array remains the source for change detection and card logic.
-        return utxos.enumerated().sorted {
+        return matching.enumerated().sorted {
             if $0.element.amount != $1.element.amount {
                 return order == .amountHighest
                     ? $0.element.amount > $1.element.amount
@@ -1398,6 +1440,26 @@ struct UTXOsView: View {
             }
             return $0.offset < $1.offset
         }.map { $0.element }
+    }
+
+    private var savedStatusFilters: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: Data(savedStatusFiltersJSON.utf8))) ?? [:]
+    }
+
+    private var statusFilter: StatusFilter {
+        guard let profile = walletStore.selectedProfile,
+              let value = savedStatusFilters[profile.stableIdentity],
+              let filter = StatusFilter(rawValue: value) else { return .all }
+        return filter
+    }
+
+    private func saveStatusFilter(_ filter: StatusFilter) {
+        guard let profile = walletStore.selectedProfile else { return }
+        var choices = savedStatusFilters
+        choices[profile.stableIdentity] = filter.rawValue
+        guard let data = try? JSONEncoder().encode(choices),
+              let json = String(data: data, encoding: .utf8) else { return }
+        savedStatusFiltersJSON = json
     }
 
     private func utxoCard(_ utxo: WalletUTXO, isNew: Bool) -> some View {
